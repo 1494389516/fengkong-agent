@@ -319,10 +319,11 @@ def chart_account_timeline(uid: str):
 @tool(
     name="chart_threshold_sweep",
     description=(
-        "对单个规则阈值做扫描回测:逐个候选值跑 rule_backtest,画出 precision/"
-        "recall/F1 随阈值变化的曲线(PNG),返回文件路径、逐点指标表与 F1 最优值。"
-        "规则调参前先用它看指标对该参数的敏感度。param 可选:"
-        + ", ".join(SWEEP_DEFAULTS)
+        "对单个规则阈值做扫描回测:逐个候选值跑回测,画 precision/recall/F1 曲线 + "
+        "该规则自身命中数归因曲线(命中欺诈/误伤正常,右轴)。返回逐点指标表;"
+        "aggregate_insensitive=true 表示聚合指标全程无变化(参数作用被其他规则"
+        "遮蔽或无边界样本),此时没有 best 值,严禁宣称'最优阈值',应引用归因"
+        "曲线或建议换更大数据集。param 可选:" + ", ".join(SWEEP_DEFAULTS)
     ),
     parameters={
         "type": "object",
@@ -336,33 +337,75 @@ def chart_account_timeline(uid: str):
 )
 def chart_threshold_sweep(param: str, values: Optional[List[float]] = None):
     values = values or SWEEP_DEFAULTS[param]
+    # 参数命名约定 rNNN_* -> 所属规则:聚合指标之外必须看"该规则自己命中了谁"。
+    # 教训:小样本上其他规则(名单/指纹/金额)把欺诈账号全兜住,扫这条规则的
+    # 参数时聚合 F1 恒 1.0 —— 图一条平线还标着 best F1,等于宣称"随便设都最优"。
+    rule_id = param.split("_")[0].upper()
     rows = []
     for v in values:
         r = backtest({param: v})
         m = r["operating_points"]["flag=review+reject"]
-        rows.append({"value": v, "precision": m["precision"], "recall": m["recall"], "f1": m["f1"]})
+        per = list(r["per_account"].values())
+        rows.append({
+            "value": v, "precision": m["precision"], "recall": m["recall"], "f1": m["f1"],
+            # 归因:该规则命中的欺诈数(覆盖)与正常数(误伤)——聚合被遮蔽时
+            # 这两条曲线仍能显示参数的真实作用面
+            "rule_hits_fraud": sum(1 for a in per
+                                   if a["label"] == "fraud" and rule_id in a["rules"]),
+            "rule_hits_normal": sum(1 for a in per
+                                    if a["label"] == "normal" and rule_id in a["rules"]),
+        })
     df = pd.DataFrame(rows)
+    # 钝感检测:整条扫描线纹丝不动 = 参数作用被其他规则遮蔽,或数据集没有
+    # 该参数的边界样本。此时"最优值"是幻觉,必须显式说出来
+    flat = int(df[["precision", "recall", "f1"]].nunique().max()) == 1
 
     fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
     # x 用等距类目位置而非数值:扫描序列常跨数量级(5~600),数值轴会挤成一团
     x = range(len(df))
     for i, metric in enumerate(("precision", "recall", "f1")):
         ax.plot(x, df[metric], marker="o", ms=4, lw=2, color=PALETTE[i], label=metric)
-    best_i = int(df["f1"].idxmax())
-    ax.annotate("best F1=%.3f" % df.loc[best_i, "f1"], (best_i, df.loc[best_i, "f1"]),
-                textcoords="offset points", xytext=(0, 12), ha="center", fontsize=9)
+    ax2 = ax.twinx()
+    ax2.plot(x, df["rule_hits_fraud"], marker="s", ms=4, lw=1.6, ls="--", color="#7b1fa2",
+             label=_t("%s 命中欺诈(右轴)" % rule_id, "%s hits fraud (right)" % rule_id))
+    ax2.plot(x, df["rule_hits_normal"], marker="x", ms=6, lw=1.6, ls=":", color="#e07b00",
+             label=_t("%s 误伤正常(右轴)" % rule_id, "%s hits normal (right)" % rule_id))
+    ax2.set_ylabel(_t("%s 命中账号数" % rule_id, "%s hit accounts" % rule_id), fontsize=9)
+    ax2.set_ylim(bottom=0)
+    ax2.yaxis.get_major_locator().set_params(integer=True)
+    if flat:
+        ax.annotate(_t("聚合指标对该参数不敏感:作用被其他规则遮蔽或无边界样本\n"
+                       "以右轴规则归因曲线为准;勿据此选'最优阈值'",
+                       "aggregate metrics insensitive to this param\n(masked by other rules "
+                       "or no boundary cases); see rule-attribution curves"),
+                    (0.5, 0.55), xycoords="axes fraction", ha="center", fontsize=10,
+                    color="#b00020",
+                    bbox={"boxstyle": "round", "fc": "#fff3f3", "ec": "#b00020"})
+    else:
+        best_i = int(df["f1"].idxmax())
+        ax.annotate("best F1=%.3f" % df.loc[best_i, "f1"], (best_i, df.loc[best_i, "f1"]),
+                    textcoords="offset points", xytext=(0, 12), ha="center", fontsize=9)
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=8, loc="center right")
     ax.set_xticks(list(x), ["%g" % v for v in df["value"]])
     ax.set_xlabel(param)
     ax.set_ylim(-0.05, 1.1)
     ax.grid(axis="y", color="#eee")
-    ax.legend()
     ax.set_title(_t("阈值扫描:%s(口径 flag=review+reject)" % param,
                     "Threshold sweep: %s (flag=review+reject)" % param))
 
     path = _save(fig, "sweep_%s.png" % param)
-    best = rows[best_i]
-    return {"param": param, "chart_path": path, "rows": rows,
-            "best_by_f1": {"value": best["value"], "f1": best["f1"]}}
+    out = {"param": param, "rule_id": rule_id, "chart_path": path, "rows": rows,
+           "aggregate_insensitive": flat}
+    if flat:
+        out["note"] = ("聚合指标在整个扫描区间无变化:该参数的作用被其他规则遮蔽,"
+                       "或当前数据集没有它的边界样本。不存在'最优值';请看 rows 里"
+                       "rule_hits_* 归因,或换更大数据集(FK_DATASET=gen)再扫")
+    else:
+        best = rows[int(df["f1"].idxmax())]
+        out["best_by_f1"] = {"value": best["value"], "f1": best["f1"]}
+    return out
 
 
 def _labels() -> dict:

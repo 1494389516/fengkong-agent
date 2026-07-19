@@ -199,6 +199,9 @@ def run_gen_layer() -> int:
                        if a["label"] == "normal" and "R006" in a["rules"]]
             cal = registry.dispatch("threshold_calibrate", {"fpr_budget": 0.01})
             realized = cal.get("realized_fpr_normal_wide")
+            # 阈值扫描在带边界样本的大样本上必须有敏感度(慢速 bot / 重度用户
+            # 制造的张力),平线说明生成器的阈值张力设计坏了
+            sw = chart_threshold_sweep("r002_max_gap_seconds")
             # token 成本预算:在同一份大样本上量每个工具的典型返回,超限即红。
             # 教训:rule_backtest 的 per_account 曾单次 18k+ chars,② 的 dict
             # 限幅与工具面瘦身都是这里钉住的。
@@ -231,6 +234,9 @@ def run_gen_layer() -> int:
                 ("校准产出建议阈值", bool(cal.get("suggestions"))),
                 ("建议阈值实测误伤率 <= 5%", realized is not None and realized <= 0.05),
                 ("无参照快照时不误报漂移", cal.get("drift_alarm") is False),
+                ("阈值扫描有敏感度且归因到误伤增长",
+                 sw.get("aggregate_insensitive") is False
+                 and sw["rows"][-1]["rule_hits_normal"] > sw["rows"][0]["rule_hits_normal"]),
                 ("单工具结果 <= 5000 chars(最大: %s %d)" % biggest, biggest[1] <= 5000),
                 ("rule_backtest 已瘦身 <= 1500 chars(现 %d)" % sizes["rule_backtest"],
                  sizes["rule_backtest"] <= 1500),
@@ -526,6 +532,13 @@ def run_regression_layer() -> int:
         ("限速:数值键超幅仍被拒",
          bool(_limit_violations({"r002_min_events": 99}, cur))),
     ]
+
+    # -- 阈值扫描:小样本上聚合指标被其他规则遮蔽成平线,必须显式标注钝感、
+    #    不给伪 best(教训:曾输出一条 1.0 平线还标 "best F1=1.000")--
+    sw = chart_threshold_sweep("r002_max_gap_seconds")
+    checks.append(("阈值扫描:聚合钝感被显式标注且无伪 best",
+                   sw.get("aggregate_insensitive") is True
+                   and "best_by_f1" not in sw and bool(sw.get("note"))))
 
     # -- monitor:window_seconds=0 回落而非除零(信号不丢)--
     m = account_monitor("u_1002", window_seconds=0)
