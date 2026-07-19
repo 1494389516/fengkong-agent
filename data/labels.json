@@ -1,0 +1,9 @@
+{
+  "_comment": "账号级 ground truth,rule_backtest 用它算混淆矩阵与 P/R/F1。标签只有 fraud/normal 两档;换真实数据后按人工审核结论回填。",
+  "u_1001": {"label": "normal", "note": "正常购物用户对照组"},
+  "u_1002": {"label": "fraud", "note": "IP 轮换刷券脚本(3 秒间隔,5 IP)"},
+  "u_1003": {"label": "fraud", "note": "模拟器小额套现团伙成员"},
+  "u_1004": {"label": "fraud", "note": "模拟器小额套现团伙成员"},
+  "u_1005": {"label": "fraud", "note": "模拟器小额套现团伙成员"},
+  "u_1009": {"label": "fraud", "note": "确认盗号销赃(工单 #8841)"}
+}

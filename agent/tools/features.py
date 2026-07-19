@@ -1,46 +1,41 @@
 # -*- coding: utf-8 -*-
-"""特征计算工具:对 data/events_sample.json 的事件流做聚合统计。
+"""特征查询工具:featurelib 统一特征层的薄封装。
 
-骨架阶段用本地 JSON 模拟事件表;后续可替换为真实数仓/日志查询,
-只要保持返回结构不变,上层 agent 无感知。
+特征计算全部在 featurelib(单一事实源),本文件只负责注册工具 schema
+和补充反向基数摘要。骨架阶段数据来自本地 JSON,换真实数仓只改 datasource。
 """
-import json
-from collections import Counter
-from pathlib import Path
+from typing import Optional
 
 from . import tool
-
-DATA = Path(__file__).resolve().parent.parent.parent / "data" / "events_sample.json"
+from .featurelib import account_features, accounts_per
 
 
 @tool(
     name="feature_stats",
     description=(
-        "计算某个 uid 在事件样本里的行为特征:事件总数、去重 IP 数、去重设备数、"
-        "事件类型分布、最短事件间隔(秒)。用于判断机器行为/多账号/聚集性特征。"
+        "计算某个 uid 的行为特征:事件数、去重 IP/设备、事件类型分布、最短间隔、"
+        "订单统计(次数/最大/累计金额),以及反向基数(该账号的设备/IP 最多被"
+        "几个账号共用,>=3 是团伙信号)。"
+        "as_of_ts 取证时点(只统计该时刻之前的事件,评估历史事件时必传,防止"
+        "偷看未来);window_seconds 时间窗(只统计最近 N 秒,行为模式类判断用)。"
+        "两者都不传 = 全历史。"
     ),
     parameters={
         "type": "object",
         "properties": {
             "uid": {"type": "string", "description": "用户 ID"},
+            "as_of_ts": {"type": "number", "description": "取证时点(unix 秒),只统计此前事件"},
+            "window_seconds": {"type": "integer", "description": "时间窗大小(秒)"},
         },
         "required": ["uid"],
     },
 )
-def feature_stats(uid: str):
-    events = [e for e in json.loads(DATA.read_text(encoding="utf-8")) if e["uid"] == uid]
-    if not events:
-        return {"uid": uid, "found": False}
-    ts = sorted(e["ts"] for e in events)
-    gaps = [b - a for a, b in zip(ts, ts[1:])]
-    return {
-        "uid": uid,
-        "found": True,
-        "event_count": len(events),
-        "distinct_ip": len({e["ip"] for e in events}),
-        "distinct_device": len({e["device_id"] for e in events}),
-        "event_types": dict(Counter(e["type"] for e in events)),
-        "min_gap_seconds": min(gaps) if gaps else None,
-        "ips": sorted({e["ip"] for e in events}),
-        "devices": sorted({e["device_id"] for e in events}),
-    }
+def feature_stats(uid: str, as_of_ts: Optional[float] = None,
+                  window_seconds: Optional[int] = None):
+    r = account_features(uid, as_of_ts, window_seconds)
+    if r["found"]:
+        r["accounts_per_device_max"] = max(
+            (accounts_per("device_id", d, as_of_ts)["count"] for d in r["devices"]), default=0)
+        r["accounts_per_ip_max"] = max(
+            (accounts_per("ip", ip, as_of_ts)["count"] for ip in r["ips"]), default=0)
+    return r

@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
-"""名单查询工具:查 data/blacklist.json 里的黑/灰名单。"""
-import json
-from pathlib import Path
-
+"""名单查询工具:查当前数据集里的黑/灰名单。"""
 from . import tool
-
-DATA = Path(__file__).resolve().parent.parent.parent / "data" / "blacklist.json"
+from .datasource import load_blacklist
 
 
 @tool(
@@ -28,6 +24,5 @@ DATA = Path(__file__).resolve().parent.parent.parent / "data" / "blacklist.json"
     },
 )
 def blacklist_query(dimension: str, value: str):
-    records = json.loads(DATA.read_text(encoding="utf-8"))
-    hits = [r for r in records if r["dimension"] == dimension and r["value"] == value]
+    hits = [r for r in load_blacklist() if r["dimension"] == dimension and r["value"] == value]
     return {"hit": bool(hits), "records": hits}

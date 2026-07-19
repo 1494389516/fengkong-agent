@@ -9,6 +9,7 @@ MAX_TOOL_ROUNDS 防止模型陷入无限调工具的循环。
   ① 度量        —— 记录每次 resp.usage(含 DeepSeek 缓存命中/未命中),不测无法优化。
   ④ 工具裁剪    —— TOOL_KEEP_TURNS 之前的 tool 结果替换成占位符(结论已被 assistant 吸收)。
   ⑤ checkpoint  —— CHECKPOINT_EVERY 轮把旧历史压成一条摘要(代价最高,默认关)。
+  ⑥ 硬预算兜底  —— 发送前粗估上下文,超 CONTEXT_EST_TOKEN_BUDGET 强制压缩(保险丝)。
 (② 工具限幅在 tools/dispatch 单点做;③ 案例隔离用 reset(),由 CLI /reset 触发。)
 """
 import json
@@ -29,6 +30,12 @@ TRIM_PLACEHOLDER = "[已裁剪:早期工具结果,结论已并入后续分析]"
 # ⑤ checkpoint 摘要:每积累 N 次 ask 压缩一次旧历史。0 = 关闭(默认)。
 #   仅当"必须跨案例保留记忆、又不能 reset"时才开;否则优先用 ③ reset,更便宜也更缓存友好。
 CHECKPOINT_EVERY = 0
+
+# ⑥ 上下文硬预算兜底:发送前粗估上下文 token(json 字符数 / 2,中文约 1 token/字、
+#   英文约 4 字符/token,取偏保守估计),超限强制压缩一次旧历史。
+#   这是保险丝不是常规手段:正常应先被 ③ reset / ④ 裁剪控制住;触发说明单案例
+#   对话已经过长,压缩虽会打断缓存前缀,但比撑爆上下文窗口或费用失控强。0 = 关闭。
+CONTEXT_EST_TOKEN_BUDGET = 24000
 
 
 def _extract_usage(resp) -> Dict[str, int]:
@@ -102,15 +109,20 @@ class Agent:
             if m["role"] == "tool" and m["content"] != TRIM_PLACEHOLDER:
                 m["content"] = TRIM_PLACEHOLDER
 
-    # ⑤ 把 system 之后、最近历史之前的内容用一次额外 LLM 调用压成一条摘要。
-    def _maybe_checkpoint(self) -> None:
-        if CHECKPOINT_EVERY <= 0:
+    # ⑥ 上下文粗估:len(json)/2。不追求准,追求便宜和方向正确(宁可高估)。
+    def _estimate_context_tokens(self) -> int:
+        return sum(len(json.dumps(m, ensure_ascii=False, default=str))
+                   for m in self.messages) // 2
+
+    # ⑤/⑥ 共用:把 system 之后、最后一个用户轮次之前的历史压成一条摘要。
+    #   保留最后一个用户轮次的完整尾巴 —— 兜底可能在工具循环中途触发,
+    #   当前轮的 user/assistant(tool_calls)/tool 配对不能拆。
+    def _checkpoint_now(self) -> None:
+        user_pos = [i for i, m in enumerate(self.messages) if m["role"] == "user"]
+        cut = user_pos[-1] if user_pos else len(self.messages)
+        body = self.messages[1:cut]
+        if len(body) < 2:  # 没什么可压的,别浪费一次 LLM 调用
             return
-        self._asks_since_ckpt += 1
-        if self._asks_since_ckpt < CHECKPOINT_EVERY or len(self.messages) <= 3:
-            return
-        self._asks_since_ckpt = 0
-        body = self.messages[1:]
         convo = "\n".join(
             "%s: %s" % (m["role"], (m.get("content") or "")[:500]) for m in body
         )
@@ -128,19 +140,39 @@ class Agent:
         self.messages = [
             {"role": "system", "content": self._system},
             {"role": "assistant", "content": "【历史摘要】\n" + summary},
-        ]
+        ] + self.messages[cut:]
+
+    # ⑤ 周期触发:每 CHECKPOINT_EVERY 次 ask 压缩一次。
+    def _maybe_checkpoint(self) -> None:
+        if CHECKPOINT_EVERY <= 0:
+            return
+        self._asks_since_ckpt += 1
+        if self._asks_since_ckpt < CHECKPOINT_EVERY or len(self.messages) <= 3:
+            return
+        self._asks_since_ckpt = 0
+        self._checkpoint_now()
 
     def ask(self, user_input: str,
             on_tool: Optional[Callable] = None,
-            on_usage: Optional[Callable] = None) -> str:
+            on_usage: Optional[Callable] = None,
+            on_notice: Optional[Callable] = None) -> str:
         """发送一轮用户输入,返回最终文本回答。
 
         on_tool(name, args)  —— CLI 实时展示工具调用。
         on_usage(usage_dict) —— ① 每次 API 响应后实时回调本轮 token 用量。
+        on_notice(text)      —— ⑥ 兜底等内部动作的提示,CLI 可打印告知用户。
         """
         self.messages.append({"role": "user", "content": user_input})
+        compacted_this_ask = False  # ⑥ 每轮 ask 最多强制压缩一次,防压缩循环
         for _ in range(MAX_TOOL_ROUNDS):
             self._trim_tool_messages()  # ④ 发送前裁剪
+            if (CONTEXT_EST_TOKEN_BUDGET > 0 and not compacted_this_ask
+                    and self._estimate_context_tokens() > CONTEXT_EST_TOKEN_BUDGET):
+                compacted_this_ask = True
+                if on_notice:
+                    on_notice("上下文估算超 %d tokens,强制压缩旧历史(⑥ 兜底)"
+                              % CONTEXT_EST_TOKEN_BUDGET)
+                self._checkpoint_now()
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=self.messages,

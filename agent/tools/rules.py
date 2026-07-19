@@ -3,14 +3,29 @@
 
 处置动作只有三档:pass < review < reject,多条规则命中时取最重的。
 """
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from . import tool
 from .blacklist import blacklist_query
-from .features import feature_stats
+from .featurelib import account_features
 
 ACTION_ORDER = {"pass": 0, "review": 1, "reject": 2}
 RULE_COUNT = 3  # 当前规则集条数,便于 agent 感知覆盖范围
+
+# R002 阈值:样本里机器人 gap=3s/20 次,正常用户最快 gap=300s/6 次,中间带很宽,
+# 阈值取在带内偏严一侧,改动时用 eval/run_eval.py 第 1 层回归。
+R002_MAX_GAP_SECONDS = 30  # 人手连点很难稳定低于 30s 间隔,留了极端活跃用户余量
+R002_MIN_EVENTS = 10       # 次数下限:偶发快速操作(连领两三张券)不触发
+R002_REJECT_MIN_IPS = 3    # 高频之上再叠加多 IP 轮换,基本可排除人类,升级 reject
+
+# R003 阈值
+R003_HIGH_AMOUNT = 1000.0       # 大额订单:金额越大,盗号销赃收益越高
+R003_CASHOUT_MAX_AMOUNT = 20.0  # 小额套现:金额本身无害,必须叠加领券行为信号
+R003_CASHOUT_MIN_COUPONS = 3
+# 套现的领券计数只看下单前这个窗口内的(会话口径)。全历史计数曾在生成
+# 大样本上实锤误伤:一周攒 3 张券又碰巧买便宜货的正常用户会被扫进来。
+# 1 小时能覆盖"领券->凑单->下单"的完整会话,又不会把隔天行为串起来。
+R003_CASHOUT_WINDOW_SECONDS = 3600
 
 
 def _blacklist_hit(dimension: str, value: str) -> bool:
@@ -23,9 +38,12 @@ def _blacklist_records(dimension: str, value: str) -> List[Dict[str, Any]]:
     return blacklist_query(dimension, value)["records"]
 
 
-def _uid_features(uid: str):
-    """特征联动取数:返回 uid 的行为特征 dict,无数据时返回 None。"""
-    r = feature_stats(uid)
+def _uid_features(uid: str, as_of_ts: Optional[float] = None,
+                  window_seconds: Optional[int] = None):
+    """特征联动取数:返回 uid 的行为特征 dict,无数据时返回 None。
+    as_of_ts = 被评估事件的 ts —— 只用事件之前的历史(point-in-time),
+    否则特征会偷看未来,回测虚高、线上对不上。"""
+    r = account_features(uid, as_of_ts, window_seconds)
     return r if r.get("found") else None
 
 
@@ -66,68 +84,54 @@ def rule_eval(event: Dict[str, Any]):
     device_id = event.get("device_id", "")
     event_type = event.get("type", "")
     amount = event.get("amount")
-    feats = _uid_features(uid)
+    # 事件带 ts 时以事件时点取证(point-in-time);不带 ts(假设性咨询)用全历史
+    as_of = event.get("ts")
+    feats = _uid_features(uid, as_of)
 
     # ------------------------------------------------------------------
-    # R001 名单硬拦截
-    #
-    # 样本线索:
-    #   u_1009 + ip 203.0.113.66 → 黑名单, reason 含「代理池/盗号」
-    #   dev_emu_9f3a → 灰名单(模拟器)
-    #
-    # 你要决定:
-    #   - 只拦 black,还是 gray 也要管?
-    #   - black 给 reject,gray 给 review 还是也 reject?
-    #   - 查哪些维度:uid / ip / device_id 全查还是只查部分?
+    # R001 名单硬拦截:uid / ip / device_id 三个维度带值的全查。
+    # black 是人工确认过的(盗号工单、代理池),直接 reject;
+    # gray 只是设备指纹嫌疑(模拟器上也有正常用户),给 review 留人工兜底
+    # —— 误伤代价是真实模拟器用户多走一道审核,可接受。
     # ------------------------------------------------------------------
-    # TODO: 实现 R001
-    #
-    # 提示写法(按需删改):
-    # for dim, val in [("uid", uid), ("ip", ip), ("device_id", device_id)]:
-    #     if not val:
-    #         continue
-    #     for rec in _blacklist_records(dim, val):
-    #         action = "reject" if rec["list"] == "black" else "review"
-    #         _hit(hits, "R001", "%s=%s 命中%s名单: %s" % (dim, val, rec["list"], rec["reason"]), action)
+    for dim, val in (("uid", uid), ("ip", ip), ("device_id", device_id)):
+        if not val:
+            continue
+        for rec in _blacklist_records(dim, val):
+            action = "reject" if rec["list"] == "black" else "review"
+            _hit(hits, "R001", "%s=%s 命中%s名单: %s" % (dim, val, rec["list"], rec["reason"]), action)
 
     # ------------------------------------------------------------------
-    # R002 机器行为 / 频率异常
-    #
-    # 样本线索:
-    #   u_1002 → event_count=20, min_gap_seconds=3, distinct_ip=5, 全是 coupon_claim
-    #   u_1001 → event_count=5,  min_gap_seconds=300, 正常用户对照组
-    #
-    # 你要决定:
-    #   - min_gap_seconds 阈值设多少?(3 秒很极端,300 秒就宽松很多)
-    #   - 要不要叠加 event_count 下限,避免偶发快速操作误伤?
-    #   - 是否限定 event_type == "coupon_claim"?
-    #   - 命中给 review 还是 reject?
+    # R002 机器行为 / 频率异常:目前只对 coupon_claim 生效(样本攻击面在
+    # 刷券;扩到 login/order 需按事件类型分别定阈值,不能共用)。
+    # 间隔 + 次数双条件防误伤:单独手快或偶发连点都不触发。
+    # 高频之上再叠加多 IP 轮换时升级 reject —— 单纯高频最多 review,
+    # 因为极端活跃的真人无法完全排除,而"高频 + 换 IP"基本只能是脚本。
     # ------------------------------------------------------------------
-    # TODO: 实现 R002
-    #
-    # 提示写法(按需删改):
-    # if feats and event_type == "coupon_claim":
-    #     gap = feats.get("min_gap_seconds")
-    #     if gap is not None and gap <= ??? and feats["event_count"] >= ???:
-    #         _hit(hits, "R002", "领券间隔 %ds,累计 %d 次" % (gap, feats["event_count"]), "review")
+    if feats and event_type == "coupon_claim":
+        gap = feats.get("min_gap_seconds")
+        if gap is not None and gap <= R002_MAX_GAP_SECONDS and feats["event_count"] >= R002_MIN_EVENTS:
+            action = "reject" if feats["distinct_ip"] >= R002_REJECT_MIN_IPS else "review"
+            _hit(hits, "R002", "领券最短间隔 %ds,累计 %d 次,涉及 %d 个 IP" % (
+                gap, feats["event_count"], feats["distinct_ip"]), action)
 
     # ------------------------------------------------------------------
-    # R003 金额异常
-    #
-    # 样本线索:
-    #   u_1009 order amount=4999 → 盗号销赃场景
-    #   u_1003~u_1005 order amount=9.9 → 灰产小额套现,金额不大但模式可疑
-    #
-    # 你要决定:
-    #   - 只看 amount 绝对值,还是结合名单/设备灰度?
-    #   - 阈值设多少?(4999 明显,9.9 需要和其他信号组合)
-    #   - 未带 amount 的非 order 事件要不要跳过?
+    # R003 金额异常,两个互斥分支:
+    # 大额(>= 1000):销赃收益高,但正常大单也存在,单金额只到 review;
+    #   要不要 reject 交给名单/行为规则叠加决定(u_1009 即由 R001 升到 reject)。
+    # 小额套现(<= 20):9.9 本身无害,必须叠加"下单前 1 小时窗口内领券 >= 3 次"
+    #   的会话信号才 review —— 窗口口径,不是全历史计数(见常量处的实锤教训)。
+    # 非 order 或未带 amount 的事件不评估。
     # ------------------------------------------------------------------
-    # TODO: 实现 R003
-    #
-    # 提示写法(按需删改):
-    # if event_type == "order" and amount is not None and amount >= ???:
-    #     _hit(hits, "R003", "订单金额 %.2f 超阈值" % amount, "review")
+    if event_type == "order" and amount is not None:
+        if amount >= R003_HIGH_AMOUNT:
+            _hit(hits, "R003", "订单金额 %.2f 达到大额阈值 %.0f" % (amount, R003_HIGH_AMOUNT), "review")
+        elif amount <= R003_CASHOUT_MAX_AMOUNT:
+            wf = _uid_features(uid, as_of, R003_CASHOUT_WINDOW_SECONDS)
+            coupons = wf["coupon_claims"] if wf else 0
+            if coupons >= R003_CASHOUT_MIN_COUPONS:
+                _hit(hits, "R003", "下单前 %d 分钟内领券 %d 次后下小额订单 %.2f,疑似领券套现"
+                     % (R003_CASHOUT_WINDOW_SECONDS // 60, coupons, amount), "review")
 
     action = "pass"
     for h in hits:

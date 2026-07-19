@@ -1,0 +1,105 @@
+{
+  "_comment": "评估案例集。rule_cases 给第 1 层(离线规则回归);agent_cases 给第 2+3 层(轨迹+回答+成本,需 API key)。期望值都对着 data/ 下的样本数据标注。",
+  "rule_cases": [
+    {
+      "name": "正常用户下单应放行(误伤守卫)",
+      "event": {"uid": "u_1001", "ip": "112.96.100.23", "device_id": "dev_iphone_a1", "type": "order", "amount": 129.0},
+      "expect_action": "pass",
+      "expect_rules": []
+    },
+    {
+      "name": "正常用户领券不触发频率规则(误伤守卫)",
+      "event": {"uid": "u_1001", "ip": "112.96.100.23", "device_id": "dev_iphone_a1", "type": "coupon_claim"},
+      "expect_action": "pass",
+      "expect_rules": []
+    },
+    {
+      "name": "刷券机器人:3 秒间隔 + 5 IP 轮换应拦截",
+      "event": {"uid": "u_1002", "ip": "203.0.113.10", "device_id": "dev_farm_x7", "type": "coupon_claim"},
+      "expect_action": "reject",
+      "expect_rules": ["R002"]
+    },
+    {
+      "name": "黑名单盗号 + 大额销赃应拦截",
+      "event": {"uid": "u_1009", "ip": "203.0.113.66", "device_id": "dev_pixel_z9", "type": "order", "amount": 4999.0},
+      "expect_action": "reject",
+      "expect_rules": ["R001", "R003"]
+    },
+    {
+      "name": "灰名单模拟器 + 领券后小额套现应转人工",
+      "event": {"uid": "u_1003", "ip": "198.51.100.20", "device_id": "dev_emu_9f3a", "type": "order", "amount": 9.9},
+      "expect_action": "review",
+      "expect_rules": ["R001", "R003"]
+    },
+    {
+      "name": "无历史数据的新用户登录应放行",
+      "event": {"uid": "u_9999", "ip": "10.0.0.1", "device_id": "dev_new_1", "type": "login"},
+      "expect_action": "pass",
+      "expect_rules": []
+    },
+    {
+      "name": "取证时点正确性:u_1002 首个事件时尚无历史,不应命中(防泄漏守卫)",
+      "event": {"uid": "u_1002", "ip": "203.0.113.10", "device_id": "dev_farm_x7", "type": "coupon_claim", "ts": 1784109600},
+      "expect_action": "pass",
+      "expect_rules": []
+    },
+    {
+      "name": "取证时点正确性:u_1002 末个事件时模式已成立,应拦截",
+      "event": {"uid": "u_1002", "ip": "203.0.113.14", "device_id": "dev_farm_x7", "type": "coupon_claim", "ts": 1784109657},
+      "expect_action": "reject",
+      "expect_rules": ["R002"]
+    }
+  ],
+  "backtest_checks": {
+    "_comment": "基线指标断言:宽口径应全对;严口径 recall=0.4 是已知状态(套现团伙靠 review 兜底),数值变了说明规则行为变了。",
+    "flag=review+reject": {"precision": 1.0, "recall": 1.0, "f1": 1.0},
+    "flag=reject_only": {"precision": 1.0, "recall": 0.4}
+  },
+  "monitor_cases": [
+    {
+      "name": "刷券脚本应报高频 + IP 轮换",
+      "uid": "u_1002",
+      "expect_signal_any": ["burst", "ip_churn"]
+    },
+    {
+      "name": "正常账号无任何异常信号(误伤守卫)",
+      "uid": "u_1001",
+      "expect_signal_count": 0
+    },
+    {
+      "name": "套现团伙应报设备聚集",
+      "uid": "u_1003",
+      "expect_signal_any": ["shared_device"]
+    }
+  ],
+  "agent_cases": [
+    {
+      "name": "刷券账号研判",
+      "question": "帮我看看 u_1002 这个账号可疑吗?",
+      "expect_tools_any": ["feature_stats", "rule_eval"],
+      "expect_answer_any": ["reject", "拦截"],
+      "max_total_tokens": 60000
+    },
+    {
+      "name": "正常账号不误判(误伤守卫)",
+      "question": "u_1001 这个账号有风险吗?",
+      "expect_tools_any": ["feature_stats", "rule_eval", "blacklist_query"],
+      "expect_answer_any": ["pass", "放行", "正常"],
+      "max_total_tokens": 60000
+    },
+    {
+      "name": "黑名单盗号事件处置",
+      "question": "u_1009 刚从 203.0.113.66 登录并下了一笔 4999 的订单,该怎么处置?",
+      "expect_tools_any": ["blacklist_query", "rule_eval"],
+      "expect_answer_any": ["reject", "拦截"],
+      "max_total_tokens": 60000
+    },
+    {
+      "name": "设备维度关联分析",
+      "question": "dev_emu_9f3a 这个设备是什么情况?上面的账号要不要处理?",
+      "expect_tools_any": ["blacklist_query", "feature_stats", "rule_eval"],
+      "expect_answer_any": ["review", "审核", "reject", "拦截"],
+      "max_total_tokens": 80000
+    }
+  ]
+}

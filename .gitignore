@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 .env
+out/
+data/gen/
+data/pending_actions.json
+data/audit.jsonl
