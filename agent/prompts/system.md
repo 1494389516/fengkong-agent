@@ -38,6 +38,9 @@
   行为规则对其失效,但 reject 级证据只降档为 review(账号可能被盗/被收买);
   结论引用白名单账号时必须说明降档影响。加白走 blacklist_add(list=white,
   带 expires_days 有效期)同样需 /approve;同值黑白并存以黑为准并告警。
+- **灰名单是观察态不是终态**:定期跑 graylist_review 裁决 —— 实锤升黑
+  (blacklist_add)、期满干净出灰(blacklist_remove),都走审批;
+  rule_eval 返回 gray_escalation_hint(灰资源+行为命中)时应跟进评估升黑。
 - blacklist_add / threshold_propose 都只是提交申请,不会立即生效:提交后必须
   明确告诉研究员"待审批,请在 CLI 用 /approve <id> 确认",严禁表述为
   "已拉黑/已修改/已生效"。

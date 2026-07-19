@@ -112,15 +112,68 @@ def blacklist_add(dimension: str, value: str, reason: str, expires_days: int = 0
         "reason": reason,
         "requested_at": _now_iso(),
     }
+    note = "已提交待审批,需研究员在 CLI 执行 /approve %d 后生效" % action_id
     if expires_days and expires_days > 0:
         entry["expires_days"] = int(expires_days)
+    elif target_list == "gray":
+        # 灰名单必须带观察期:灰是观察态不是终态,不允许默认永久挂着
+        entry["expires_days"] = int(policy.active_policy()["graylist_observe_days"])
+        note += ";灰名单未指定有效期,已按默认观察期 %d 天提交" % entry["expires_days"]
     pending.append(entry)
     _save_pending(pending)
     return {
         "status": "pending_confirmation",
         "action_id": action_id,
-        "note": "已提交待审批,需研究员在 CLI 执行 /approve %d 后生效" % action_id,
+        "note": note,
     }
+
+
+@tool(
+    name="blacklist_remove",
+    description=(
+        "提交一条名单移除申请(出灰 / 申诉纠错),进入待审批队列,需 /approve "
+        "生效并记审计。reason 必须写清依据(如 graylist_review 的期满干净结论、"
+        "申诉工单号)。名单只进不出会累积误伤 —— 灰名单观察期满且干净就该出。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "dimension": {"type": "string", "enum": list(VALID_DIMENSIONS)},
+            "value": {"type": "string", "description": "要移出的值"},
+            "list": {"type": "string", "enum": list(VALID_LISTS),
+                     "description": "要移出的名单颜色"},
+            "reason": {"type": "string", "description": "移除依据,进审计日志"},
+        },
+        "required": ["dimension", "value", "list", "reason"],
+    },
+)
+def blacklist_remove(dimension: str, value: str, reason: str, **kw):
+    target_list = kw.get("list")
+    if dimension not in VALID_DIMENSIONS or target_list not in VALID_LISTS:
+        return {"error": "dimension 必须是 %s 之一,list 必须是 %s 之一" % (VALID_DIMENSIONS, VALID_LISTS)}
+    existing = [r for r in load_blacklist() if r["dimension"] == dimension
+                and r["value"] == value and r["list"] == target_list]
+    if not existing:
+        return {"status": "not_listed", "note": "该值不在 %s 名单中,无需移除" % target_list}
+    pending = _load_pending()
+    dup = [a for a in pending if a.get("kind") == "blacklist_remove"
+           and a["dimension"] == dimension and a["value"] == value
+           and a.get("list") == target_list]
+    if dup:
+        return {"status": "already_pending", "action_id": dup[0]["action_id"]}
+    action_id = max((a["action_id"] for a in pending), default=0) + 1
+    pending.append({
+        "action_id": action_id,
+        "kind": "blacklist_remove",
+        "dimension": dimension,
+        "value": value,
+        "list": target_list,
+        "reason": reason,
+        "requested_at": _now_iso(),
+    })
+    _save_pending(pending)
+    return {"status": "pending_confirmation", "action_id": action_id,
+            "note": "已提交待审批,需研究员在 CLI 执行 /approve %d 后移除" % action_id}
 
 
 @tool(
@@ -198,6 +251,13 @@ def decide(action_id: int, approve: bool) -> Optional[Dict]:
     if approve:
         if kind == "threshold_change":
             applied_version = policy.apply_change(action)["version"]
+        elif kind == "blacklist_remove":
+            records = [r for r in load_blacklist()
+                       if not (r["dimension"] == action["dimension"]
+                               and r["value"] == action["value"]
+                               and r["list"] == action["list"])]
+            blacklist_path().write_text(
+                json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
         else:
             # load_blacklist() 返回 datasource 的缓存对象,直接 append 会就地污染
             # 进程内缓存(写盘失败也留下幻影名单),必须先拷贝

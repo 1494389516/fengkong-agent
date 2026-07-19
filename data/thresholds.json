@@ -29,7 +29,9 @@
    "self_min_history_events": 5,
    "self_recent_window_seconds": 86400,
    "self_amount_spike_ratio": 3.0,
-   "self_amount_floor": 100.0
+   "self_amount_floor": 100.0,
+   "graylist_observe_days": 30,
+   "graylist_promote_min_review": 3
   }
  },
  {

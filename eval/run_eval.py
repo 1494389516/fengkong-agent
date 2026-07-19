@@ -350,6 +350,77 @@ def run_whitelist_layer() -> int:
     return _report("白名单策略(离线)", checks)
 
 
+def run_graylist_layer() -> int:
+    """离线:灰名单生命周期 —— 灰是观察态,必须走向结论(升黑/出灰),
+    不能永久挂着。三条出路各造一个场景 + 出灰审批全流程 + 规则层联动提示。"""
+    from agent.tools.graylist import graylist_review
+
+    # 样本集:dev_emu_9f3a(套现团伙共用模拟器)关联 u_1003/4/5 全部 review,
+    # 聚集性达标 -> 升黑建议;u_1003 事件带灰设备 + R003 行为命中 -> 联动提示
+    r = graylist_review()
+    emu = next(e for e in r["entries"] if e["value"] == "dev_emu_9f3a")
+    ev = rule_eval({"uid": "u_1003", "ip": "198.51.100.23", "device_id": "dev_emu_9f3a",
+                    "type": "order", "amount": 9.9, "ts": 1784112000})
+    checks = [
+        ("聚集性实锤 -> 升黑建议(3 关联账号全 review)",
+         emu["recommendation"] == "promote_to_black" and emu["linked_accounts"] == 3),
+        ("灰资源 + 行为命中 -> 规则层给出升黑评估提示",
+         bool(ev.get("gray_escalation_hint"))),
+    ]
+
+    from datetime import datetime, timezone
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        T = 1784100000
+        # g_clean:观察 60 天零命中(应出灰);g_new:刚挂 2 天(继续观察)
+        evs = [{"uid": "t_ok", "ip": "9.9.9.9", "device_id": "d_ok",
+                "type": "login", "ts": T + i * 86400} for i in range(3)]
+        evs.append({"uid": "t_ok2", "ip": "8.8.8.8", "device_id": "d_new",
+                    "type": "login", "ts": T + 2 * 86400})
+        (base / "events_sample.json").write_text(json.dumps(evs))
+        (base / "labels.json").write_text("{}")
+        clock_day = datetime.fromtimestamp(T + 2 * 86400, timezone.utc)
+        (base / "blacklist.json").write_text(json.dumps([
+            {"dimension": "ip", "value": "9.9.9.9", "list": "gray",
+             "reason": "eval:期满干净", "added_at": "2026-05-15"},   # 距时钟 ~60 天
+            {"dimension": "device_id", "value": "d_new", "list": "gray",
+             "reason": "eval:刚挂上", "added_at": clock_day.strftime("%Y-%m-%d")},
+        ]))
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            r2 = graylist_review()
+            by_val = {e["value"]: e for e in r2["entries"]}
+            # 出灰全流程:提案 -> 审批 -> 名单移除 -> R001 不再命中
+            rm = registry.dispatch("blacklist_remove", {
+                "dimension": "ip", "value": "9.9.9.9", "list": "gray",
+                "reason": "eval:graylist_review 期满干净"})
+            actions.decide(rm.get("action_id", -1), approve=True)
+            gone = not registry.dispatch("blacklist_query",
+                                         {"dimension": "ip", "value": "9.9.9.9"})["hit"]
+            rm_absent = registry.dispatch("blacklist_remove", {
+                "dimension": "ip", "value": "9.9.9.9", "list": "gray", "reason": "eval:再删"})
+            # 灰名单默认观察期:不带 expires_days 的灰提案自动带上
+            g_add = registry.dispatch("blacklist_add", {
+                "dimension": "ip", "value": "7.7.7.7", "list": "gray", "reason": "eval:默认观察期"})
+            g_entry = [a for a in actions.list_pending()
+                       if a.get("kind", "blacklist_add") == "blacklist_add"
+                       and a["value"] == "7.7.7.7"]
+            checks += [
+                ("期满零命中 -> 出灰建议",
+                 by_val["9.9.9.9"]["recommendation"] == "release"),
+                ("观察未满 -> 继续观察(带进度)",
+                 by_val["d_new"]["recommendation"] == "observe"),
+                ("出灰审批流:批准后名单移除、R001 不再命中", gone),
+                ("移除不存在的值返回 not_listed", rm_absent.get("status") == "not_listed"),
+                ("灰名单提案默认携带观察期",
+                 g_add.get("status") == "pending_confirmation"
+                 and bool(g_entry) and g_entry[0].get("expires_days") == 30),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("灰名单生命周期(离线)", checks)
+
+
 def run_policy_layer() -> int:
     """离线:策略版本化 —— 同一账号的事件,结论随'当时生效的版本'切换;
     use_current_policy 则让历史事件吃到最新版(评估口径)。"""
@@ -873,6 +944,7 @@ def main() -> int:
     failures += run_graph_layer()
     failures += run_actions_layer()
     failures += run_whitelist_layer()
+    failures += run_graylist_layer()
     failures += run_policy_layer()
     failures += run_governance_layer()
     failures += run_shadow_layer()

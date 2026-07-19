@@ -60,12 +60,18 @@ def main():
             if not items:
                 print("  [待审批] 队列为空。")
             for a in items:
-                if a.get("kind", "blacklist_add") == "threshold_change":
+                kind = a.get("kind", "blacklist_add")
+                if kind == "threshold_change":
                     print("  [待审批] #%d 阈值变更 %s(现值 %s)| %s" % (
                         a["action_id"], a["values"], a.get("current", {}), a["reason"]))
+                elif kind == "blacklist_remove":
+                    print("  [待审批] #%d 移出%s名单 %s=%s | %s" % (
+                        a["action_id"], a["list"], a["dimension"], a["value"], a["reason"]))
                 else:
-                    print("  [待审批] #%d %s=%s -> %s名单 | %s" % (
-                        a["action_id"], a["dimension"], a["value"], a["list"], a["reason"]))
+                    print("  [待审批] #%d %s=%s -> %s名单%s | %s" % (
+                        a["action_id"], a["dimension"], a["value"], a["list"],
+                        "(观察期 %d 天)" % a["expires_days"] if a.get("expires_days") else "",
+                        a["reason"]))
             continue
         if low.startswith("/approve") or low.startswith("/deny"):
             approve = low.startswith("/approve")

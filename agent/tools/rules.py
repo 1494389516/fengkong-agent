@@ -124,11 +124,13 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
             if active_records(dim, val, as_of, lists=("black",)):
                 white_conflict = True
 
+    gray_hit = False
     for dim, val in (("uid", uid), ("ip", ip), ("device_id", device_id)):
         if not val:
             continue
         for rec in _blacklist_records(dim, val, as_of):
             action = "reject" if rec["list"] == "black" else "review"
+            gray_hit = gray_hit or rec["list"] == "gray"
             _hit(hits, "R001", "%s=%s 命中%s名单: %s" % (dim, val, rec["list"], rec["reason"]), action)
 
     # ------------------------------------------------------------------
@@ -234,4 +236,11 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
             result["whitelist_conflict"] = (
                 "名单冲突:同一值同时在黑名单与白名单,已以黑为准、白名单失效 —— "
                 "请先修复名单数据(这是治理问题,规则引擎不替人裁决)")
+    # 灰名单联动:嫌疑资源上又出现行为规则命中 = 双重证据。处置动作不在此升级
+    # (保守),但给出升黑评估提示 —— 结论走 graylist_review 的证据化裁决
+    if gray_hit and any(h["rule_id"] != "R001"
+                        and ACTION_ORDER.get(h.get("original_action", h["action"]), 0) >= 1
+                        for h in hits):
+        result["gray_escalation_hint"] = (
+            "灰名单资源 + 行为规则命中(双重证据):建议跑 graylist_review 评估升黑")
     return result

@@ -63,6 +63,9 @@ DEFAULTS: Dict[str, float] = {
     "self_recent_window_seconds": 86400,
     "self_amount_spike_ratio": 3.0,
     "self_amount_floor": 100.0,
+    # 灰名单生命周期:灰是观察态,必须走向结论(升黑/出灰),不能永久挂着
+    "graylist_observe_days": 30,        # 默认观察期:期满且干净建议出灰
+    "graylist_promote_min_review": 3,   # 关联账号中 >= N 个命中 review 即聚集性实锤,建议升黑
 }
 
 # rule_backtest / chart_threshold_sweep 允许覆盖的键(规则组)。
