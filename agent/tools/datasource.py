@@ -61,6 +61,16 @@ def load_accounts() -> Dict[str, Dict]:
         return {}
 
 
+def load_decisions():
+    """生产决策日志(骨架里为模拟文件,设定由生产引擎写入)。
+    缺失返回 None —— 表示"对账不可用",与空日志([]) 语义不同。"""
+    try:
+        obj = _load_json(data_dir() / "decisions_log.json")
+    except FileNotFoundError:
+        return None
+    return obj.get("decisions") if isinstance(obj, dict) else obj
+
+
 def load_ip_intel() -> Dict[str, Dict]:
     """IP 情报库(按 /24 网段)。文件缺失返回空:未知段按 unknown 处理。"""
     try:

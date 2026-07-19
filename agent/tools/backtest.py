@@ -153,7 +153,8 @@ def shadow_compare(overrides: Dict):
     },
 )
 def shadow_backtest(overrides: Dict):
-    return shadow_compare(overrides or {})
+    r = shadow_compare(overrides or {})
+    return r if "error" in r else _attach_sim_trust(r)
 
 
 @tool(
@@ -185,4 +186,13 @@ def rule_backtest(overrides: Optional[Dict] = None):
     slim = {k: v for k, v in r.items() if k != "per_account"}
     slim["per_account_note"] = ("逐账号明细未随返回(共 %d 账号,防上下文爆炸);"
                                 "查单账号用 account_profile / rule_eval" % r["accounts_evaluated"])
-    return slim
+    return _attach_sim_trust(slim)
+
+
+def _attach_sim_trust(result: Dict) -> Dict:
+    """模拟类结论必须自带对账标记:模拟器失信时指标不可作为变更依据。"""
+    from .reconcile import sim_trust
+    st = sim_trust()
+    if st is not None:
+        result["sim_consistency"] = st
+    return result

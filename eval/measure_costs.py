@@ -53,6 +53,7 @@ def tool_result_sizes():
         ("rule_eval", {"event": {"uid": uid_hot, "type": "coupon_claim"}}),
         ("account_monitor", {"uid": uid_hot}),
         ("policy_history", {}),
+        ("consistency_check", {}),
         ("graph_relations", {}),
         ("scan_all", {}),
         ("account_profile", {"uid": uid_victim}),

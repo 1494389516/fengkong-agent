@@ -46,6 +46,9 @@ DEFAULTS: Dict[str, float] = {
     "monitor_rapid_gap_seconds": 5,
     "monitor_rapid_min_events": 3,
     "shared_device_min_accounts": 3,
+    # 模拟一致性:本地模拟与生产决策日志的不一致率超过此值即"模拟器失信",
+    # 回测/影子/校准类结论自动降级(reconcile.py)
+    "max_sim_mismatch_rate": 0.02,
     # 自身基线(账龄门槛防"养基线":新号/低历史账号不享受自身基线特权)
     "self_min_history_events": 5,
     "self_recent_window_seconds": 86400,

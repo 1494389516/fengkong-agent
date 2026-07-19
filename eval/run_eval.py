@@ -207,6 +207,8 @@ def run_gen_layer() -> int:
                 ("宽口径 precision >= 0.8", wide["precision"] >= 0.8),
                 ("宽口径 f1 >= 0.85", wide["f1"] >= 0.85),
                 ("严口径 precision >= 0.7", strict["precision"] >= 0.7),
+                ("无生产日志时对账优雅降级",
+                 registry.dispatch("consistency_check", {}).get("available") is False),
                 ("校准产出建议阈值", bool(cal.get("suggestions"))),
                 ("建议阈值实测误伤率 <= 5%", realized is not None and realized <= 0.05),
                 ("无参照快照时不误报漂移", cal.get("drift_alarm") is False),
@@ -380,6 +382,24 @@ def run_profile_layer() -> int:
     ])
 
 
+def run_reconcile_layer() -> int:
+    """离线:模拟一致性对账 —— 埋设的生产漂移必须被抓出,一致部分不得误报,
+    失信标记必须自动挂到模拟类工具的返回上。"""
+    r = registry.dispatch("consistency_check", {})
+    got = {(m["uid"], m["ts"]) for m in r.get("mismatches", [])}
+    planted = {("u_1001", 1784099100), ("u_1002", 1784109633), ("u_1003", 1784110800)}
+    bt = registry.dispatch("rule_backtest", {})
+    sim = bt.get("sim_consistency", {})
+    return _report("模拟一致性对账(离线)", [
+        ("对账覆盖全部日志与事件", r.get("compared") == 44 and r.get("orphan_decisions") == 0
+         and r.get("uncovered_events") == 0),
+        ("三条埋设的生产漂移全部抓出", planted <= got),
+        ("一致部分无误报", got == planted),
+        ("不一致率超线触发失信", r.get("trusted") is False and bool(r.get("warning"))),
+        ("回测结果自动携带失信标记", sim.get("trusted") is False and bool(sim.get("warning"))),
+    ])
+
+
 def run_cost_layer() -> int:
     """离线:结构性 token 成本预算 —— schema 与 system prompt 每请求随行,
     缓存命中可吸收,但决定了 miss 时的底价;失控即工具设计出了问题。"""
@@ -506,6 +526,7 @@ def main() -> int:
     failures += run_baseline_layer()
     failures += run_intel_layer()
     failures += run_profile_layer()
+    failures += run_reconcile_layer()
     failures += run_gen_layer()
     failures += run_cost_layer()
     failures += run_chart_smoke()

@@ -93,9 +93,12 @@ def threshold_calibrate(fpr_budget: float = 0.01):
             denom = wide["fp"] + wide["tn"]
             realized_fpr = round(wide["fp"] / denom, 4) if denom else None
 
+    from .reconcile import sim_trust
+    st = sim_trust()
     return {
         "fpr_budget": fpr_budget,
         "policy_version": pol["_version"],
+        **({"sim_consistency": st} if st is not None else {}),
         "baseline": baseline,
         "drift_reference_version": ref_version,
         "drift_alarm": bool(drift_alarms),
