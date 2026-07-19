@@ -202,7 +202,7 @@ def run_gen_layer() -> int:
             biggest = max(sizes.items(), key=lambda kv: kv[1])
             failures = _report("数据生成 + 大样本回测(离线)", [
                 ("生成器退出码 0", proc.returncode == 0),
-                ("账号数 = 63(seed 7 确定性)", r["accounts_evaluated"] == 63),
+                ("账号数 = 60(seed 7 确定性)", r["accounts_evaluated"] == 60),
                 ("宽口径 recall >= 0.9", wide["recall"] >= 0.9),
                 ("宽口径 precision >= 0.8", wide["precision"] >= 0.8),
                 ("宽口径 f1 >= 0.85", wide["f1"] >= 0.85),
@@ -375,6 +375,10 @@ def run_profile_layer() -> int:
          p2["age_days"] < 1 and p2["current_verdict"]["predicted"] == "reject"),
         ("u_1003:注册设备命中灰名单",
          any("gray" in f for f in p3.get("registration_flags", []))),
+        ("注册风险分随主档进入档案(u_1002 高分 / u_1009 注册时干净)",
+         p2["account"].get("register_risk_score", 0) >= 70
+         and p9["account"].get("register_risk_score", 99) <= 20
+         and p2["account"].get("register_os") == "安卓"),
         ("u_1003:关联分量含团伙三账号",
          (p3.get("relations") or {}).get("accounts") == ["u_1003", "u_1004", "u_1005"]),
         ("无主档账号优雅降级",

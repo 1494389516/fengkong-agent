@@ -116,10 +116,11 @@ def _draw_profile_header(ax, uid, feats, mon, verdict):
     if acct:
         reg_hit = any(blacklist_query(d, v)["hit"] for d, v in
                       (("ip", acct.get("register_ip")), ("device_id", acct.get("register_device"))) if v)
-        lines.append((_t("注册 %s · 账龄 %d 天 · 渠道 %s · %s · KYC%d · 换绑 %d 次%s" % (
+        lines.append((_t("注册 %s · 账龄 %d 天 · 渠道 %s · %s · %s · KYC%d · 换绑 %d 次%s" % (
             pd.to_datetime(acct["registered_at"], unit="s").strftime("%Y-%m-%d"),
             (clock - acct["registered_at"]) // 86400, acct["register_channel"],
-            acct["register_method"], acct["kyc_level"], acct.get("phone_rebind_count", 0),
+            acct["register_method"], acct.get("register_os", "?"),
+            acct["kyc_level"], acct.get("phone_rebind_count", 0),
             " · ⚠注册环境命中名单" if reg_hit else ""),
             "registered %s" % acct["registered_at"]), "#333"))
         ltv = acct.get("ltv", 0.0)
@@ -144,6 +145,11 @@ def _draw_profile_header(ax, uid, feats, mon, verdict):
     ax.text(1.0, 0.50, _t("命中 %s" % ("、".join(verdict["rules"]) or "无"),
                           ",".join(verdict["rules"]) or "-"),
             fontsize=9, ha="right", va="top", color="#555")
+    score = (acct or {}).get("register_risk_score")
+    if score is not None:
+        sc = "#b00020" if score >= 70 else ("#e07b00" if score >= 40 else "#2a7d4f")
+        ax.text(1.0, 0.16, _t("注册风险分 %d" % score, "reg risk %d" % score),
+                fontsize=10, fontweight="bold", ha="right", va="top", color=sc)
 
 
 def _draw_baseline_panel(ax, feats):

@@ -1,5 +1,5 @@
 {
-  "_comment": "账号主档:注册上下文(账号的'出生证明',事后行为可伪装、出生环境洗不掉)+ 价值信息(LTV 用于评估误伤代价)。ts 均为 unix 秒;register_channel 为获客渠道名(应用商店/华为商店/抖音投放/朋友圈广告/好友邀请/积分墙等);register_method 取值:手机号/微信/抖音号;kyc_level: 0=无 1=手机实名 2=身份证。",
+  "_comment": "账号主档:注册上下文(账号的'出生证明',事后行为可伪装、出生环境洗不掉)+ 价值信息(LTV 用于评估误伤代价)。ts 均为 unix 秒;register_channel 为获客渠道名(应用商店/华为商店/抖音投放/朋友圈广告/好友邀请/积分墙等);register_method 取值:手机号/微信/抖音号;kyc_level: 0=无 1=手机实名 2=身份证;register_os: 安卓/iOS;register_risk_score: 注册风控在注册时刻打的 0~100 分(渠道/方式/系统/KYC/注册IP情报/注册设备名单加权),是历史事实不事后重算——注册分低≠永远安全(u_1009 注册分 0,被盗是后来的事)。",
   "u_1001": {
     "registered_at": 1750003200,
     "register_channel": "应用商店",
@@ -8,7 +8,9 @@
     "register_device": "dev_iphone_a1",
     "kyc_level": 2,
     "ltv": 3450.0,
-    "phone_rebind_count": 0
+    "phone_rebind_count": 0,
+    "register_os": "iOS",
+    "register_risk_score": 0
   },
   "u_1002": {
     "registered_at": 1784100000,
@@ -18,7 +20,9 @@
     "register_device": "dev_farm_x7",
     "kyc_level": 0,
     "ltv": 0.0,
-    "phone_rebind_count": 0
+    "phone_rebind_count": 0,
+    "register_os": "安卓",
+    "register_risk_score": 80
   },
   "u_1003": {
     "registered_at": 1784100000,
@@ -28,7 +32,9 @@
     "register_device": "dev_emu_9f3a",
     "kyc_level": 0,
     "ltv": 9.9,
-    "phone_rebind_count": 0
+    "phone_rebind_count": 0,
+    "register_os": "安卓",
+    "register_risk_score": 100
   },
   "u_1004": {
     "registered_at": 1784100120,
@@ -38,7 +44,9 @@
     "register_device": "dev_emu_9f3a",
     "kyc_level": 0,
     "ltv": 9.9,
-    "phone_rebind_count": 0
+    "phone_rebind_count": 0,
+    "register_os": "安卓",
+    "register_risk_score": 100
   },
   "u_1005": {
     "registered_at": 1784100240,
@@ -48,7 +56,9 @@
     "register_device": "dev_emu_9f3a",
     "kyc_level": 0,
     "ltv": 9.9,
-    "phone_rebind_count": 0
+    "phone_rebind_count": 0,
+    "register_os": "安卓",
+    "register_risk_score": 100
   },
   "u_1009": {
     "registered_at": 1755043200,
@@ -58,6 +68,8 @@
     "register_device": "dev_iphone_b7",
     "kyc_level": 2,
     "ltv": 8200.0,
-    "phone_rebind_count": 1
+    "phone_rebind_count": 1,
+    "register_os": "iOS",
+    "register_risk_score": 0
   }
 }

@@ -69,16 +69,34 @@ class Gen:
                              "reporter": "g_rpt_%04d" % self.rng.randint(1, 9999),
                              "ts": int(ts), "category": category, "text": text, "status": status})
 
-    def register(self, uid, registered_at, channel, method, ip, device, kyc, ltv, rebind=0):
+    def _reg_risk(self, channel, method, os_, kyc, ip, device):
+        """注册风险分(0~100):生成器在此扮演'生产注册风控'——分数在注册
+        时刻按出生信息加权打出,写入主档后不再重算(历史事实)。"""
+        score = 0
+        score += {"积分墙": 35, "好友邀请": 20, "抖音投放": 15, "朋友圈广告": 15}.get(channel, 0)
+        score += 15 if method in ("抖音号", "微信") else 0   # 三方号池可批量,先验高于手机号
+        score += 5 if os_ == "安卓" else 0                    # 模拟器/改机几乎全在安卓生态
+        score += {0: 20, 1: 5}.get(kyc, 0)
+        seg = ip.rsplit(".", 1)[0]
+        seg_type = self.ip_intel.get(seg, {}).get("type", "unknown")
+        score += {"idc": 25, "proxy": 25, "unknown": 5}.get(seg_type, 0)
+        if any(b["value"] == device for b in self.blacklist):  # 注册设备已在名单
+            score += 30
+        return min(score, 100)
+
+    def register(self, uid, registered_at, channel, method, ip, device, kyc, ltv,
+                 rebind=0, os_="安卓"):
         self.accounts[uid] = {
             "registered_at": int(registered_at),
             "register_channel": channel,
             "register_method": method,
+            "register_os": os_,
             "register_ip": ip,
             "register_device": device,
             "kyc_level": kyc,
             "ltv": round(ltv, 2),
             "phone_rebind_count": rebind,
+            "register_risk_score": self._reg_risk(channel, method, os_, kyc, ip, device),
         }
 
     # ---- 正常用户:每天 1~3 个会话,登录 -> 偶尔领券/下单,间隔分钟到小时级 ----
@@ -118,7 +136,8 @@ class Gen:
                             weights=[4, 2, 1, 2, 1])[0]
         self.register(uid, T0 - r.randint(30, 400) * DAY, channel,
                       method, ips[0], device, r.choice([1, 2]),
-                      spent + r.uniform(0, 2000))
+                      spent + r.uniform(0, 2000),
+                      os_=r.choices(["安卓", "iOS"], weights=[6, 4])[0])
         if r.random() < 0.01:  # 恶意/误举报噪音:正常用户偶被举报,核实后不属实
             self.report(uid, T0 + r.randint(0, days * DAY), "promo_abuse",
                         "怀疑抢券", "dismissed")
@@ -143,7 +162,7 @@ class Gen:
         # 新注册 + 拉新奖励类渠道 + 三方号池(抖音/微信批量号)+ 无 KYC 零消费:
         # bot 的典型出生证明(积分墙这类带奖励的渠道天然是批量注册重灾区)
         self.register(uid, T0 - r.randint(0, 2 * DAY), r.choice(["积分墙", "抖音投放"]),
-                      r.choice(["抖音号", "微信"]), ips[0], device, 0, 0.0)
+                      r.choice(["抖音号", "微信"]), ips[0], device, 0, 0.0, os_="安卓")
         self.labels[uid] = {"label": "fraud", "note": "生成:刷券脚本%s" % ("(慢速)" if slow else "")}
 
     # ---- 套现团伙:共用模拟器设备,领券 -> 小额单 ----
@@ -161,7 +180,7 @@ class Gen:
             t = T0 + r.randint(0, days - 1) * DAY + m * r.randint(1800, 5400)
             # 批量注册:开工前几分钟到两小时,好友邀请(赚邀请奖励)+ 接码手机号,同一台设备
             self.register(uid, t - r.randint(600, 7200), "好友邀请", "手机号",
-                          ip, device, 0, 0.0)
+                          ip, device, 0, 0.0, os_="安卓")  # 模拟器即安卓
             self.emit(uid, ip, device, "login", t)
             for _ in range(r.randint(3, 5)):
                 t += r.randint(120, 600)
@@ -187,7 +206,7 @@ class Gen:
             ip = "192.0.2.%d" % r.randint(1, 250)
             self.seg_intel(ip, "proxy", None, "high", "秒拨池,地理位置漂移不可信")
             self.register(uid, t - r.randint(600, 43200), r.choice(["积分墙", "抖音投放"]),
-                          r.choice(["抖音号", "微信"]), ip, device, 0, 0.0)
+                          r.choice(["抖音号", "微信"]), ip, device, 0, 0.0, os_="安卓")
             note = "生成:新号盗卡"
         else:
             # 老号盗用:机主刚在常驻城市下线,盗号者 15~60 分钟后从境外机房上线
@@ -199,7 +218,8 @@ class Gen:
             self.seg_intel(home_ip, "residential", home, "low")
             owner_device = "g_dev_owner%03d" % i
             self.register(uid, T0 - r.randint(200, 700) * DAY, "应用商店", "手机号",
-                          home_ip, owner_device, 2, r.uniform(2000, 20000), rebind=1)
+                          home_ip, owner_device, 2, r.uniform(2000, 20000), rebind=1,
+                          os_=r.choices(["iOS", "安卓"], weights=[6, 4])[0])
             self.emit(uid, home_ip, owner_device, "login", t - r.randint(900, 3600))
             self.report(uid, t + r.randint(3600, DAY), "unauthorized_charge",
                         "机主申诉:本人未操作,账号异地下单", "verified")
