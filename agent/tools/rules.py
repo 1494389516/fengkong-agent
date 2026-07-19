@@ -9,10 +9,11 @@ from . import tool
 from .blacklist import blacklist_query
 from .datasource import load_accounts
 from .featurelib import account_features
+from .intel import device_info
 from .policy import active_policy
 
 ACTION_ORDER = {"pass": 0, "review": 1, "reject": 2}
-RULE_COUNT = 5  # 当前规则集条数,便于 agent 感知覆盖范围
+RULE_COUNT = 6  # 当前规则集条数,便于 agent 感知覆盖范围
 
 # 阈值不再是本文件常量:全部经 policy.active_policy() 解析(版本化 + what-if
 # 覆盖),定阈依据见 policy.DEFAULTS 的注释,数值回归见 eval 第 1 层。
@@ -101,6 +102,28 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
         for rec in _blacklist_records(dim, val):
             action = "reject" if rec["list"] == "black" else "review"
             _hit(hits, "R001", "%s=%s 命中%s名单: %s" % (dim, val, rec["list"], rec["reason"]), action)
+
+    # ------------------------------------------------------------------
+    # R006 设备指纹硬拦截:模拟器 / root / hook 一律 reject(业务拍板的强硬
+    # 策略)。指纹是设备指纹 SDK 实时采集的物理事实,不依赖行为历史 ——
+    # 与名单的区别:名单要人工添加,指纹到即拦。三个开关独立进 policy
+    # (1=强拒 0=关闭),降级为 review 走提案审批改开关即可。
+    # 已知误伤面(留档):root 真机有极客真实用户、模拟器有 PC 端真实玩家,
+    # 强拒是拦截收益 > 误伤代价的业务取舍,误伤走申诉通道;
+    # 关掉某开关的影响用 shadow_backtest 覆盖 r006_reject_rooted=0 量化。
+    # ------------------------------------------------------------------
+    if device_id:
+        dinfo = device_info(device_id)
+        fp_hits = []
+        if p["r006_reject_emulator"] and dinfo.get("is_emulator"):
+            fp_hits.append("模拟器" + ("(%s)" % dinfo["emulator_brand"]
+                                       if dinfo.get("emulator_brand") else ""))
+        if p["r006_reject_rooted"] and dinfo.get("is_rooted"):
+            fp_hits.append("root")
+        if p["r006_reject_hook"] and dinfo.get("hook_detected"):
+            fp_hits.append("hook 注入")
+        if fp_hits:
+            _hit(hits, "R006", "设备 %s 指纹命中: %s" % (device_id, "、".join(fp_hits)), "reject")
 
     # ------------------------------------------------------------------
     # R002 机器行为 / 频率异常:目前只对 coupon_claim 生效(样本攻击面在

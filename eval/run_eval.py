@@ -130,8 +130,9 @@ def run_scan_layer() -> int:
     reject = {x["uid"] for x in r["reject"]}
     review = {x["uid"] for x in r["review"]}
     return _report("全量巡检(离线)", [
-        ("reject 组 = {u_1002, u_1009}", reject == {"u_1002", "u_1009"}),
-        ("review 组 = 套现团伙三账号", review == {"u_1003", "u_1004", "u_1005"}),
+        ("reject 组 = 全部五个欺诈账号(R006 设备强拒后团伙升级)",
+         reject == {"u_1002", "u_1003", "u_1004", "u_1005", "u_1009"}),
+        ("review 组清空(不再靠人工兜底)", review == set()),
         ("pass 计数 = 1(仅 u_1001)", r["pass_count"] == 1),
     ])
 
@@ -291,13 +292,17 @@ def run_governance_layer() -> int:
 
 
 def run_shadow_layer() -> int:
-    """离线:影子回测 + 覆盖原子性(防部分应用泄漏的回归守卫)。"""
-    r = registry.dispatch("shadow_backtest", {"overrides": {"r002_min_events": 99}})
+    """离线:影子回测 + 覆盖原子性(防部分应用泄漏的回归守卫)。
+    候选策略 = 关掉 R006 的 root/hook 强拒 + 放宽 R002 —— 正是评估
+    '设备强拒开关值多少召回'的真实用法。"""
+    r = registry.dispatch("shadow_backtest", {"overrides": {
+        "r006_reject_rooted": 0, "r006_reject_hook": 0, "r002_min_events": 99}})
     after_shadow = backtest()["operating_points"]["flag=review+reject"]
     bad = registry.dispatch("rule_backtest", {"overrides": {"r002_min_events": 5, "bogus": 1}})
     after_bad = backtest()["operating_points"]["flag=review+reject"]
     return _report("影子回测与覆盖原子性(离线)", [
-        ("影子:u_1002 在候选阈值下会被放过", "u_1002" in r.get("newly_passed", [])),
+        ("影子:关掉设备强拒 + 放宽频率后 u_1002 会被放过",
+         "u_1002" in r.get("newly_passed", [])),
         ("影子:宽口径 F1 增量为负", r.get("delta", {}).get("wide_f1", 0) < 0),
         ("影子跑完当前策略无残留(F1 复原)", after_shadow["f1"] == 1.0),
         ("含非法键的覆盖整体拒绝(原子)", "error" in bad),

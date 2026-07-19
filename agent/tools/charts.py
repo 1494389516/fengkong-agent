@@ -51,6 +51,9 @@ SWEEP_DEFAULTS = {
     "r004_min_amount": [50, 100, 200, 500, 1000],
     "r005_min_register_score": [40, 60, 70, 80, 90],
     "r005_max_account_age_seconds": [86400, 259200, 604800, 1209600],
+    "r006_reject_emulator": [0, 1],
+    "r006_reject_rooted": [0, 1],
+    "r006_reject_hook": [0, 1],
 }
 
 

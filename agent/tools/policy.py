@@ -42,6 +42,12 @@ DEFAULTS: Dict[str, float] = {
     # R005 高危注册 × 新号交易:注册风险分(生产注册风控的历史打分)高的新号下单
     "r005_min_register_score": 70,
     "r005_max_account_age_seconds": 604800,
+    # R006 设备指纹硬拦截开关(1=强拒 0=关闭):业务拍板"模拟器/root/hook 一律拒",
+    # 已知误伤面(root 真机极客、PC 模拟器真实玩家)由申诉通道兜底;
+    # 开关型参数不适用 ±50% 比例限速(threshold_propose 有豁免)
+    "r006_reject_emulator": 1,
+    "r006_reject_rooted": 1,
+    "r006_reject_hook": 1,
     # 监控窗口信号(与 R002 分开:监控偏灵敏、规则偏保守)
     "geo_jump_speed_kmh": 900.0,  # 超过民航巡航速度的"移动"= 物理不可能
     "monitor_burst_min": 8,
@@ -65,7 +71,8 @@ RULE_KEYS = ("r002_max_gap_seconds", "r002_min_events", "r002_reject_min_ips",
              "r003_high_amount", "r003_cashout_max_amount",
              "r003_cashout_min_coupons", "r003_cashout_window_seconds",
              "r004_max_account_age_seconds", "r004_min_amount",
-             "r005_min_register_score", "r005_max_account_age_seconds")
+             "r005_min_register_score", "r005_max_account_age_seconds",
+             "r006_reject_emulator", "r006_reject_rooted", "r006_reject_hook")
 
 MAX_CHANGE_RATIO = 0.5  # 提案限速:单参数变幅超 ±50% 拒绝,防一次校准被极端数据带飞
 

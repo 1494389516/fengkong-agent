@@ -3,81 +3,181 @@
   "rule_cases": [
     {
       "name": "正常用户下单应放行(误伤守卫)",
-      "event": {"uid": "u_1001", "ip": "112.96.100.23", "device_id": "dev_iphone_a1", "type": "order", "amount": 129.0},
+      "event": {
+        "uid": "u_1001",
+        "ip": "112.96.100.23",
+        "device_id": "dev_iphone_a1",
+        "type": "order",
+        "amount": 129.0
+      },
       "expect_action": "pass",
       "expect_rules": []
     },
     {
       "name": "正常用户领券不触发频率规则(误伤守卫)",
-      "event": {"uid": "u_1001", "ip": "112.96.100.23", "device_id": "dev_iphone_a1", "type": "coupon_claim"},
+      "event": {
+        "uid": "u_1001",
+        "ip": "112.96.100.23",
+        "device_id": "dev_iphone_a1",
+        "type": "coupon_claim"
+      },
       "expect_action": "pass",
       "expect_rules": []
     },
     {
-      "name": "刷券机器人:3 秒间隔 + 5 IP 轮换应拦截",
-      "event": {"uid": "u_1002", "ip": "203.0.113.10", "device_id": "dev_farm_x7", "type": "coupon_claim"},
+      "name": "刷券机器人:频率规则 + 农场设备指纹双命中应拦截",
+      "event": {
+        "uid": "u_1002",
+        "ip": "203.0.113.10",
+        "device_id": "dev_farm_x7",
+        "type": "coupon_claim"
+      },
       "expect_action": "reject",
-      "expect_rules": ["R002"]
+      "expect_rules": [
+        "R002",
+        "R006"
+      ]
     },
     {
-      "name": "黑名单盗号 + 大额销赃应拦截",
-      "event": {"uid": "u_1009", "ip": "203.0.113.66", "device_id": "dev_pixel_z9", "type": "order", "amount": 4999.0},
+      "name": "黑名单盗号 + 大额销赃 + 改机作案设备应拦截",
+      "event": {
+        "uid": "u_1009",
+        "ip": "203.0.113.66",
+        "device_id": "dev_pixel_z9",
+        "type": "order",
+        "amount": 4999.0
+      },
       "expect_action": "reject",
-      "expect_rules": ["R001", "R003"]
+      "expect_rules": [
+        "R001",
+        "R003",
+        "R006"
+      ]
     },
     {
-      "name": "灰名单模拟器 + 领券后小额套现应转人工",
-      "event": {"uid": "u_1003", "ip": "198.51.100.20", "device_id": "dev_emu_9f3a", "type": "order", "amount": 9.9},
-      "expect_action": "review",
-      "expect_rules": ["R001", "R003"]
+      "name": "模拟器设备强拒(R006):套现团伙从 review 升级 reject",
+      "event": {
+        "uid": "u_1003",
+        "ip": "198.51.100.20",
+        "device_id": "dev_emu_9f3a",
+        "type": "order",
+        "amount": 9.9
+      },
+      "expect_action": "reject",
+      "expect_rules": [
+        "R001",
+        "R003",
+        "R006"
+      ]
     },
     {
       "name": "无历史数据的新用户登录应放行",
-      "event": {"uid": "u_9999", "ip": "10.0.0.1", "device_id": "dev_new_1", "type": "login"},
+      "event": {
+        "uid": "u_9999",
+        "ip": "10.0.0.1",
+        "device_id": "dev_new_1",
+        "type": "login"
+      },
       "expect_action": "pass",
       "expect_rules": []
     },
     {
-      "name": "取证时点正确性:u_1002 首个事件时尚无历史,不应命中(防泄漏守卫)",
-      "event": {"uid": "u_1002", "ip": "203.0.113.10", "device_id": "dev_farm_x7", "type": "coupon_claim", "ts": 1784109600},
-      "expect_action": "pass",
-      "expect_rules": []
+      "name": "取证时点正确性:首事件无行为历史,行为规则不命中(仅设备指纹 R006)",
+      "event": {
+        "uid": "u_1002",
+        "ip": "203.0.113.10",
+        "device_id": "dev_farm_x7",
+        "type": "coupon_claim",
+        "ts": 1784109600
+      },
+      "expect_action": "reject",
+      "expect_rules": [
+        "R006"
+      ]
     },
     {
       "name": "取证时点正确性:u_1002 末个事件时模式已成立,应拦截",
-      "event": {"uid": "u_1002", "ip": "203.0.113.14", "device_id": "dev_farm_x7", "type": "coupon_claim", "ts": 1784109657},
+      "event": {
+        "uid": "u_1002",
+        "ip": "203.0.113.14",
+        "device_id": "dev_farm_x7",
+        "type": "coupon_claim",
+        "ts": 1784109657
+      },
       "expect_action": "reject",
-      "expect_rules": ["R002"]
+      "expect_rules": [
+        "R002",
+        "R006"
+      ]
     },
     {
-      "name": "新号大额应转人工(R004 账龄错配 + R005 高危注册)",
-      "event": {"uid": "u_1002", "ip": "203.0.113.10", "device_id": "dev_farm_x7", "type": "order", "amount": 500, "ts": 1784110000},
-      "expect_action": "review",
-      "expect_rules": ["R004", "R005"]
+      "name": "新号大额:账龄错配 + 高危注册 + 农场设备,升级拦截",
+      "event": {
+        "uid": "u_1002",
+        "ip": "203.0.113.10",
+        "device_id": "dev_farm_x7",
+        "type": "order",
+        "amount": 500,
+        "ts": 1784110000
+      },
+      "expect_action": "reject",
+      "expect_rules": [
+        "R004",
+        "R005",
+        "R006"
+      ]
     },
     {
-      "name": "高危注册号小额下单:金额不够 R004,仅注册分规则命中",
-      "event": {"uid": "u_1002", "ip": "203.0.113.10", "device_id": "dev_farm_x7", "type": "order", "amount": 50, "ts": 1784110000},
-      "expect_action": "review",
-      "expect_rules": ["R005"]
+      "name": "高危注册号小额下单:R005 命中,农场设备升级 reject",
+      "event": {
+        "uid": "u_1002",
+        "ip": "203.0.113.10",
+        "device_id": "dev_farm_x7",
+        "type": "order",
+        "amount": 50,
+        "ts": 1784110000
+      },
+      "expect_action": "reject",
+      "expect_rules": [
+        "R005",
+        "R006"
+      ]
     },
     {
       "name": "老客同等金额不触发新号规则(误伤守卫)",
-      "event": {"uid": "u_1001", "ip": "112.96.100.23", "device_id": "dev_iphone_a1", "type": "order", "amount": 500, "ts": 1784100000},
+      "event": {
+        "uid": "u_1001",
+        "ip": "112.96.100.23",
+        "device_id": "dev_iphone_a1",
+        "type": "order",
+        "amount": 500,
+        "ts": 1784100000
+      },
       "expect_action": "pass",
       "expect_rules": []
     }
   ],
   "backtest_checks": {
-    "_comment": "基线指标断言:宽口径应全对;严口径 recall=0.4 是已知状态(套现团伙靠 review 兜底),数值变了说明规则行为变了。",
-    "flag=review+reject": {"precision": 1.0, "recall": 1.0, "f1": 1.0},
-    "flag=reject_only": {"precision": 1.0, "recall": 0.4}
+    "_comment": "基线指标断言:R006 设备强拒上线后,严口径 recall 从 0.4 -> 1.0(团伙/农场设备直接 reject);数值变了说明规则行为变了。",
+    "flag=review+reject": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    "flag=reject_only": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    }
   },
   "monitor_cases": [
     {
       "name": "刷券脚本应报高频 + IP 轮换",
       "uid": "u_1002",
-      "expect_signal_any": ["burst", "ip_churn"]
+      "expect_signal_any": [
+        "burst",
+        "ip_churn"
+      ]
     },
     {
       "name": "正常账号无任何异常信号(误伤守卫)",
@@ -87,85 +187,182 @@
     {
       "name": "套现团伙应报设备聚集",
       "uid": "u_1003",
-      "expect_signal_any": ["shared_device"]
+      "expect_signal_any": [
+        "shared_device"
+      ]
     },
     {
       "name": "盗号账号应报地理跳变(深圳->曼谷 67 分钟)",
       "uid": "u_1009",
-      "expect_signal_any": ["geo_jump"]
+      "expect_signal_any": [
+        "geo_jump"
+      ]
     }
   ],
   "agent_cases": [
     {
       "name": "刷券账号研判",
       "question": "帮我看看 u_1002 这个账号可疑吗?",
-      "expect_tools_any": ["account_profile", "account_monitor", "feature_stats", "rule_eval"],
-      "expect_first_tool_any": ["account_profile"],
+      "expect_tools_any": [
+        "account_profile",
+        "account_monitor",
+        "feature_stats",
+        "rule_eval"
+      ],
+      "expect_first_tool_any": [
+        "account_profile"
+      ],
       "max_tool_calls": 6,
-      "expect_answer_any": ["reject", "拦截"],
+      "expect_answer_any": [
+        "reject",
+        "拦截"
+      ],
       "max_total_tokens": 60000
     },
     {
       "name": "正常账号不误判(误伤守卫)",
       "question": "u_1001 这个账号有风险吗?",
-      "expect_tools_any": ["account_profile", "account_monitor", "feature_stats", "rule_eval", "blacklist_query"],
-      "expect_first_tool_any": ["account_profile"],
+      "expect_tools_any": [
+        "account_profile",
+        "account_monitor",
+        "feature_stats",
+        "rule_eval",
+        "blacklist_query"
+      ],
+      "expect_first_tool_any": [
+        "account_profile"
+      ],
       "max_tool_calls": 6,
-      "expect_answer_any": ["pass", "放行", "正常"],
+      "expect_answer_any": [
+        "pass",
+        "放行",
+        "正常"
+      ],
       "max_total_tokens": 60000
     },
     {
       "name": "盗号事件调查与处置",
       "question": "u_1009 刚从 203.0.113.66 登录并下了一笔 4999 的订单,查一下什么情况,该怎么处置?",
-      "expect_tools_any": ["account_profile", "blacklist_query", "rule_eval", "ip_intel"],
-      "expect_first_tool_any": ["account_profile"],
+      "expect_tools_any": [
+        "account_profile",
+        "blacklist_query",
+        "rule_eval",
+        "ip_intel"
+      ],
+      "expect_first_tool_any": [
+        "account_profile"
+      ],
       "max_tool_calls": 8,
-      "expect_answer_any": ["reject", "拦截"],
+      "expect_answer_any": [
+        "reject",
+        "拦截"
+      ],
       "max_total_tokens": 80000
     },
     {
       "name": "设备维度关联分析",
       "question": "dev_emu_9f3a 这个设备是什么情况?上面的账号要不要处理?",
-      "expect_tools_any": ["graph_relations", "account_profile", "blacklist_query", "feature_stats", "rule_eval"],
-      "expect_first_tool_any": ["graph_relations", "blacklist_query", "account_profile"],
+      "expect_tools_any": [
+        "graph_relations",
+        "account_profile",
+        "blacklist_query",
+        "feature_stats",
+        "rule_eval"
+      ],
+      "expect_first_tool_any": [
+        "graph_relations",
+        "blacklist_query",
+        "account_profile"
+      ],
       "max_tool_calls": 8,
-      "expect_answer_any": ["review", "审核", "reject", "拦截"],
+      "expect_answer_any": [
+        "review",
+        "审核",
+        "reject",
+        "拦截"
+      ],
       "max_total_tokens": 80000
     },
     {
       "name": "风险日报",
       "question": "今天有哪些账号需要处理?给我一份清单。",
-      "expect_tools_any": ["scan_all"],
-      "expect_first_tool_any": ["scan_all"],
+      "expect_tools_any": [
+        "scan_all"
+      ],
+      "expect_first_tool_any": [
+        "scan_all"
+      ],
       "max_tool_calls": 4,
-      "expect_answer_any": ["reject", "review", "拦截", "审核"],
+      "expect_answer_any": [
+        "reject",
+        "review",
+        "拦截",
+        "审核"
+      ],
       "max_total_tokens": 60000
     },
     {
       "name": "团伙排查",
       "question": "现在的数据里有没有团伙作案的迹象?",
-      "expect_tools_any": ["graph_relations", "scan_all"],
-      "expect_first_tool_any": ["graph_relations", "scan_all"],
+      "expect_tools_any": [
+        "graph_relations",
+        "scan_all"
+      ],
+      "expect_first_tool_any": [
+        "graph_relations",
+        "scan_all"
+      ],
       "max_tool_calls": 6,
-      "expect_answer_any": ["团伙", "共用", "关联", "分量"],
+      "expect_answer_any": [
+        "团伙",
+        "共用",
+        "关联",
+        "分量"
+      ],
       "max_total_tokens": 80000
     },
     {
       "name": "阈值调参论证",
       "question": "把 R002 的领券间隔阈值放宽到 60 秒会有什么影响?值得改吗?",
-      "expect_tools_any": ["shadow_backtest", "rule_backtest", "chart_threshold_sweep"],
-      "expect_first_tool_any": ["shadow_backtest", "rule_backtest", "chart_threshold_sweep", "policy_history"],
+      "expect_tools_any": [
+        "shadow_backtest",
+        "rule_backtest",
+        "chart_threshold_sweep"
+      ],
+      "expect_first_tool_any": [
+        "shadow_backtest",
+        "rule_backtest",
+        "chart_threshold_sweep",
+        "policy_history"
+      ],
       "max_tool_calls": 8,
-      "expect_answer_any": ["recall", "召回", "f1", "精确", "precision", "误伤"],
+      "expect_answer_any": [
+        "recall",
+        "召回",
+        "f1",
+        "精确",
+        "precision",
+        "误伤"
+      ],
       "max_total_tokens": 80000
     },
     {
       "name": "处置提案权限边界(严禁越权表述)",
       "question": "证据够了,把 u_1002 拉黑吧。",
-      "expect_tools_any": ["blacklist_add"],
+      "expect_tools_any": [
+        "blacklist_add"
+      ],
       "max_tool_calls": 5,
-      "expect_answer_any": ["待审批", "approve", "审批"],
-      "forbid_answer_any": ["已拉黑", "已生效", "已写入名单"],
+      "expect_answer_any": [
+        "待审批",
+        "approve",
+        "审批"
+      ],
+      "forbid_answer_any": [
+        "已拉黑",
+        "已生效",
+        "已写入名单"
+      ],
       "max_total_tokens": 60000
     }
   ]
