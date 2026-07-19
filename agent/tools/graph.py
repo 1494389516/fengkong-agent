@@ -16,7 +16,7 @@ from . import tool
 from .charts import LABEL_COLORS, PALETTE, _save, _t, plt
 from .datasource import load_blacklist, load_events, load_labels
 
-MAX_DRAW_NODES = 80  # 画图节点上限:超出只画账号数最多的前几个分量,避免毛线球
+MAX_DRAW_COMPONENTS = 9  # 最多画的分量面板数:每个分量独立一个子图,超出只画最大的前 N 个
 
 
 def _build_graph() -> nx.Graph:
@@ -78,37 +78,63 @@ def graph_relations(uid: Optional[str] = None, min_accounts: int = 2):
 
     infos = [_component_info(c, blacklisted, labels) for c in comps]
 
-    # 画图:节点数超限时只画前几个大分量,信息全量在返回值里
-    draw_comps, drawn_nodes = [], 0
-    for c in comps:
-        if drawn_nodes + len(c) > MAX_DRAW_NODES and draw_comps:
-            break
-        draw_comps.append(c)
-        drawn_nodes += len(c)
     chart_path = None
+    draw_comps = comps[:MAX_DRAW_COMPONENTS]
     if draw_comps:
-        sub = g.subgraph(set().union(*draw_comps))
-        pos = nx.spring_layout(sub, seed=42)
-        fig, ax = plt.subplots(figsize=(9, 7), constrained_layout=True)
-        kind_style = {"uid": (PALETTE[0], "o"), "device_id": (PALETTE[1], "s"), "ip": (PALETTE[3], "^")}
-        nx.draw_networkx_edges(sub, pos, ax=ax, edge_color="#ccc")
-        for kind, (color, marker) in kind_style.items():
-            nodes = [n for n in sub if n[0] == kind]
-            colors = [LABEL_COLORS.get(labels.get(n[1]), color) if kind == "uid" else color
-                      for n in nodes]
-            edge_colors = ["#b00" if n in blacklisted else "#fff" for n in nodes]
-            nx.draw_networkx_nodes(sub, pos, nodelist=nodes, node_color=colors, node_shape=marker,
-                                   node_size=420, edgecolors=edge_colors, linewidths=1.6, ax=ax)
-        nx.draw_networkx_labels(sub, pos, labels={n: n[1] for n in sub}, font_size=7, ax=ax)
-        ax.set_title(_t("账号(圆)-设备(方)-IP(三角)关联图;红描边=名单命中",
-                        "uid(circle)-device(square)-ip(triangle) graph; red outline = blacklisted"))
-        ax.axis("off")
-        chart_path = _save(fig, "relations_%s.png" % (uid or "all"))
+        chart_path = _draw(g, draw_comps, blacklisted, labels, uid)
 
     result = {"components": infos, "component_count": len(infos), "chart_path": chart_path}
     if uid is not None:
         result["uid"] = uid
         result["found"] = True
     if chart_path and len(draw_comps) < len(comps):
-        result["chart_note"] = "图中只画了前 %d 个分量(节点数限制),完整信息见 components" % len(draw_comps)
+        result["chart_note"] = "图中只画账号数最多的前 %d 个分量,完整信息见 components" % len(draw_comps)
     return result
+
+
+def _draw(g, comps, blacklisted, labels, uid=None) -> str:
+    """每个分量一个子图面板(small multiples):分量之间没有边,合画一个坐标系
+    只会互相纠缠成毛线球;分开画各自用满空间,标签也不打架。"""
+    n = len(comps)
+    ncols = min(3, n)
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 4.4 * nrows),
+                             constrained_layout=True, squeeze=False)
+    kind_style = {"uid": (PALETTE[0], "o", 520), "device_id": (PALETTE[1], "s", 460),
+                  "ip": (PALETTE[3], "^", 260)}
+    for ax, comp in zip(axes.flat, comps):
+        sub = g.subgraph(comp)
+        # k 控制节点间距;节点越少 k 越大,小团伙摊开画
+        pos = nx.spring_layout(sub, seed=42, k=1.6 / max(len(sub), 4) ** 0.5)
+        nx.draw_networkx_edges(sub, pos, ax=ax, edge_color="#ddd")
+        for kind, (color, marker, size) in kind_style.items():
+            nodes = [nd for nd in sub if nd[0] == kind]
+            if not nodes:
+                continue
+            colors = [LABEL_COLORS.get(labels.get(nd[1]), color) if kind == "uid" else color
+                      for nd in nodes]
+            edge_colors = ["#b00" if nd in blacklisted else "#fff" for nd in nodes]
+            nx.draw_networkx_nodes(sub, pos, nodelist=nodes, node_color=colors, node_shape=marker,
+                                   node_size=size, edgecolors=edge_colors, linewidths=1.8, ax=ax)
+        # 标签分两档:账号/设备是主角,白底衬托;IP 是配角,小一号灰字。
+        # IP 太多时(bot 轮换池)全标必然糊成一团,只标名单命中的。
+        main = {nd: nd[1] for nd in sub if nd[0] != "ip"}
+        ips = {nd: nd[1] for nd in sub if nd[0] == "ip"}
+        if len(ips) > 10:
+            ips = {nd: v for nd, v in ips.items() if nd in blacklisted}
+        nx.draw_networkx_labels(sub, pos, labels=main, font_size=8, ax=ax,
+                                bbox={"facecolor": "white", "alpha": 0.7, "edgecolor": "none", "pad": 1})
+        nx.draw_networkx_labels(sub, pos, labels=ips, font_size=6.5, font_color="#555", ax=ax,
+                                verticalalignment="top")
+        acc = sum(1 for nd in comp if nd[0] == "uid")
+        bl = sum(1 for nd in comp if nd in blacklisted)
+        ax.set_title(_t("%d 账号 · %d 名单命中" % (acc, bl),
+                        "%d accounts / %d blacklisted" % (acc, bl)), fontsize=9)
+        ax.margins(0.18)
+        ax.axis("off")
+    for ax in axes.flat[n:]:  # 网格里多出来的空面板隐藏
+        ax.axis("off")
+    fig.suptitle(_t("关联图谱:每个面板一个分量 | 圆=账号(红=fraud 标签) 方=设备 三角=IP | 红描边=名单命中",
+                    "Relation graph: one component per panel | circle=uid square=device triangle=ip"),
+                 fontsize=10)
+    return _save(fig, "relations_%s.png" % (uid or "all"))
