@@ -379,6 +379,15 @@ def run_profile_layer() -> int:
          p2["account"].get("register_risk_score", 0) >= 70
          and p9["account"].get("register_risk_score", 99) <= 20
          and p2["account"].get("register_os") == "安卓"),
+        ("行为路径签名:bot 纯券流",
+         (p2.get("behavior_paths") or {}).get("top_paths", [{}])[0].get("path") == "coupon_claim×20"),
+        ("行为路径签名:套现 login→券×3→单",
+         (p3.get("behavior_paths") or {}).get("top_paths", [{}])[0].get("path")
+         == "login→coupon_claim×3→order"),
+        ("行为路径签名:盗号直奔下单(登录后 8 分钟)",
+         (p9.get("behavior_paths") or {}).get("login_to_order_min_seconds") == 480
+         and any(p.get("path") == "login→order"
+                 for p in (p9.get("behavior_paths") or {}).get("top_paths", []))),
         ("u_1003:关联分量含团伙三账号",
          (p3.get("relations") or {}).get("accounts") == ["u_1003", "u_1004", "u_1005"]),
         ("无主档账号优雅降级",

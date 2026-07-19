@@ -22,7 +22,7 @@ from . import tool  # noqa: E402
 from .backtest import account_verdicts, backtest  # noqa: E402
 from .blacklist import blacklist_query  # noqa: E402
 from .datasource import load_accounts, load_events, load_labels, load_reports  # noqa: E402
-from .featurelib import account_features, batch_features, percentile_rank  # noqa: E402
+from .featurelib import account_features, batch_features, behavior_paths, percentile_rank  # noqa: E402
 from .intel import ip_info, ip_type_summary  # noqa: E402
 from .monitor import account_monitor  # noqa: E402
 from .policy import active_policy  # noqa: E402
@@ -141,8 +141,18 @@ def _draw_profile_header(ax, uid, feats, mon, verdict):
         "/".join("%s×%d" % kv for kv in ip_type_summary(feats["ips"]).items()),
         feats["distinct_device"], reports_v),
         "activity"), "#333"))
+    # 行为路径:会话级序列签名(套现/盗号/bot 各有语法),直奔下单的间隔单独点名
+    bp = behavior_paths(uid)
+    if bp.get("found"):
+        path_txt = " | ".join("%s(%d 次)" % (p["path"], p["count"])
+                              for p in bp["top_paths"][:3])
+        l2o = bp.get("login_to_order_min_seconds")
+        if l2o is not None:
+            path_txt += _t(" · 登录→下单最短 %d 分钟" % (l2o // 60),
+                           " login->order min %dm" % (l2o // 60))
+        lines.append((_t("路径:%s" % path_txt, "paths: %s" % path_txt), "#555"))
     for i, (text, c) in enumerate(lines):
-        ax.text(0.0, 0.92 - 0.33 * i, text, fontsize=9.5, color=c, va="top")
+        ax.text(0.0, 0.95 - 0.25 * i, text, fontsize=9.5, color=c, va="top")
     ax.text(1.0, 0.92, _t("判定 %s" % verdict["predicted"].upper(),
                           verdict["predicted"].upper()),
             fontsize=13, fontweight="bold", ha="right", va="top",
@@ -217,7 +227,7 @@ def chart_account_timeline(uid: str):
     color = {ip: PALETTE[i % len(PALETTE)] for i, ip in enumerate(ips)}
 
     fig = plt.figure(figsize=(12.5, 8.5), constrained_layout=True)
-    gs = fig.add_gridspec(3, 5, height_ratios=[0.55, 2.1, 1.0])
+    gs = fig.add_gridspec(3, 5, height_ratios=[0.72, 2.1, 1.0])
     ax_info = fig.add_subplot(gs[0, :])
     ax1 = fig.add_subplot(gs[1, :3])
     ax_pct = fig.add_subplot(gs[1:, 3:])
