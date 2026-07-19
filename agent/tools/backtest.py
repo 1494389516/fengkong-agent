@@ -24,6 +24,29 @@ from .rules import rule_eval
 # 覆盖经 policy.set_overrides 生效:先全量校验后原子应用,finally 恢复旧快照。
 OVERRIDABLE = policy.RULE_KEYS
 
+# 标签口径(借鉴 MARS 的 target 规则):有效值只有这两个,其他值直接报错
+# 而不是静默当 normal —— "Fraud"/"suspect"/1 混进来会无声污染混淆矩阵,
+# 让指标看起来还行但完全不可信。清洗是标注方的责任,不在指标里兜底。
+VALID_LABELS = ("fraud", "normal")
+
+
+def label_observation(labels: Dict[str, Dict], events: List[Dict]) -> Dict:
+    """标签表现覆盖:数据集里多少账号已标注(已表现)、多少尚未标注。
+    借鉴 MARS 的 target_observation:P/R/F1 只算已标注账号,未标注不是
+    "正常",是"还不知道" —— 覆盖率低时指标只代表已表现子集,有选择偏差
+    (先被人工审的往往就是可疑的),解读回测结果必须连它一起看。"""
+    all_uids = {e["uid"] for e in events}
+    labeled = all_uids & set(labels)
+    fraud = sum(1 for u in labeled if labels[u]["label"] == "fraud")
+    return {
+        "accounts_total": len(all_uids),
+        "labeled": len(labeled),
+        "unlabeled": len(all_uids) - len(labeled),
+        "coverage": round(len(labeled) / len(all_uids), 4) if all_uids else None,
+        "observed_fraud_rate": round(fraud / len(labeled), 4) if labeled else None,
+        "note": "指标只反映已标注账号;未标注=尚未表现,不代表正常",
+    }
+
 
 def account_verdicts(uids: Iterable[str], events: List[Dict]) -> Dict[str, Dict]:
     """逐账号跑规则集:账号内任一事件命中即记入,处置取最重。
@@ -67,6 +90,11 @@ def backtest(overrides: Optional[Dict] = None):
     prev = policy.set_overrides(overrides)
     try:
         labels = load_labels()
+        bad_labels = sorted(u for u, v in labels.items()
+                            if v.get("label") not in VALID_LABELS)
+        if bad_labels:
+            return {"error": "标签只允许 %s,以下账号标签非法(先清洗再回测): %s" % (
+                "/".join(VALID_LABELS), ", ".join(bad_labels[:10]))}
         events = load_events()
         verdicts = account_verdicts(labels.keys(), events)
         per_account = {
@@ -98,6 +126,7 @@ def backtest(overrides: Optional[Dict] = None):
         ]
         return {
             "accounts_evaluated": len(per_account),
+            "label_observation": label_observation(labels, events),
             "overrides_applied": applied,
             "operating_points": points,
             "per_account": per_account,

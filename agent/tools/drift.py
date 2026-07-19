@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
-"""特征漂移画像工具:按时间分桶看特征质量与分布稳定性(PSI)。
+"""漂移监控工具:按时间分桶看特征与规则输出的分布稳定性(PSI)。
+
+监控分两层(借鉴 MARS 前端/后端监控的分层):
+  feature_drift  前端 —— 规则入参特征的质量(缺失率)与分布漂移;
+  rule_drift     后端 —— 规则输出(处置分布/逐规则命中率)的漂移。
+前端稳、后端动 = 规则或阈值的问题;前端动、后端跟着动 = 流量真变了。
+两层都不需要标签,全量样本可算 —— 这正是它们比回测指标灵敏的原因:
+标签要等人工审核回填,漂移当天就能看见。
 
 口径设计借鉴评分卡工具库 MARS 的数据画像模块,四条约定都是踩过坑的:
 - 缺失显式化:业务缺失码(如数仓的 -999)必须显式配置,不自动猜。缺失
@@ -180,6 +187,32 @@ def _bucket_label(ts: float, grain: str) -> str:
     return time.strftime(_GRAIN[grain][0], time.gmtime(ts))
 
 
+def _bucket_events(time_grain: str) -> Dict[str, List[Dict]]:
+    buckets: Dict[str, List[Dict]] = defaultdict(list)
+    for e in load_events():
+        buckets[_bucket_label(e["ts"], time_grain)].append(e)
+    return buckets
+
+
+def _tail_partial(buckets: Dict[str, List[Dict]], labels: List[str]) -> bool:
+    """末桶截断判定:事件量不足中位桶一半多半是"这一天还没过完",
+    其告警要打折看 —— 部分桶的分布天然偏轻,不是真漂移。"""
+    med = statistics.median(len(buckets[lb]) for lb in labels[:-1])
+    return len(buckets[labels[-1]]) < 0.5 * med
+
+
+def drift_alert_text(report: Dict) -> Optional[str]:
+    """从已有漂移报告生成一行报警摘要(借鉴 MARS generate_monitoring_alert
+    的职责分离:只读 report、缺字段跳过,不重算指标)。日报/巡检直接引用;
+    无告警返回 None —— 调用方据此决定要不要在日报里占一行。"""
+    if not report.get("alarm"):
+        return None
+    parts = list(report.get("alarms") or [])
+    if report.get("tail_bucket_partial"):
+        parts.append("末桶可能未采集完整,其中的告警需复核")
+    return ";".join(parts) if parts else None
+
+
 def _bucket_account_features(evs: List[Dict]) -> List[Dict]:
     """桶内逐账号特征。只用桶内事件 —— 画像看的是"这段时间的行为分布",
     混入历史会把漂移抹平。缺失语义:min_gap 单事件无间隔、amount 无订单,
@@ -248,9 +281,7 @@ def feature_drift(time_grain: str = "day",
         return {"error": "未知特征: %s,可选: %s" % (unknown, list(DRIFT_FEATURES))}
     missing_set = set(missing_values or [])
 
-    buckets: Dict[str, List[Dict]] = defaultdict(list)
-    for e in load_events():
-        buckets[_bucket_label(e["ts"], time_grain)].append(e)
+    buckets = _bucket_events(time_grain)
     labels = sorted(buckets)
     if len(labels) < 2:
         return {"found": False, "time_grain": time_grain, "bucket_count": len(labels),
@@ -312,12 +343,8 @@ def feature_drift(time_grain: str = "day",
     if level == "alarm":
         alarms.append("event_type_mix 在 %s PSI=%.3f(>%.2f)" % (worst_bucket, worst_psi, PSI_ALARM))
 
-    # 尾桶截断标注:末桶事件量明显偏低(不足中位桶一半)多半是"这一天还没
-    # 过完",其 PSI 告警要打折看 —— 部分桶的分布天然偏轻,不是真漂移。
-    med_events = statistics.median(len(buckets[lb]) for lb in labels[:-1])
-    tail_partial = len(buckets[labels[-1]]) < 0.5 * med_events
-
-    return {
+    tail_partial = _tail_partial(buckets, labels)
+    out = {
         "found": True,
         "time_grain": time_grain,
         "bucket_count": len(labels),
@@ -336,3 +363,136 @@ def feature_drift(time_grain: str = "day",
         "alarms": alarms,
         "note": "漂移告警先查流量构成(伪正常流量养基线),不要直接重校准阈值",
     }
+    out["alert_text"] = drift_alert_text(out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 后端监控:规则输出漂移。
+# 规则命中率本身就是最早的报警器 —— R002 命中率从 2% 涨到 15%,要么攻击
+# 来了,要么上游特征/阈值坏了,无论哪种都等不起标签回填。全量样本可算,
+# 不依赖 labels(与 backtest 的分工:那边答"规则判得准不准",这边答
+# "规则输出稳不稳")。
+# ---------------------------------------------------------------------------
+
+HIT_RATE_MIN_DELTA = 0.05  # 命中率绝对变化下限:低于 5pp 的波动不值得报警
+HIT_RATE_RATIO = 2.0       # 且相对基准翻倍(或腰斩)才报 —— 双条件防小基数抖动
+
+
+def _hit_rate_alarm(bench_rate: float, rate: float) -> bool:
+    if abs(rate - bench_rate) < HIT_RATE_MIN_DELTA:
+        return False
+    if bench_rate == 0:
+        return True  # 基准期从不命中的规则突然命中,无条件值得看
+    return rate / bench_rate >= HIT_RATE_RATIO or rate / bench_rate <= 1 / HIT_RATE_RATIO
+
+
+@tool(
+    name="rule_drift",
+    description=(
+        "规则输出漂移(后端监控):按时间粒度分桶,用当前策略跑各桶账号,输出"
+        "处置分布(pass/review/reject 占比)趋势与其相对基准桶的类别 PSI,以及"
+        "逐规则命中率趋势(相对基准翻倍/腰斩且变幅超 5pp 报警)。不依赖标签,"
+        "比回测指标灵敏 —— 适合'规则最近有没有异常、命中率什么时候开始变'。"
+        "与 feature_drift 搭配定位:入参特征稳而输出动 = 查规则,一起动 = 流量变了。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "time_grain": {"type": "string", "enum": ["day", "hour"],
+                           "description": "分桶粒度,默认 day"},
+            "benchmark_buckets": {"type": "integer",
+                                  "description": "作为基准的最早桶数,默认 1"},
+        },
+    },
+)
+def rule_drift(time_grain: str = "day", benchmark_buckets: int = 1):
+    from .backtest import _attach_sim_trust, account_verdicts
+
+    if time_grain not in _GRAIN:
+        return {"error": "time_grain 只支持 day / hour"}
+    buckets = _bucket_events(time_grain)
+    labels = sorted(buckets)
+    if len(labels) < 2:
+        return {"found": False, "time_grain": time_grain, "bucket_count": len(labels),
+                "note": "分桶后不足 2 个桶,无从比较;换更细的 time_grain 试试"}
+    benchmark_buckets = max(1, min(benchmark_buckets, len(labels) - 1))
+    bench_labels = labels[:benchmark_buckets]
+
+    # 逐桶用当前策略评估(监控是"现在看",与 account_monitor 同口径);
+    # 账号在桶内的处置 = 桶内事件的最重动作,与 scan/backtest 共用实现
+    per_bucket: Dict[str, Dict] = {}
+    for lb in labels:
+        evs = buckets[lb]
+        per_bucket[lb] = account_verdicts(sorted({e["uid"] for e in evs}), evs)
+
+    def _mix(lbs: List[str]) -> Counter:
+        return Counter(v["predicted"] for lb in lbs for v in per_bucket[lb].values())
+
+    bench_mix = _mix(bench_labels)
+    bench_n = sum(bench_mix.values())
+    alarms: List[str] = []
+
+    # 处置分布趋势 + 类别 PSI
+    verdict_trend, worst_psi, worst_bucket = [], None, None
+    for lb in labels:
+        mix = _mix([lb])
+        n = sum(mix.values())
+        psi = None if lb in bench_labels else categorical_psi(bench_mix, mix)
+        if psi is not None and (worst_psi is None or psi > worst_psi):
+            worst_psi, worst_bucket = psi, lb
+        verdict_trend.append({
+            "bucket": lb, "accounts": n,
+            "reject_rate": round(mix["reject"] / n, 4) if n else None,
+            "review_rate": round(mix["review"] / n, 4) if n else None,
+            "flag_rate": round((mix["reject"] + mix["review"]) / n, 4) if n else None,
+            **({"psi": psi} if lb not in bench_labels else {"benchmark": True}),
+        })
+    level = psi_level(worst_psi)
+    if level == "alarm":
+        alarms.append("处置分布在 %s PSI=%.3f(>%.2f)" % (worst_bucket, worst_psi, PSI_ALARM))
+
+    # 逐规则命中率:桶内命中该规则的账号占比。小样本桶不参与报警
+    # (与 PSI 同一纪律:n 太小的占比波动是噪声,宁可只展示不报警)
+    rule_ids = sorted({r for vs in per_bucket.values() for v in vs.values() for r in v["rules"]})
+    rules_out: Dict[str, Dict] = {}
+    for rid in rule_ids:
+        bench_hits = sum(1 for lb in bench_labels for v in per_bucket[lb].values()
+                         if rid in v["rules"])
+        bench_rate = round(bench_hits / bench_n, 4) if bench_n else None
+        trend = []
+        for lb in labels:
+            if lb in bench_labels:
+                continue
+            vs = per_bucket[lb]
+            n = len(vs)
+            rate = round(sum(1 for v in vs.values() if rid in v["rules"]) / n, 4) if n else None
+            entry = {"bucket": lb, "rate": rate}
+            if (rate is not None and bench_rate is not None
+                    and min(n, bench_n) >= MIN_PSI_SAMPLES
+                    and _hit_rate_alarm(bench_rate, rate)):
+                entry["alarm"] = True
+                alarms.append("%s 命中率在 %s 由 %.1f%% 变为 %.1f%%" % (
+                    rid, lb, 100 * bench_rate, 100 * rate))
+            trend.append(entry)
+        rules_out[rid] = {"benchmark_rate": bench_rate, "trend": trend}
+
+    tail_partial = _tail_partial(buckets, labels)
+    out = {
+        "found": True,
+        "time_grain": time_grain,
+        "bucket_count": len(labels),
+        "benchmark_buckets": bench_labels,
+        "tail_bucket_partial": tail_partial,
+        **({"tail_note": "末桶 %s 事件量不足中位桶一半,可能未采集完整,"
+                         "其告警需人工复核" % labels[-1]} if tail_partial else {}),
+        "verdict_mix": {"worst_psi": worst_psi, "worst_bucket": worst_bucket,
+                        "level": level, "trend": verdict_trend},
+        "rules": rules_out,
+        "alarm": bool(alarms),
+        "alarms": alarms,
+        "note": "输出漂移先对照 feature_drift 定位层级:入参稳而输出动查规则/阈值,"
+                "一起动是流量变化;确认攻击前不要动阈值",
+    }
+    out["alert_text"] = drift_alert_text(out)
+    return _attach_sim_trust(out)
