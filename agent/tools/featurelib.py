@@ -109,7 +109,12 @@ def feature_values(feature: str) -> List[float]:
 
 def population_baseline() -> Dict[str, Dict[str, float]]:
     """人群基线:各特征的稳健分位数与 MAD。样本量太小时(n<2)该特征跳过,
-    n 随结果返回 —— 小样本上的分位数没有推导价值,调用方要看着 n 用。"""
+    n 随结果返回 —— 小样本上的分位数没有推导价值,调用方要看着 n 用。
+
+    deciles 是等频十分箱切点(9 个数):策略快照带上它之后,漂移检查可以做
+    分布级 PSI 比对(drift.psi_against_edges),而不只盯 P99 单点 —— 中段的
+    整体位移("温水式"养基线)只有分布比较才看得见。存切点不存原始样本,
+    快照体积不变量级。"""
     out = {}
     for feat in BASELINE_FEATURES:
         vals = feature_values(feat)
@@ -124,6 +129,8 @@ def population_baseline() -> Dict[str, Dict[str, float]]:
             "p99": round(qs[989], 2),
             "p999": round(qs[998], 2),
             "mad": round(statistics.median(abs(v - p50) for v in vals), 2),
+            "deciles": [round(q, 4) for q in
+                        statistics.quantiles(vals, n=10, method="inclusive")],
         }
     return out
 

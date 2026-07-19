@@ -19,10 +19,11 @@ from typing import Dict, List, Optional
 from . import tool
 from .backtest import backtest, shadow_compare
 from .datasource import load_labels
+from .drift import PSI_ALARM, psi_against_edges
 from .featurelib import feature_values, population_baseline
 from .policy import active_policy, latest_baseline_snapshot
 
-DRIFT_ALARM_RATIO = 0.3  # 单特征 P99 相对上版快照变幅超 30% 触发告警
+DRIFT_ALARM_RATIO = 0.3  # 旧快照(无 deciles)回退口径:P99 变幅超 30% 告警
 
 
 def _quantile(vals: List[float], q: float) -> Optional[float]:
@@ -70,16 +71,25 @@ def threshold_calibrate(fpr_budget: float = 0.01):
     pol = active_policy()
     baseline = population_baseline()
 
+    # 漂移检查:快照带 deciles(等频切点)时做分布级 PSI —— P99 单点只看尾部,
+    # 中段整体位移(温水式养基线)看不见;旧快照无切点则回退 P99 变幅口径。
     ref_version, ref = latest_baseline_snapshot()
     drift_alarms = []
+    drift_psi: Dict[str, float] = {}
     if ref:
         for feat, cur in baseline.items():
-            old_p99 = (ref.get(feat) or {}).get("p99")
-            if old_p99:
-                ratio = abs(cur["p99"] - old_p99) / abs(old_p99)
+            snap = ref.get(feat) or {}
+            psi = psi_against_edges(snap.get("deciles") or [], feature_values(feat),
+                                    expected_n=snap.get("n"))
+            if psi is not None:
+                drift_psi[feat] = psi
+                if psi > PSI_ALARM:
+                    drift_alarms.append("%s 相对快照 PSI=%.3f(>%.2f)" % (feat, psi, PSI_ALARM))
+            elif snap.get("p99"):
+                ratio = abs(cur["p99"] - snap["p99"]) / abs(snap["p99"])
                 if ratio > DRIFT_ALARM_RATIO:
                     drift_alarms.append("%s P99 漂移 %.0f%%(%.4g -> %.4g)" % (
-                        feat, 100 * ratio, old_p99, cur["p99"]))
+                        feat, 100 * ratio, snap["p99"], cur["p99"]))
 
     suggestions = _derive(fpr_budget)
     changed = {k: v for k, v in suggestions.items() if v != pol[k]}
@@ -103,6 +113,7 @@ def threshold_calibrate(fpr_budget: float = 0.01):
         "drift_reference_version": ref_version,
         "drift_alarm": bool(drift_alarms),
         "drift_alarms": drift_alarms,
+        "drift_psi": drift_psi,
         "suggestions": suggestions,
         "changed_vs_active": changed,
         "realized_fpr_normal_wide": realized_fpr,
