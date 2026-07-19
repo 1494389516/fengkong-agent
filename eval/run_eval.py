@@ -199,6 +199,9 @@ def run_gen_layer() -> int:
                        if a["label"] == "normal" and "R006" in a["rules"]]
             cal = registry.dispatch("threshold_calibrate", {"fpr_budget": 0.01})
             realized = cal.get("realized_fpr_normal_wide")
+            fr = registry.dispatch("feature_risk", {"include_bins": True})
+            fr_top = (fr["features"].get(fr["ranking_by_iv"][0], {})
+                      if fr.get("ranking_by_iv") else {})
             # token 成本预算:在同一份大样本上量每个工具的典型返回,超限即红。
             # 教训:rule_backtest 的 per_account 曾单次 18k+ chars,② 的 dict
             # 限幅与工具面瘦身都是这里钉住的。
@@ -215,6 +218,10 @@ def run_gen_layer() -> int:
                 ("无生产日志时对账优雅降级",
                  registry.dispatch("consistency_check", {}).get("available") is False),
                 ("R006 强拒误伤被计量(root 真机正常用户 >= 1)", len(r006_fp) >= 1),
+                ("区分度评估:大样本上有排名且指标有界",
+                 bool(fr.get("ranking_by_iv")) and fr_top.get("iv", 0) > 0
+                 and 0.5 <= fr_top.get("auc", 0) <= 1.0
+                 and 0 <= fr_top.get("ks", -1) <= 1.0 and bool(fr_top.get("bins"))),
                 ("校准产出建议阈值", bool(cal.get("suggestions"))),
                 ("建议阈值实测误伤率 <= 5%", realized is not None and realized <= 0.05),
                 ("无参照快照时不误报漂移", cal.get("drift_alarm") is False),

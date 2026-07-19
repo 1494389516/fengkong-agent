@@ -227,6 +227,7 @@ def _bucket_account_features(evs: List[Dict]) -> List[Dict]:
         amounts = [e["amount"] for e in mine
                    if e["type"] == "order" and e.get("amount") is not None]
         out.append({
+            "uid": uid,  # risk 的逐桶风险趋势要联查标签;画像侧忽略此键
             "event_count": len(mine),
             "distinct_ip": len({e["ip"] for e in mine}),
             "distinct_device": len({e["device_id"] for e in mine}),

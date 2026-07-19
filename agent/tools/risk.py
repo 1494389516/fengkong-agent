@@ -56,6 +56,25 @@ def _split_by_label(feat: str, rows: List[Dict], labels: Dict[str, str]
     return fv, nv, fm, nm
 
 
+def _auc(fraud: List[float], normal: List[float]) -> float:
+    """排序区分度(Mann-Whitney U / (nf*nn)),同值取平均秩。返回方向无关的
+    0.5~1 口径(max(a, 1-a)):KS 答"最优单切点多好",AUC 答"整个排序多好"
+    —— 一个特征 KS 高 AUC 平庸,说明只有一段区间有区分力,做规则比做分不亏。"""
+    both = sorted((v, 1) for v in fraud) + sorted((v, 0) for v in normal)
+    both.sort(key=lambda x: x[0])
+    rank_sum, i = 0.0, 0
+    while i < len(both):
+        j = i
+        while j < len(both) and both[j][0] == both[i][0]:
+            j += 1
+        avg_rank = (i + 1 + j) / 2  # 1-based 平均秩
+        rank_sum += avg_rank * sum(1 for k in range(i, j) if both[k][1] == 1)
+        i = j
+    nf, nn = len(fraud), len(normal)
+    a = (rank_sum - nf * (nf + 1) / 2) / (nf * nn)
+    return round(max(a, 1 - a), 4)
+
+
 def _ks(fraud: List[float], normal: List[float]) -> float:
     """两类经验 CDF 的最大距离(非缺失值)。"""
     f, n = sorted(fraud), sorted(normal)
@@ -89,7 +108,7 @@ def _bin_label(edges: List[float], idx: int, n_bins: int) -> str:
 
 
 def _feature_risk_one(feat: str, rows: List[Dict], labels: Dict[str, str],
-                      n_bins: int) -> Dict:
+                      n_bins: int, include_bins: bool = False) -> Dict:
     fv, nv, fm, nm = _split_by_label(feat, rows, labels)
     nf, nn = len(fv) + fm, len(nv) + nm
     out: Dict = {
@@ -115,15 +134,26 @@ def _feature_risk_one(feat: str, rows: List[Dict], labels: Dict[str, str],
     n_all_bins = len(fc)
     base_rate = len(fv) / (len(fv) + len(nv))
     labels_txt = [_bin_label(edges, i, len(edges) + 1) for i in range(len(edges) + 1)] + ["missing"]
+    bins_detail = []
     for i, (f, n) in enumerate(zip(fc, nc)):
         pf = (f + 0.5) / (nf + 0.5 * n_all_bins)
         pn = (n + 0.5) / (nn + 0.5 * n_all_bins)
         iv += (pf - pn) * math.log(pf / pn)
+        rate = f / (f + n) if f + n else None
         if f + n >= max(5, 0.05 * (nf + nn)):  # 太小的箱不参与 lift 评选
-            rate = f / (f + n)
             lift = rate / base_rate if base_rate else None
             if lift is not None and (best_lift is None or lift > best_lift):
                 best_lift, best_bin = lift, labels_txt[i]
+        if include_bins and (f + n or labels_txt[i] == "missing" and (fm or nm)):
+            # 分箱明细(MarsBinEvaluator 的分箱评估表):逐箱看风险在哪一段,
+            # WOE 符号即方向,阈值应该切在 WOE 变号/跳变的地方
+            bins_detail.append({
+                "bin": labels_txt[i], "n": f + n,
+                "share": round((f + n) / (nf + nn), 4),
+                "fraud_rate": round(rate, 4) if rate is not None else None,
+                "woe": round(math.log(pf / pn), 3),
+                "lift": round(rate / base_rate, 2) if rate is not None and base_rate else None,
+            })
     # 风险方向:首末箱欺诈率对比(粗粒度,非单调时标注)
     first_rate = fc[0] / max(fc[0] + nc[0], 1)
     last_idx = len(edges)
@@ -134,21 +164,72 @@ def _feature_risk_one(feat: str, rows: List[Dict], labels: Dict[str, str],
     out.update({
         "iv": round(iv, 4),
         "ks": _ks(fv, nv),
+        "auc": _auc(fv, nv),
         "lift": round(best_lift, 2) if best_lift is not None else None,
         "lift_bin": best_bin,
         "risk_direction": direction,
         "level": _iv_level(iv),
+        **({"bins": bins_detail} if include_bins else {}),
     })
     return out
+
+
+IV_DECAY_RATIO = 0.5  # 末桶有效 IV 跌破历史最高的一半即报衰减
+
+
+def _risk_trend(feats: List[str], labels: Dict[str, str],
+                time_grain: str, n_bins: int) -> Optional[Dict]:
+    """逐时间桶的欺诈率与特征 IV(MarsBinEvaluator 的风险趋势,转译到
+    反欺诈语义):区分度衰减 = 对手在适应这个特征,比整体指标掉得早。
+    桶内任一类样本不足时该桶 IV 记 null(小样本纪律,同全局口径)。"""
+    from .drift import _bucket_account_features, _bucket_events, _tail_partial
+    buckets = _bucket_events(time_grain)
+    bucket_labels = sorted(buckets)
+    if len(bucket_labels) < 2:
+        return None
+    fraud_rates, n_labeled, iv_by_feat = [], [], {f: [] for f in feats}
+    for lb in bucket_labels:
+        rows = _bucket_account_features(buckets[lb])
+        labeled = [r for r in rows if r["uid"] in labels]
+        n_labeled.append(len(labeled))
+        fraud = sum(1 for r in labeled if labels[r["uid"]] == "fraud")
+        fraud_rates.append(round(fraud / len(labeled), 4) if labeled else None)
+        for f in feats:
+            iv_by_feat[f].append(_feature_risk_one(f, rows, labels, n_bins)["iv"])
+    decay_alarms = []
+    for f, ivs in iv_by_feat.items():
+        valid = [(i, v) for i, v in enumerate(ivs) if v is not None]
+        if len(valid) >= 3:
+            peak = max(v for _, v in valid)
+            last = valid[-1][1]
+            if peak >= 0.1 and last < IV_DECAY_RATIO * peak:
+                decay_alarms.append("%s 区分度衰减:IV 峰值 %.2f -> 末桶 %.2f,"
+                                    "对手可能在适应该特征" % (f, peak, last))
+    # 全桶 null 的特征不占数组(桶内样本不足以算它),只留名字
+    insufficient = sorted(f for f, ivs in iv_by_feat.items()
+                          if all(v is None for v in ivs))
+    return {
+        "buckets": bucket_labels,
+        "n_labeled": n_labeled,
+        "fraud_rate": fraud_rates,
+        "iv": {f: ivs for f, ivs in iv_by_feat.items() if f not in insufficient},
+        **({"iv_insufficient": insufficient} if insufficient else {}),
+        "tail_bucket_partial": _tail_partial(buckets, bucket_labels),
+        "decay_alarms": decay_alarms,
+        "note": "数组与 buckets 对齐;IV 为 null 的桶是样本不足。欺诈率分母是"
+                "桶内已标注账号,受标注节奏影响,连 label_observation 一起看",
+    }
 
 
 @tool(
     name="feature_risk",
     description=(
         "特征区分度评估:对行为特征逐个计算 IV(整体判别信息)、KS(最优切点"
-        "分离度)、Lift(最差箱欺诈浓度/基准,即'按它圈人比随机好几倍')与风险"
-        "方向,按 IV 排名。只算已标注账号,任一类样本 <10 记 n/a。适合'哪个"
-        "特征最能区分欺诈''调阈值该从哪个特征入手'—— 调参前先看哪个特征值钱。"
+        "分离度)、AUC(整体排序力,0.5~1 方向无关)、Lift(最差箱欺诈浓度/基准)"
+        "与风险方向,按 IV 排名。include_bins=true 附逐箱明细(占比/欺诈率/WOE/"
+        "Lift,阈值应切在 WOE 跳变处);time_grain(day/hour)附逐桶欺诈率与 IV "
+        "趋势,IV 跌破峰值一半报区分度衰减(对手在适应)。只算已标注账号,任一类"
+        "样本 <10 记 n/a。适合'哪个特征值钱''阈值切哪''特征还灵不灵'。"
     ),
     parameters={
         "type": "object",
@@ -156,23 +237,33 @@ def _feature_risk_one(feat: str, rows: List[Dict], labels: Dict[str, str],
             "features": {"type": "array", "items": {"type": "string"},
                          "description": "要评估的特征,默认全部行为特征"},
             "n_bins": {"type": "integer", "description": "IV 分箱数,默认 5"},
+            "include_bins": {"type": "boolean", "description": "附逐箱明细表,默认 false"},
+            "time_grain": {"type": "string", "enum": ["day", "hour"],
+                           "description": "可选:按此粒度附风险趋势与衰减检测"},
         },
     },
 )
-def feature_risk(features: Optional[List[str]] = None, n_bins: int = 5):
+def feature_risk(features: Optional[List[str]] = None, n_bins: int = 5,
+                 include_bins: bool = False, time_grain: Optional[str] = None):
     feats = list(features) if features else list(BASELINE_FEATURES)
     unknown = [f for f in feats if f not in BASELINE_FEATURES]
     if unknown:
         return {"error": "未知特征: %s,可选: %s" % (unknown, list(BASELINE_FEATURES))}
+    if time_grain is not None and time_grain not in ("day", "hour"):
+        return {"error": "time_grain 只支持 day / hour"}
     raw_labels = load_labels()
     labels = {u: v["label"] for u, v in raw_labels.items()}
     rows = _all_account_features()
-    per_feature = {f: _feature_risk_one(f, rows, labels, n_bins) for f in feats}
+    per_feature = {f: _feature_risk_one(f, rows, labels, n_bins, include_bins)
+                   for f in feats}
     ranking = sorted((f for f in feats if per_feature[f]["iv"] is not None),
                      key=lambda f: -per_feature[f]["iv"])
+    trend = _risk_trend(feats, labels, time_grain, n_bins) if time_grain else None
     return {
         "ranking_by_iv": ranking,
         "features": per_feature,
+        **({"risk_trend": trend,
+            "decay_alarm": bool(trend and trend["decay_alarms"])} if time_grain else {}),
         "label_observation": label_observation(raw_labels, load_events()),
         "iv_reference": "<0.02 无区分; 0.02~0.1 弱; 0.1~0.3 中; >0.3 强(经验档位,只用于排序解读)",
         "note": "指标只反映已标注账号;IV 高说明值得做规则/调阈值,方向看 risk_direction",
