@@ -322,8 +322,9 @@ def chart_account_timeline(uid: str):
         "对单个规则阈值做扫描回测:逐个候选值跑回测,画 precision/recall/F1 曲线 + "
         "该规则自身命中数归因曲线(命中欺诈/误伤正常,右轴)。返回逐点指标表;"
         "aggregate_insensitive=true 表示聚合指标全程无变化(参数作用被其他规则"
-        "遮蔽或无边界样本),此时没有 best 值,严禁宣称'最优阈值',应引用归因"
-        "曲线或建议换更大数据集。param 可选:" + ", ".join(SWEEP_DEFAULTS)
+        "遮蔽或无边界样本),此时没有 best 值,严禁宣称'最优阈值';连归因曲线也"
+        "无变化时不出图(nothing_to_plot=true),把 note 里的原因转告研究员并"
+        "建议换更大数据集。param 可选:" + ", ".join(SWEEP_DEFAULTS)
     ),
     parameters={
         "type": "object",
@@ -356,9 +357,23 @@ def chart_threshold_sweep(param: str, values: Optional[List[float]] = None):
                                     if a["label"] == "normal" and rule_id in a["rules"]),
         })
     df = pd.DataFrame(rows)
-    # 钝感检测:整条扫描线纹丝不动 = 参数作用被其他规则遮蔽,或数据集没有
+    # 钝感检测:聚合线纹丝不动 = 参数作用被其他规则遮蔽,或数据集没有
     # 该参数的边界样本。此时"最优值"是幻觉,必须显式说出来
     flat = int(df[["precision", "recall", "f1"]].nunique().max()) == 1
+    attr_flat = int(df[["rule_hits_fraud", "rule_hits_normal"]].nunique().max()) == 1
+    if flat and attr_flat:
+        # 连归因曲线都不动:这张图没有任何信息量,画出来就是误导 —— 不出图,
+        # 把"为什么无可画"直接当结果返回(研究员实锤过:平线图纯瞎扯淡)
+        return {
+            "param": param, "rule_id": rule_id, "aggregate_insensitive": True,
+            "nothing_to_plot": True, "accounts_evaluated": len(per),
+            "rows": rows[:2],  # 留两行证明确实扫过
+            "note": ("扫描区间内聚合指标与 %s 归因曲线全部无变化,不出图。"
+                     "原因:当前数据集(%d 账号)没有该参数的边界样本,或其作用被"
+                     "其他规则完全遮蔽。请换更大数据集(FK_DATASET=gen)或先用 "
+                     "rule_backtest 确认该规则在此数据集上有独立命中"
+                     % (rule_id, len(per))),
+        }
 
     fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
     # x 用等距类目位置而非数值:扫描序列常跨数量级(5~600),数值轴会挤成一团

@@ -533,12 +533,15 @@ def run_regression_layer() -> int:
          bool(_limit_violations({"r002_min_events": 99}, cur))),
     ]
 
-    # -- 阈值扫描:小样本上聚合指标被其他规则遮蔽成平线,必须显式标注钝感、
-    #    不给伪 best(教训:曾输出一条 1.0 平线还标 "best F1=1.000")--
+    # -- 阈值扫描:小样本上全部曲线平直 -> 拒绝出图,只解释原因(教训:曾输出
+    #    一条 1.0 平线还标 "best F1=1.000";加警告框后研究员仍判"纯瞎扯淡"——
+    #    没有信息量的图不该存在)--
     sw = chart_threshold_sweep("r002_max_gap_seconds")
-    checks.append(("阈值扫描:聚合钝感被显式标注且无伪 best",
+    checks.append(("阈值扫描:全平直时拒绝出图、无伪 best、说明原因",
                    sw.get("aggregate_insensitive") is True
-                   and "best_by_f1" not in sw and bool(sw.get("note"))))
+                   and sw.get("nothing_to_plot") is True
+                   and "best_by_f1" not in sw and "chart_path" not in sw
+                   and bool(sw.get("note"))))
 
     # -- monitor:window_seconds=0 回落而非除零(信号不丢)--
     m = account_monitor("u_1002", window_seconds=0)
