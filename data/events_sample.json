@@ -1,0 +1,309 @@
+[
+ {
+  "uid": "u_1001",
+  "ip": "112.96.100.23",
+  "device_id": "dev_iphone_a1",
+  "type": "login",
+  "ts": 1783929600
+ },
+ {
+  "uid": "u_1001",
+  "ip": "112.96.100.23",
+  "device_id": "dev_iphone_a1",
+  "type": "order",
+  "ts": 1783933200,
+  "amount": 129.0
+ },
+ {
+  "uid": "u_1001",
+  "ip": "120.229.7.88",
+  "device_id": "dev_iphone_a1",
+  "type": "login",
+  "ts": 1784016000
+ },
+ {
+  "uid": "u_1001",
+  "ip": "120.229.7.88",
+  "device_id": "dev_iphone_a1",
+  "type": "order",
+  "ts": 1784019600,
+  "amount": 59.0
+ },
+ {
+  "uid": "u_1001",
+  "ip": "112.96.100.23",
+  "device_id": "dev_iphone_a1",
+  "type": "login",
+  "ts": 1784098800
+ },
+ {
+  "uid": "u_1001",
+  "ip": "112.96.100.23",
+  "device_id": "dev_iphone_a1",
+  "type": "coupon_claim",
+  "ts": 1784099100
+ },
+ {
+  "uid": "u_1009",
+  "ip": "203.0.113.66",
+  "device_id": "dev_pixel_z9",
+  "type": "login",
+  "ts": 1784106000
+ },
+ {
+  "uid": "u_1009",
+  "ip": "203.0.113.66",
+  "device_id": "dev_pixel_z9",
+  "type": "order",
+  "ts": 1784106480,
+  "amount": 4999.0
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.10",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109600
+ },
+ {
+  "uid": "u_1003",
+  "ip": "198.51.100.20",
+  "device_id": "dev_emu_9f3a",
+  "type": "login",
+  "ts": 1784109600
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.11",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109603
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.12",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109606
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.13",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109609
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.14",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109612
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.10",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109615
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.11",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109618
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.12",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109621
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.13",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109624
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.14",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109627
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.10",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109630
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.11",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109633
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.12",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109636
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.13",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109639
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.14",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109642
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.10",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109645
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.11",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109648
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.12",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109651
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.13",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109654
+ },
+ {
+  "uid": "u_1002",
+  "ip": "203.0.113.14",
+  "device_id": "dev_farm_x7",
+  "type": "coupon_claim",
+  "ts": 1784109657
+ },
+ {
+  "uid": "u_1003",
+  "ip": "198.51.100.20",
+  "device_id": "dev_emu_9f3a",
+  "type": "coupon_claim",
+  "ts": 1784109840
+ },
+ {
+  "uid": "u_1003",
+  "ip": "198.51.100.20",
+  "device_id": "dev_emu_9f3a",
+  "type": "coupon_claim",
+  "ts": 1784110080
+ },
+ {
+  "uid": "u_1003",
+  "ip": "198.51.100.20",
+  "device_id": "dev_emu_9f3a",
+  "type": "coupon_claim",
+  "ts": 1784110320
+ },
+ {
+  "uid": "u_1003",
+  "ip": "198.51.100.20",
+  "device_id": "dev_emu_9f3a",
+  "type": "order",
+  "ts": 1784110800,
+  "amount": 9.9
+ },
+ {
+  "uid": "u_1004",
+  "ip": "198.51.100.21",
+  "device_id": "dev_emu_9f3a",
+  "type": "login",
+  "ts": 1784112000
+ },
+ {
+  "uid": "u_1004",
+  "ip": "198.51.100.21",
+  "device_id": "dev_emu_9f3a",
+  "type": "coupon_claim",
+  "ts": 1784112240
+ },
+ {
+  "uid": "u_1004",
+  "ip": "198.51.100.21",
+  "device_id": "dev_emu_9f3a",
+  "type": "coupon_claim",
+  "ts": 1784112480
+ },
+ {
+  "uid": "u_1004",
+  "ip": "198.51.100.21",
+  "device_id": "dev_emu_9f3a",
+  "type": "coupon_claim",
+  "ts": 1784112720
+ },
+ {
+  "uid": "u_1004",
+  "ip": "198.51.100.21",
+  "device_id": "dev_emu_9f3a",
+  "type": "order",
+  "ts": 1784113200,
+  "amount": 9.9
+ },
+ {
+  "uid": "u_1005",
+  "ip": "198.51.100.22",
+  "device_id": "dev_emu_9f3a",
+  "type": "login",
+  "ts": 1784114400
+ },
+ {
+  "uid": "u_1005",
+  "ip": "198.51.100.22",
+  "device_id": "dev_emu_9f3a",
+  "type": "coupon_claim",
+  "ts": 1784114640
+ },
+ {
+  "uid": "u_1005",
+  "ip": "198.51.100.22",
+  "device_id": "dev_emu_9f3a",
+  "type": "coupon_claim",
+  "ts": 1784114880
+ },
+ {
+  "uid": "u_1005",
+  "ip": "198.51.100.22",
+  "device_id": "dev_emu_9f3a",
+  "type": "coupon_claim",
+  "ts": 1784115120
+ },
+ {
+  "uid": "u_1005",
+  "ip": "198.51.100.22",
+  "device_id": "dev_emu_9f3a",
+  "type": "order",
+  "ts": 1784115600,
+  "amount": 9.9
+ }
+]

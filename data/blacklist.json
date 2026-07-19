@@ -1,0 +1,23 @@
+[
+ {
+  "dimension": "ip",
+  "value": "203.0.113.66",
+  "list": "black",
+  "reason": "代理池出口 IP,历史批量盗号登录",
+  "added_at": "2026-07-01"
+ },
+ {
+  "dimension": "uid",
+  "value": "u_1009",
+  "list": "black",
+  "reason": "确认盗号销赃账号(工单 #8841)",
+  "added_at": "2026-06-28"
+ },
+ {
+  "dimension": "device_id",
+  "value": "dev_emu_9f3a",
+  "list": "gray",
+  "reason": "模拟器特征:传感器无数据 + 电池恒 100%",
+  "added_at": "2026-07-10"
+ }
+]

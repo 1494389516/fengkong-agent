@@ -1,0 +1,5 @@
+# DeepSeek API 配置
+# api_key 建议不要写在这里,用环境变量:export DEEPSEEK_API_KEY=sk-...
+model: deepseek-chat
+base_url: https://api.deepseek.com
+api_key: ""
