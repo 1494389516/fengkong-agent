@@ -120,8 +120,10 @@ def _draw_profile_header(ax, uid, feats, verdict):
     clock = max((e["ts"] for e in load_events()), default=0)
     lines = []
     if acct:
-        reg_hit = any(blacklist_query(d, v)["hit"] for d, v in
-                      (("ip", acct.get("register_ip")), ("device_id", acct.get("register_device"))) if v)
+        reg_hit = any(r["list"] != "white" and not r.get("expired")
+                      for d, v in (("ip", acct.get("register_ip")),
+                                   ("device_id", acct.get("register_device"))) if v
+                      for r in blacklist_query(d, v)["records"])
         kyc_names = {0: "未认证", 1: "手机实名", 2: "身份证实名"}
         os_txt = ("%s %s" % (acct.get("register_os", "?"),
                              acct.get("register_os_version", ""))).strip()
@@ -136,8 +138,12 @@ def _draw_profile_header(ax, uid, feats, verdict):
         # 价值分档走 profile 的单一实现,阈值(1000/100)不在这里重钉一份
         vt = _value_tier(acct.get("ltv", 0.0))
         tier_note = {"high": "误伤代价高", "medium": "误伤代价中", "low": "误伤代价低"}[vt["tier"]]
-        lines.append((_t("价值:LTV %.0f · 档位:%s(%s)" % (vt["ltv"], vt["tier"], tier_note),
-                         "LTV %.0f" % vt["ltv"]), "#333"))
+        wl = any(r["list"] == "white" and not r.get("expired")
+                 for r in blacklist_query("uid", uid)["records"])
+        lines.append((_t("价值:LTV %.0f · 档位:%s(%s)%s" % (
+            vt["ltv"], vt["tier"], tier_note,
+            " · 白名单账号(行为规则抑制,reject 降档 review)" if wl else ""),
+            "LTV %.0f" % vt["ltv"]), "#2a7d4f" if wl else "#333"))
     else:
         lines.append((_t("无账号主档(注册信息缺失)", "no account record"), "#999"))
     reports_v = sum(1 for r in load_reports()

@@ -81,7 +81,9 @@ def component_summary(uid: str):
     node = ("uid", uid)
     if node not in g:
         return None
-    blacklisted = {(r["dimension"], r["value"]): r["list"] for r in load_blacklist()}
+    # 图上的"名单命中"只标黑/灰(风险);白名单是抑制标注,不该画成红圈
+    blacklisted = {(r["dimension"], r["value"]): r["list"] for r in load_blacklist()
+                   if r["list"] in ("black", "gray")}
     labels = {k: v["label"] for k, v in load_labels().items()}
     strong = nx.node_connected_component(_strong_subgraph(g), node)
     return _component_info(strong, _expand_weak(g, strong), blacklisted, labels)
@@ -109,7 +111,9 @@ def component_summary(uid: str):
 def graph_relations(uid: Optional[str] = None, min_accounts: int = 2):
     g = _build_graph()
     sg = _strong_subgraph(g)
-    blacklisted = {(r["dimension"], r["value"]): r["list"] for r in load_blacklist()}
+    # 图上的"名单命中"只标黑/灰(风险);白名单是抑制标注,不该画成红圈
+    blacklisted = {(r["dimension"], r["value"]): r["list"] for r in load_blacklist()
+                   if r["list"] in ("black", "gray")}
     labels = {k: v["label"] for k, v in load_labels().items()}
 
     if uid is not None:

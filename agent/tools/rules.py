@@ -6,7 +6,7 @@
 from typing import Any, Dict, List, Optional
 
 from . import tool
-from .blacklist import blacklist_query
+from .blacklist import active_records
 from .datasource import load_accounts
 from .featurelib import account_features
 from .intel import device_info
@@ -19,14 +19,27 @@ RULE_COUNT = 6  # 当前规则集条数,便于 agent 感知覆盖范围
 # 覆盖),定阈依据见 policy.DEFAULTS 的注释,数值回归见 eval 第 1 层。
 
 
-def _blacklist_hit(dimension: str, value: str) -> bool:
-    """名单联动取数:该维度值是否在黑/灰名单中。"""
-    return blacklist_query(dimension, value)["hit"]
+def _blacklist_records(dimension: str, value: str,
+                       as_of_ts: Any = None) -> List[Dict[str, Any]]:
+    """R001 口径:黑/灰记录(白名单不进 R001,是反方向的抑制层),按事件时点过滤有效期。"""
+    return active_records(dimension, value, as_of_ts, lists=("black", "gray"))
 
 
-def _blacklist_records(dimension: str, value: str) -> List[Dict[str, Any]]:
-    """名单联动取数:返回命中记录(含 list=black/gray 和 reason),未命中为空列表。"""
-    return blacklist_query(dimension, value)["records"]
+def _apply_whitelist(hits: List[Dict[str, str]], white: List[Dict],
+                     conflict: bool) -> None:
+    """白名单 = 全体命中降一档(就地修改):reject 级证据降为 review(白名单
+    账号被盗/被收买是真实攻击路径,人工闸门不能撤),review 级证据抑制为
+    pass(误伤抑制的本职)。绝不是免死金牌。conflict(同值既黑又白)时
+    以黑为准、白名单整体失效,只留告警 —— 名单打架是数据治理问题,
+    不能让规则引擎替人裁决。"""
+    if not white or conflict:
+        return
+    for h in hits:
+        new_action = "review" if h["action"] == "reject" else "pass"
+        if ACTION_ORDER[new_action] < ACTION_ORDER[h["action"]]:
+            h["original_action"] = h["action"]
+            h["action"] = new_action
+            h["whitelisted"] = True
 
 
 def _uid_features(uid: str, as_of_ts: Optional[float] = None,
@@ -50,7 +63,9 @@ def _hit(hits: List[Dict[str, str]], rule_id: str, reason: str, action: str) -> 
         "事件字段:uid(必填)、ip、device_id、type(如 login/order/coupon_claim)、"
         "amount、ts。带 ts 时默认完整回放:特征只用事件之前的数据,阈值用当时生效"
         "的策略版本(审计口径,'当时会怎么判');use_current_policy=true 则改用当前"
-        "最新阈值评估该事件('现在会怎么判'),特征仍按事件时点取证。"
+        "最新阈值评估该事件('现在会怎么判'),特征仍按事件时点取证。命中白名单时"
+        "全体降一档(reject->review,review->pass),hits 里保留 original_action;"
+        "同值黑白冲突时白名单失效并返回 whitelist_conflict。"
     ),
     parameters={
         "type": "object",
@@ -96,10 +111,23 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
     # gray 只是设备指纹嫌疑(模拟器上也有正常用户),给 review 留人工兜底
     # —— 误伤代价是真实模拟器用户多走一道审核,可接受。
     # ------------------------------------------------------------------
+    # 白名单联动(误伤抑制层,评估在所有规则之后):收集三维度的有效白记录;
+    # 同一值既黑又白 = 名单冲突,白名单失效以黑为准(数据治理告警)
+    white: List[Dict[str, Any]] = []
+    white_conflict = False
     for dim, val in (("uid", uid), ("ip", ip), ("device_id", device_id)):
         if not val:
             continue
-        for rec in _blacklist_records(dim, val):
+        for rec in active_records(dim, val, as_of, lists=("white",)):
+            white.append({"dimension": dim, "value": val, "reason": rec["reason"],
+                          "expires_at": rec.get("expires_at")})
+            if active_records(dim, val, as_of, lists=("black",)):
+                white_conflict = True
+
+    for dim, val in (("uid", uid), ("ip", ip), ("device_id", device_id)):
+        if not val:
+            continue
+        for rec in _blacklist_records(dim, val, as_of):
             action = "reject" if rec["list"] == "black" else "review"
             _hit(hits, "R001", "%s=%s 命中%s名单: %s" % (dim, val, rec["list"], rec["reason"]), action)
 
@@ -186,11 +214,13 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
                 _hit(hits, "R005", "注册风险分 %d(阈值 %d)的新号下单 %.2f,账龄 %.1f 小时"
                      % (score, p["r005_min_register_score"], amount, age / 3600), "review")
 
+    _apply_whitelist(hits, white, white_conflict)
+
     action = "pass"
     for h in hits:
         if ACTION_ORDER.get(h["action"], 0) > ACTION_ORDER[action]:
             action = h["action"]
-    return {
+    result = {
         "hits": hits,
         "action": action,
         "rule_count_evaluated": RULE_COUNT,
@@ -198,3 +228,10 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
         "policy_overridden": p["_overridden"],
         "features_snapshot": feats,
     }
+    if white:
+        result["whitelist"] = {"records": white, "applied": not white_conflict}
+        if white_conflict:
+            result["whitelist_conflict"] = (
+                "名单冲突:同一值同时在黑名单与白名单,已以黑为准、白名单失效 —— "
+                "请先修复名单数据(这是治理问题,规则引擎不替人裁决)")
+    return result

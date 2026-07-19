@@ -19,10 +19,10 @@ from typing import Dict, List, Optional
 
 from . import tool
 from . import policy
+from .blacklist import VALID_LISTS
 from .datasource import audit_log_path, blacklist_path, load_blacklist, pending_actions_path
 
 VALID_DIMENSIONS = ("uid", "ip", "device_id")
-VALID_LISTS = ("black", "gray")
 
 
 def _now_iso() -> str:
@@ -64,10 +64,13 @@ def _limit_violations(values: Dict, current: Dict) -> List[str]:
 @tool(
     name="blacklist_add",
     description=(
-        "提交一条名单写入申请(black=黑名单 / gray=灰名单)。注意:此操作不会"
-        "立即生效 —— 申请进入待审批队列,需研究员在 CLI 执行 /approve 确认后"
-        "才写入名单库。reason 必须写清证据(命中哪些规则/信号、关键数值),"
-        "这会进入审计日志。同一值已在名单或已在队列时返回现状。"
+        "提交一条名单写入申请(black=黑 / gray=灰 / white=白)。此操作不会立即"
+        "生效 —— 申请进入待审批队列,需研究员在 CLI 执行 /approve 确认后才写入"
+        "名单库。reason 必须写清证据(命中哪些规则/信号、关键数值),进审计日志。"
+        "white 是误伤抑制(申诉通过/内部测试号):行为规则失效、reject 级证据"
+        "降档 review,建议必带 expires_days 有效期(白名单是攻击面,不搞永久)。"
+        "同一值已在同色名单或已在队列时返回现状;不同色允许提交(如灰升黑),"
+        "同值黑白并存时规则引擎以黑为准并告警。"
     ),
     parameters={
         "type": "object",
@@ -75,27 +78,32 @@ def _limit_violations(values: Dict, current: Dict) -> List[str]:
             "dimension": {"type": "string", "enum": list(VALID_DIMENSIONS)},
             "value": {"type": "string", "description": "要拉入名单的值"},
             "list": {"type": "string", "enum": list(VALID_LISTS),
-                     "description": "black(确凿证据)或 gray(嫌疑,需持续观察)"},
+                     "description": "black(确凿证据)/ gray(嫌疑观察)/ white(误伤抑制)"},
             "reason": {"type": "string", "description": "证据说明,将写入名单与审计日志"},
+            "expires_days": {"type": "integer", "minimum": 1,
+                             "description": "可选:有效期天数,到期自动失效(白名单强烈建议携带)"},
         },
         "required": ["dimension", "value", "list", "reason"],
     },
 )
-def blacklist_add(dimension: str, value: str, reason: str, **kw):
+def blacklist_add(dimension: str, value: str, reason: str, expires_days: int = 0, **kw):
     target_list = kw.get("list")
     if dimension not in VALID_DIMENSIONS or target_list not in VALID_LISTS:
         return {"error": "dimension 必须是 %s 之一,list 必须是 %s 之一" % (VALID_DIMENSIONS, VALID_LISTS)}
-    existing = [r for r in load_blacklist() if r["dimension"] == dimension and r["value"] == value]
+    # 防重按(维度, 值, 同色)比对:不同色是合法诉求(灰升黑 / 黑值申诉加白),
+    # 冲突裁决在规则引擎(黑白并存以黑为准)与人工审批,不在提交入口一刀切
+    existing = [r for r in load_blacklist() if r["dimension"] == dimension
+                and r["value"] == value and r["list"] == target_list]
     if existing:
         return {"status": "already_listed", "records": existing}
     pending = _load_pending()
-    # 防重只在同 kind 内比对:threshold_change 条目没有 dimension/value 字段
     dup = [a for a in pending if a.get("kind", "blacklist_add") == "blacklist_add"
-           and a["dimension"] == dimension and a["value"] == value]
+           and a["dimension"] == dimension and a["value"] == value
+           and a.get("list") == target_list]
     if dup:
         return {"status": "already_pending", "action_id": dup[0]["action_id"]}
     action_id = max((a["action_id"] for a in pending), default=0) + 1
-    pending.append({
+    entry = {
         "action_id": action_id,
         "kind": "blacklist_add",
         "dimension": dimension,
@@ -103,7 +111,10 @@ def blacklist_add(dimension: str, value: str, reason: str, **kw):
         "list": target_list,
         "reason": reason,
         "requested_at": _now_iso(),
-    })
+    }
+    if expires_days and expires_days > 0:
+        entry["expires_days"] = int(expires_days)
+    pending.append(entry)
     _save_pending(pending)
     return {
         "status": "pending_confirmation",
@@ -191,14 +202,18 @@ def decide(action_id: int, approve: bool) -> Optional[Dict]:
             # load_blacklist() 返回 datasource 的缓存对象,直接 append 会就地污染
             # 进程内缓存(写盘失败也留下幻影名单),必须先拷贝
             records = list(load_blacklist())
-            records.append({
+            rec = {
                 "dimension": action["dimension"],
                 "value": action["value"],
                 "list": action["list"],
                 "reason": action["reason"],
                 "added_at": _now_iso()[:10],
                 "source": "agent_proposed+human_approved",
-            })
+            }
+            if action.get("expires_days"):  # 有效期从批准日起算(不是提交日)
+                exp = datetime.now(timezone.utc).timestamp() + action["expires_days"] * 86400
+                rec["expires_at"] = datetime.fromtimestamp(exp, timezone.utc).strftime("%Y-%m-%d")
+            records.append(rec)
             blacklist_path().write_text(
                 json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
     _save_pending([a for a in pending if a["action_id"] != action_id])

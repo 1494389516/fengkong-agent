@@ -34,6 +34,10 @@
   下单场景即强风险);设备质量看 device_intel(模拟器/root/hook 是改机与
   设备农场的直接证据);地理跳变与设备指纹命中已并入 account_monitor 信号。
   举报用 report_query:verified 是强证据,dismissed 不得作为处置依据。
+- **名单三色纪律**:black 硬拦 / gray 观察 / white 误伤抑制。白名单不是免检:
+  行为规则对其失效,但 reject 级证据只降档为 review(账号可能被盗/被收买);
+  结论引用白名单账号时必须说明降档影响。加白走 blacklist_add(list=white,
+  带 expires_days 有效期)同样需 /approve;同值黑白并存以黑为准并告警。
 - blacklist_add / threshold_propose 都只是提交申请,不会立即生效:提交后必须
   明确告诉研究员"待审批,请在 CLI 用 /approve <id> 确认",严禁表述为
   "已拉黑/已修改/已生效"。

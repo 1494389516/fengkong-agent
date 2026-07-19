@@ -258,6 +258,98 @@ def run_gen_layer() -> int:
             os.environ.pop("FK_DATA_DIR", None)
 
 
+def run_whitelist_layer() -> int:
+    """离线:白名单策略语义。白名单 = 误伤抑制不是免检:review 级证据抑制为
+    pass,reject 级证据只降档为 review(白名单账号被盗/被收买仍有人工闸门);
+    有效期按事件时点判断(回放口径);同值黑白冲突以黑为准并告警。"""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        T = 1784100000
+        evs = []
+        # 四个账号同款刷券行为(12 连 gap=2s):唯一区别是名单状态
+        for uid, ips in (("t_vip", ["10.0.0.1"]), ("t_rej", ["10.0.0.1", "10.0.0.2", "10.0.0.3"]),
+                         ("t_exp", ["10.0.0.5"]), ("t_conf", ["10.0.0.6"])):
+            evs += [{"uid": uid, "ip": ips[i % len(ips)], "device_id": "d_%s" % uid,
+                     "type": "coupon_claim", "ts": T + i * 2} for i in range(12)]
+        evs.append({"uid": "t_hook", "ip": "10.0.0.9", "device_id": "d_hook",
+                    "type": "coupon_claim", "ts": T})
+        (base / "events_sample.json").write_text(json.dumps(evs))
+        (base / "labels.json").write_text("{}")
+        (base / "device_intel.json").write_text(json.dumps({
+            "d_hook": {"platform": "安卓", "is_emulator": False, "is_rooted": False,
+                       "hook_detected": True, "signals": ["Frida 注入"], "risk": "high"}}))
+        (base / "blacklist.json").write_text(json.dumps([
+            {"dimension": "uid", "value": "t_vip", "list": "white",
+             "reason": "eval:申诉通过", "added_at": "2026-07-01", "expires_at": "2099-01-01"},
+            {"dimension": "uid", "value": "t_rej", "list": "white",
+             "reason": "eval:申诉通过", "added_at": "2026-07-01"},
+            {"dimension": "uid", "value": "t_exp", "list": "white",
+             "reason": "eval:已过期", "added_at": "2025-12-01", "expires_at": "2026-01-01"},
+            {"dimension": "uid", "value": "t_conf", "list": "white",
+             "reason": "eval:冲突白", "added_at": "2026-07-01"},
+            {"dimension": "uid", "value": "t_conf", "list": "black",
+             "reason": "eval:冲突黑", "added_at": "2026-07-02"},
+            {"dimension": "uid", "value": "t_hook", "list": "white",
+             "reason": "eval:白名单+作案设备", "added_at": "2026-07-01"},
+        ]))
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            def ev(uid, i=11, ip="10.0.0.1", dev=None):
+                return rule_eval({"uid": uid, "ip": ip, "device_id": dev or "d_%s" % uid,
+                                  "type": "coupon_claim", "ts": T + i * 2})
+            r_vip = ev("t_vip")     # R002 review 级 -> 抑制为 pass
+            r_rej = ev("t_rej")     # R002+多IP reject 级 -> 只降档 review
+            r_exp = ev("t_exp")     # 白名单已过期 -> 原样 review
+            r_conf = ev("t_conf")   # 黑白冲突 -> 以黑为准 reject + 告警
+            r_hook = ev("t_hook", i=0, ip="10.0.0.9", dev="d_hook")  # R006 reject -> review
+            checks = [
+                ("review 级行为证据被抑制为 pass(命中保留 original_action)",
+                 r_vip["action"] == "pass"
+                 and any(h.get("original_action") == "review" and h.get("whitelisted")
+                         for h in r_vip["hits"])),
+                ("reject 级证据只降档为 review(不是免检)",
+                 r_rej["action"] == "review"
+                 and any(h.get("original_action") == "reject" for h in r_rej["hits"])),
+                ("过期白名单不生效(按事件时点判断)",
+                 r_exp["action"] == "review" and "whitelist" not in r_exp),
+                ("同值黑白冲突:以黑为准 reject + 治理告警",
+                 r_conf["action"] == "reject" and bool(r_conf.get("whitelist_conflict"))),
+                ("R006 设备指纹 reject 对白名单账号降档 review",
+                 r_hook["action"] == "review"
+                 and any(h["rule_id"] == "R006" and h.get("original_action") == "reject"
+                         for h in r_hook["hits"])),
+            ]
+            # 审批流:白名单带有效期落盘;同值不同色允许提交(灰升黑/黑值申诉加白)
+            r_w = registry.dispatch("blacklist_add", {
+                "dimension": "device_id", "value": "d_new", "list": "white",
+                "reason": "eval:临时白", "expires_days": 30})
+            actions.decide(r_w.get("action_id", -1), approve=True)
+            rec = [r for r in registry.dispatch(
+                "blacklist_query", {"dimension": "device_id", "value": "d_new"})["records"]
+                if r["list"] == "white"]
+            r_up = registry.dispatch("blacklist_add", {
+                "dimension": "uid", "value": "t_rej", "list": "gray",
+                "reason": "eval:白值提灰(升级路径)"})
+            checks += [
+                ("白名单审批落盘且带 expires_at",
+                 bool(rec) and bool(rec[0].get("expires_at"))),
+                ("同值不同色允许提交(不被 already_listed 挡住)",
+                 r_up.get("status") == "pending_confirmation"),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+    # 样本集集成:u_1001 白名单演示条目不产生任何风险信号与指标扰动
+    mon = account_monitor("u_1001")
+    prof = registry.dispatch("account_profile", {"uid": "u_1001"})
+    checks += [
+        ("白名单不是风险信号(monitor 无 blacklist 信号,单列标注)",
+         "blacklist" not in mon["signal_types"] and bool(mon.get("whitelist_notes"))),
+        ("档案携带白名单状态供处置权衡", bool(prof.get("whitelist"))),
+    ]
+    return _report("白名单策略(离线)", checks)
+
+
 def run_policy_layer() -> int:
     """离线:策略版本化 —— 同一账号的事件,结论随'当时生效的版本'切换;
     use_current_policy 则让历史事件吃到最新版(评估口径)。"""
@@ -780,6 +872,7 @@ def main() -> int:
     failures += run_scan_layer()
     failures += run_graph_layer()
     failures += run_actions_layer()
+    failures += run_whitelist_layer()
     failures += run_policy_layer()
     failures += run_governance_layer()
     failures += run_shadow_layer()

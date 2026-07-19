@@ -89,6 +89,8 @@ def account_profile(uid: str):
         for dim, val in (("ip", acct.get("register_ip")), ("device_id", acct.get("register_device"))):
             if val:
                 for rec in blacklist_query(dim, val)["records"]:
+                    if rec["list"] == "white" or rec.get("expired"):
+                        continue  # 白名单/过期记录不是注册风险
                     reg_flags.append("注册%s=%s 命中%s名单: %s" % (dim, val, rec["list"], rec["reason"]))
         first_order = next((e for e in mine if e["type"] == "order"), None)
         result["account"] = acct
@@ -104,6 +106,14 @@ def account_profile(uid: str):
                     "近期事件全部来自非注册设备(注册 %s,近期 %s)" % (
                         acct["register_device"], "、".join(sorted(used_devices)))]
         result["value"] = _value_tier(acct.get("ltv", 0.0))
+
+    # 白名单状态(处置建议必看):行为规则对其失效、reject 级证据降档 review
+    wl = [r for r in blacklist_query("uid", uid)["records"]
+          if r["list"] == "white" and not r.get("expired")]
+    if wl:
+        result["whitelist"] = {"records": wl,
+                               "note": "白名单账号:行为规则已抑制,reject 级证据降档 review;"
+                                       "处置建议必须说明白名单影响"}
 
     if mine:
         result["current_verdict"] = account_verdicts([uid], events)[uid]
