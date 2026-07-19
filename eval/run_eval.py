@@ -487,6 +487,154 @@ def run_privacy_layer() -> int:
     ])
 
 
+def run_regression_layer() -> int:
+    """离线:代码复检修好的 bug,每个钉一条断言 —— 修复没有回归测试就等于
+    没修(下一次重构随手就能改回去,eval 还是绿的)。每条断言都是当初
+    finder 用来实锤 bug 的最小复现场景。"""
+    from agent.privacy import Tokenizer
+    from agent.tools import featurelib, reconcile
+    from agent.tools.actions import _limit_violations
+    from agent.tools.datasource import load_events
+
+    checks = []
+
+    # -- privacy:三种曾漏防的形态(文件名下划线前缀 / 句尾 IP / 举报人 ID)--
+    t = Tokenizer(salt="eval")
+    chart_json = json.dumps(chart_account_timeline("u_1002"), ensure_ascii=False)
+    checks += [
+        ("脱敏:图表文件名里的 uid(下划线前缀)",
+         "u_1002" not in t.tokenize("out/charts/timeline_u_1002.png")),
+        ("脱敏:句尾带英文句点的 IP",
+         "203.0.113.66" not in t.tokenize("排查 203.0.113.66.")),
+        ("脱敏:g_rpt_ 举报人 ID",
+         "g_rpt_0007" not in t.tokenize("reporter g_rpt_0007")),
+        ("脱敏:图表工具完整返回无标识符泄漏(原始泄漏路径)",
+         "u_1002" not in t.tokenize(chart_json)),
+    ]
+
+    # -- actions:限速的 0 值短路与开关取值域 --
+    cur = {"r006_reject_rooted": 0, "r006_reject_hook": 1, "r002_min_events": 10}
+    checks += [
+        ("限速:现值 0 的开关塞大数值被拒",
+         bool(_limit_violations({"r006_reject_rooted": 5000}, cur))),
+        ("限速:开关塞 0.5 被拒(非 0/1)",
+         bool(_limit_violations({"r006_reject_hook": 0.5}, cur))),
+        ("限速:合法开关切换 0->1 放行",
+         not _limit_violations({"r006_reject_rooted": 1}, cur)),
+        ("限速:数值键小幅变更放行",
+         not _limit_violations({"r002_min_events": 12}, cur)),
+        ("限速:数值键超幅仍被拒",
+         bool(_limit_violations({"r002_min_events": 99}, cur))),
+    ]
+
+    # -- monitor:window_seconds=0 回落而非除零(信号不丢)--
+    m = account_monitor("u_1002", window_seconds=0)
+    checks.append(("监控:window=0 回落默认窗口且信号完整",
+                   m.get("found") is True and m.get("window_seconds") == 300
+                   and "burst" in m.get("signal_types", [])))
+
+    # -- core ⑤/⑥:单轮爆炸时 checkpoint 压不动,当前轮兜底接手 --
+    from agent.core import Agent, TRIM_PLACEHOLDER
+    a = Agent.__new__(Agent)  # 不走 __init__,离线单测压缩逻辑
+    a._system = "sys"
+    a.messages = [{"role": "system", "content": "sys"},
+                  {"role": "user", "content": "查账号"}]
+    for i in range(3):
+        a.messages.append({"role": "assistant", "content": None, "tool_calls": [i]})
+        a.messages.append({"role": "tool", "content": "X" * 5000})
+    ck = a._checkpoint_now()
+    trimmed = a._force_trim_current_turn()
+    tool_bodies = [m2["content"] for m2 in a.messages if m2["role"] == "tool"]
+    checks += [
+        ("兜底:单轮场景 checkpoint 如实返回未压缩", ck is False),
+        ("兜底:当前轮工具结果降级,保留最近一条",
+         trimmed is True and tool_bodies[-1] != TRIM_PLACEHOLDER
+         and all(c == TRIM_PLACEHOLDER for c in tool_bodies[:-1])),
+        ("兜底:再裁幂等(只剩一条时不动)", a._force_trim_current_turn() is False),
+    ]
+
+    # -- featurelib:uid 索引与全量扫描口径一致(含 as_of 过滤)--
+    def brute(uid, as_of=None):
+        return [e for e in load_events()
+                if e["uid"] == uid and (as_of is None or e["ts"] < as_of)]
+    idx_ok = all(featurelib._account_events(u) == brute(u)
+                 for u in ("u_1002", "u_1003", "u_9999"))
+    cut = brute("u_1002")[10]["ts"]
+    checks.append(("特征:uid 索引 == 全量扫描(含 as_of)",
+                   idx_ok and featurelib._account_events("u_1002", cut) == brute("u_1002", cut)))
+
+    # -- 临时数据集场景:R002 边界 / 漂移 P99=0 / reconcile 缓存 / decide 原子性 --
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        # R002:恰好刷满 min_events 次,第 N 次(当次计入)就必须命中。
+        # 另放一个慢速账号:population_baseline 有 n>=2 门槛,单账号数据集里
+        # coupon_claims 特征会被跳过,漂移比较根本不会发生(测试就空转了)
+        n = 10
+        evs = [{"uid": "t_bot", "ip": "10.0.0.1", "device_id": "t_dev",
+                "type": "coupon_claim", "ts": 1000 + i * 2} for i in range(n)]
+        evs += [{"uid": "t_norm", "ip": "10.0.0.2", "device_id": "t_dev2",
+                 "type": "coupon_claim", "ts": 2000 + i * 3600} for i in range(3)]
+        (base / "events_sample.json").write_text(json.dumps(evs))
+        (base / "blacklist.json").write_text("[]")
+        (base / "labels.json").write_text("{}")
+        # 漂移:上版快照 P99=0,当前有值 -> 从无到有必须告警
+        (base / "thresholds.json").write_text(json.dumps([
+            {"version": 1, "effective_from": 0, "approved_by": "eval", "note": "",
+             "values": {}, "baseline_snapshot": {"coupon_claims": {"p99": 0}}}]))
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            r2 = rule_eval({"uid": "t_bot", "ip": "10.0.0.1", "device_id": "t_dev",
+                            "type": "coupon_claim", "ts": 1000 + (n - 1) * 2})
+            checks.append(("R002:恰好刷满阈值次数的第 N 次即命中(无差一)",
+                           any(h["rule_id"] == "R002" for h in r2["hits"])))
+            cal = registry.dispatch("threshold_calibrate", {})
+            checks.append(("漂移:快照 P99=0 抬升必须告警(0 不是缺失)",
+                           cal.get("drift_alarm") is True
+                           and any("从 0" in s for s in cal.get("drift_alarms", []))))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "blacklist.json", "labels.json",
+                  "accounts.json", "decisions_log.json", "thresholds.json",
+                  "device_intel.json", "ip_intel.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            rate1 = reconcile.reconcile()["mismatch_rate"]
+            # 只动 device_intel(其余文件 mtime 不变):对账必须重算,不许吐缓存
+            (base / "device_intel.json").write_text("{}", encoding="utf-8")
+            rate2 = reconcile.reconcile()["mismatch_rate"]
+            checks.append(("对账:device_intel 变更使缓存失效并重算", rate1 != rate2))
+
+            # decide 原子性:落盘失败 -> 申请留在队列、进程内名单缓存不被污染
+            actions.blacklist_add("device_id", "t_evil", reason="eval", **{"list": "gray"})
+            pending_before = len(actions.list_pending())
+            bl_before = len(registry.dispatch("blacklist_query",
+                                              {"dimension": "device_id", "value": "t_evil"})["records"])
+            real_path = actions.blacklist_path
+            actions.blacklist_path = lambda: base / "no_such_dir" / "bl.json"
+            try:
+                aid = actions.list_pending()[-1]["action_id"]
+                raised = False
+                try:
+                    actions.decide(aid, approve=True)
+                except OSError:
+                    raised = True
+            finally:
+                actions.blacklist_path = real_path
+            bl_after = len(registry.dispatch("blacklist_query",
+                                             {"dimension": "device_id", "value": "t_evil"})["records"])
+            checks.append(("审批原子性:落盘失败时申请留队、缓存无幻影记录",
+                           raised and len(actions.list_pending()) == pending_before
+                           and bl_before == bl_after == 0))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+    return _report("复检修复回归(离线)", checks)
+
+
 def run_cost_layer() -> int:
     """离线:结构性 token 成本预算 —— schema 与 system prompt 每请求随行,
     缓存命中可吸收,但决定了 miss 时的底价;失控即工具设计出了问题。"""
@@ -616,6 +764,7 @@ def main() -> int:
     failures += run_reconcile_layer()
     failures += run_gen_layer()
     failures += run_privacy_layer()
+    failures += run_regression_layer()
     failures += run_cost_layer()
     failures += run_chart_smoke()
     if args.offline:

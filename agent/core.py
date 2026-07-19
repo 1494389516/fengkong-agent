@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from . import tools
-from .llm import load_config, make_client
 from .privacy import Tokenizer, privacy_enabled
 
 MAX_TOOL_ROUNDS = 8
@@ -70,6 +69,9 @@ def _extract_usage(resp) -> Dict[str, int]:
 
 class Agent:
     def __init__(self):
+        # 惰性导入:离线评估要单测 ⑤/⑥ 压缩逻辑(Agent.__new__ 构造),
+        # 不能让"导入 core"就强依赖 openai 包
+        from .llm import load_config, make_client
         self.cfg = load_config()
         self.client = make_client(self.cfg)
         self.model = self.cfg.get("model", "deepseek-chat")

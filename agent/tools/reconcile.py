@@ -33,9 +33,12 @@ _STATE_FILES = ("events_sample.json", "decisions_log.json", "thresholds.json",
 
 
 def _state_key():
-    out = []
+    # 键必须含数据集路径:FK_DATA_DIR 切换后若各文件 mtime 恰好相同,
+    # 纯 mtime 元组会把另一个数据集的对账结果当缓存命中吐回来
+    base = data_dir()
+    out = [str(base)]
     for name in _STATE_FILES:
-        p = data_dir() / name
+        p = base / name
         out.append(p.stat().st_mtime_ns if p.exists() else 0)
     return tuple(out)
 
