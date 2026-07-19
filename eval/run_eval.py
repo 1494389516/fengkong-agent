@@ -25,7 +25,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from agent.tools.backtest import backtest  # noqa: E402
-from agent.tools.charts import chart_account_timeline, chart_threshold_sweep  # noqa: E402
+from agent.tools.charts import (chart_account_timeline, chart_cohort_features,  # noqa: E402
+                                chart_threshold_sweep)
 from agent.tools.monitor import account_monitor  # noqa: E402
 from agent.tools.rules import rule_eval  # noqa: E402
 
@@ -104,6 +105,7 @@ def run_chart_smoke() -> int:
     for name, result in (
         ("账号时间线 u_1002", chart_account_timeline("u_1002")),
         ("阈值扫描 r002_min_events", chart_threshold_sweep("r002_min_events")),
+        ("群体特征对比", chart_cohort_features()),
     ):
         path = result.get("chart_path", "")
         ok = bool(path) and (ROOT / path).exists()

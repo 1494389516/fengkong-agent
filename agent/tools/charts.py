@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
+import seaborn as sns  # noqa: E402
 
 from . import tool  # noqa: E402
 from .backtest import backtest  # noqa: E402
@@ -25,6 +26,12 @@ from .monitor import MONITOR_BURST_MIN  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent.parent
 OUT = ROOT / "out" / "charts"
 DATA = ROOT / "data" / "events_sample.json"
+LABELS = ROOT / "data" / "labels.json"
+
+# chart_cohort_features 的特征列(与 heatmap/箱线图共用)
+FEATURE_COLS = ["event_count", "distinct_ip", "distinct_device",
+                "coupon_claims", "max_order_amount", "min_gap_seconds"]
+LABEL_COLORS = {"fraud": "#e15759", "normal": "#4e79a7", "unlabeled": "#bab0ac"}
 
 PALETTE = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
            "#edc948", "#b07aa1", "#ff9da7"]
@@ -194,3 +201,77 @@ def chart_threshold_sweep(param: str, values: Optional[List[float]] = None):
     best = rows[best_i]
     return {"param": param, "chart_path": path, "rows": rows,
             "best_by_f1": {"value": best["value"], "f1": best["f1"]}}
+
+
+def _labels() -> dict:
+    return {k: v["label"] for k, v in json.loads(LABELS.read_text(encoding="utf-8")).items()
+            if not k.startswith("_")}
+
+
+def _account_features() -> pd.DataFrame:
+    """逐账号特征表(pandas groupby 聚合),行序:label 分组内按 uid。"""
+    df = _events_df()
+    feats = df.groupby("uid").agg(
+        event_count=("ts", "size"),
+        distinct_ip=("ip", "nunique"),
+        distinct_device=("device_id", "nunique"),
+    )
+    feats["coupon_claims"] = (
+        df[df["type"] == "coupon_claim"].groupby("uid").size().reindex(feats.index).fillna(0).astype(int))
+    feats["max_order_amount"] = (
+        df.groupby("uid")["amount"].max() if "amount" in df.columns else float("nan"))
+    # _events_df 已按 ts 全局排序,组内顺序即时间序,diff 就是相邻间隔
+    feats["min_gap_seconds"] = df.groupby("uid")["ts"].diff().groupby(df["uid"]).min()
+    labels = _labels()
+    feats["label"] = [labels.get(u, "unlabeled") for u in feats.index]
+    return feats.sort_values(["label", "uid"])
+
+
+@tool(
+    name="chart_cohort_features",
+    description=(
+        "全量账号群体对比图(PNG,seaborn):上图为账号×特征热力图(颜色=列内"
+        "归一化、格内标原始值,行标注 fraud/normal 标签),下图为各账号事件间隔"
+        "箱线图(对数轴)。用于跨账号横向对比、找区分欺诈与正常的特征。"
+        "返回文件路径与逐账号特征表;注意 min_gap_seconds 越小越可疑。"
+    ),
+    parameters={"type": "object", "properties": {}},
+)
+def chart_cohort_features():
+    feats = _account_features()
+    mat = feats[FEATURE_COLS]
+    # 列内 min-max 归一化只管颜色,格内仍标原始值 —— 各列量纲差太多,不归一化热力图就废了
+    rng = (mat.max() - mat.min()).replace(0, 1)
+    norm = (mat - mat.min()) / rng
+    annot = mat.map(lambda v: "-" if pd.isna(v) else "%g" % v)
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8.5), constrained_layout=True,
+                                   height_ratios=[1.2, 1])
+    sns.heatmap(norm, annot=annot, fmt="", cmap="YlOrRd", cbar=False, linewidths=0.5,
+                yticklabels=["%s·%s" % (u, l) for u, l in zip(mat.index, feats["label"])], ax=ax1)
+    ax1.set_ylabel("")
+    ax1.tick_params(axis="y", rotation=0)
+    ax1.set_title(_t("账号×特征热力图(颜色=列内归一化;min_gap 越小越可疑)",
+                     "Account x feature heatmap (color = per-column normalized)"))
+
+    df = _events_df()
+    labels = _labels()
+    gdf = df.assign(gap=df.groupby("uid")["ts"].diff()).dropna(subset=["gap"])
+    gdf["label"] = gdf["uid"].map(lambda u: labels.get(u, "unlabeled"))
+    order = [u for u in feats.index if u in set(gdf["uid"])]
+    sns.boxplot(data=gdf, x="uid", y="gap", hue="label", order=order, dodge=False,
+                palette=LABEL_COLORS, ax=ax2)
+    sns.stripplot(data=gdf, x="uid", y="gap", order=order, color="#333", size=3,
+                  alpha=0.6, ax=ax2, legend=False)
+    ax2.set_yscale("log")
+    ax2.set_xlabel("")
+    ax2.set_ylabel(_t("事件间隔(秒,对数轴)", "event gap (s, log)"))
+    ax2.set_title(_t("各账号事件间隔分布", "Per-account event gap distribution"))
+
+    path = _save(fig, "cohort_features.png")
+    records = feats.reset_index().astype(object).where(pd.notna(feats.reset_index()), None)
+    return {
+        "chart_path": path,
+        "accounts": len(feats),
+        "features": records.to_dict("records"),
+    }
