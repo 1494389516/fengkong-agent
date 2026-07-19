@@ -224,12 +224,11 @@ def _risk_trend(feats: List[str], labels: Dict[str, str],
 @tool(
     name="feature_risk",
     description=(
-        "特征区分度评估:对行为特征逐个计算 IV(整体判别信息)、KS(最优切点"
-        "分离度)、AUC(整体排序力,0.5~1 方向无关)、Lift(最差箱欺诈浓度/基准)"
-        "与风险方向,按 IV 排名。include_bins=true 附逐箱明细(占比/欺诈率/WOE/"
-        "Lift,阈值应切在 WOE 跳变处);time_grain(day/hour)附逐桶欺诈率与 IV "
-        "趋势,IV 跌破峰值一半报区分度衰减(对手在适应)。只算已标注账号,任一类"
-        "样本 <10 记 n/a。适合'哪个特征值钱''阈值切哪''特征还灵不灵'。"
+        "特征区分度评估:逐特征算 IV、KS、AUC(0.5~1 方向无关)、Lift 与风险"
+        "方向,按 IV 排名。include_bins=true 附逐箱明细(占比/欺诈率/WOE/Lift,"
+        "阈值应切在 WOE 跳变处);time_grain(day/hour)附逐桶欺诈率与 IV 趋势,"
+        "IV 跌破峰值一半报区分度衰减(对手在适应)。只算已标注账号,任一类样本 "
+        "<10 记 n/a。适合'哪个特征值钱''阈值切哪''特征还灵不灵'。"
     ),
     parameters={
         "type": "object",

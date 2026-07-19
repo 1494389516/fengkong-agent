@@ -498,6 +498,8 @@ def run_strategy_layer() -> int:
 
             fr = registry.dispatch("feature_risk", {})
             levels = {d["level"] for d in fr["features"].values()}
+            # 日报聚合:处置清单齐全、待办申诉计数正确、安静项显式列出
+            brief = registry.dispatch("daily_brief", {})
             # 试衣间:u_1002(高频领券多 IP)已被现有规则覆盖 → 应判无增量
             draft = registry.dispatch("rule_draft_test", {"conditions": [
                 {"feature": "distinct_ip", "op": ">=", "value": 5}]})
@@ -513,6 +515,10 @@ def run_strategy_layer() -> int:
             statuses = {a["appeal_id"]: a["status"] for a in load_appeals()}
             return _report("策略生命周期(离线)", [
                 ("小样本上区分度指标全 n/a(样本纪律)", levels == {"n/a"}),
+                ("日报聚合:命中清单 + 申诉计数 + 安静项显式",
+                 len(brief["verdicts"]["reject"]) + len(brief["verdicts"]["review"]) == 5
+                 and brief["verdicts"]["pass_count"] == 1
+                 and brief["appeals_pending"] == 2 and bool(brief["quiet"])),
                 ("试衣间:命中 u_1002 且判无增量", draft["hit_accounts"] == ["u_1002"]
                  and "无增量" in draft["verdict"]),
                 ("对抗巡检可用且带近阈监控项", adv.get("found") is True
