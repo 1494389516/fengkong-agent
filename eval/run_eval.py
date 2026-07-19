@@ -28,6 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # 供导入 measure_costs
 
 # 评估必须跑在确定性的手工样本上,清掉可能残留的数据集切换
 os.environ.pop("FK_DATA_DIR", None)
@@ -193,6 +194,12 @@ def run_gen_layer() -> int:
             strict = r["operating_points"]["flag=reject_only"]
             cal = registry.dispatch("threshold_calibrate", {"fpr_budget": 0.01})
             realized = cal.get("realized_fpr_normal_wide")
+            # token 成本预算:在同一份大样本上量每个工具的典型返回,超限即红。
+            # 教训:rule_backtest 的 per_account 曾单次 18k+ chars,② 的 dict
+            # 限幅与工具面瘦身都是这里钉住的。
+            from measure_costs import tool_result_sizes
+            sizes = dict(tool_result_sizes())
+            biggest = max(sizes.items(), key=lambda kv: kv[1])
             failures = _report("数据生成 + 大样本回测(离线)", [
                 ("生成器退出码 0", proc.returncode == 0),
                 ("账号数 = 57(seed 7 确定性)", r["accounts_evaluated"] == 57),
@@ -203,6 +210,9 @@ def run_gen_layer() -> int:
                 ("校准产出建议阈值", bool(cal.get("suggestions"))),
                 ("建议阈值实测误伤率 <= 5%", realized is not None and realized <= 0.05),
                 ("无参照快照时不误报漂移", cal.get("drift_alarm") is False),
+                ("单工具结果 <= 5000 chars(最大: %s %d)" % biggest, biggest[1] <= 5000),
+                ("rule_backtest 已瘦身 <= 1500 chars(现 %d)" % sizes["rule_backtest"],
+                 sizes["rule_backtest"] <= 1500),
             ])
             print("  宽口径 %s" % wide)
             print("  严口径 %s" % strict)
@@ -370,6 +380,19 @@ def run_profile_layer() -> int:
     ])
 
 
+def run_cost_layer() -> int:
+    """离线:结构性 token 成本预算 —— schema 与 system prompt 每请求随行,
+    缓存命中可吸收,但决定了 miss 时的底价;失控即工具设计出了问题。"""
+    from measure_costs import structural_sizes
+    s = structural_sizes()
+    return _report("结构性成本预算(离线)", [
+        ("工具 schema 总量 <= 12000 chars(现 %d,%d 个工具)"
+         % (s["schemas_chars"], s["tool_count"]), s["schemas_chars"] <= 12000),
+        ("system prompt <= 3000 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 3000),
+    ])
+
+
 def run_chart_smoke() -> int:
     """离线:图表冒烟 —— 两类图各渲染一次,文件真实落盘即过。"""
     print("\n== 图表冒烟(离线)==")
@@ -402,6 +425,10 @@ def _check_agent_case(c, answer, tool_calls, used):
     for k in c.get("expect_answer_all", []):
         if k.lower() not in ans:
             problems.append("回答缺少必含关键词:%s" % k)
+    # 禁用表述:两阶段审批下,agent 把"已提交"说成"已生效"是权限越界话术,直接判负
+    for k in c.get("forbid_answer_any", []):
+        if k.lower() in ans:
+            problems.append("回答包含禁用表述:%s" % k)
     # 成本:token 预算(防上下文参数改坏后成本悄悄回归)
     budget = c.get("max_total_tokens")
     if budget and used["total"] > budget:
@@ -463,6 +490,7 @@ def main() -> int:
     failures += run_intel_layer()
     failures += run_profile_layer()
     failures += run_gen_layer()
+    failures += run_cost_layer()
     failures += run_chart_smoke()
     if args.offline:
         pass

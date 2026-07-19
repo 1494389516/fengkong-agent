@@ -176,4 +176,13 @@ def shadow_backtest(overrides: Dict):
     },
 )
 def rule_backtest(overrides: Optional[Dict] = None):
-    return backtest(overrides)
+    r = backtest(overrides)
+    if "error" in r:
+        return r
+    # 工具面瘦身:per_account 在真实规模数据上是整包结果的 90%+(逐账号明细
+    # 模型也消化不了),只留指标与误判清单;内部调用方(shadow/eval)仍走
+    # backtest() 拿全量。
+    slim = {k: v for k, v in r.items() if k != "per_account"}
+    slim["per_account_note"] = ("逐账号明细未随返回(共 %d 账号,防上下文爆炸);"
+                                "查单账号用 account_profile / rule_eval" % r["accounts_evaluated"])
+    return slim
