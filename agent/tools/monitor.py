@@ -6,25 +6,26 @@
 上下文(token 友好)。
 
 信号类型:
-  burst         窗口内事件数过多
-  ip_churn      窗口内 IP 切换过多
-  rapid_repeat  窗口内最短间隔过小(机打节奏)
-  shared_device 本账号设备被多个账号共用(聚集性/团伙特征)
-  blacklist     uid / ip / device 命中黑灰名单
+  burst             窗口内事件数过多
+  ip_churn          窗口内 IP 切换过多
+  rapid_repeat      窗口内最短间隔过小(机打节奏)
+  shared_device     本账号设备被多个账号共用(聚集性/团伙特征)
+  blacklist         uid / ip / device 命中黑灰名单
+  self_new_device   近窗出现历史未见设备(自身基线,盗号信号)
+  self_amount_spike 近窗最大订单较自身历史突增(自身基线,销赃信号)
+  geo_jump          相邻事件地理跳变(移动速度超过民航速度,物理不可能)
+
+自身基线带账龄门槛(policy.self_min_history_events):历史太浅的账号不启用
+—— 否则盗号者潜伏几天"养"出一条正常自身基线就能骗过它,新号也会误报。
+阈值全部经 policy.active_policy() 解析(监控是"现在看",取当前最新版)。
 """
 from collections import defaultdict
 
 from . import tool
 from .blacklist import blacklist_query
 from .datasource import load_events
-
-# 窗口内阈值。样本参照:u_1002 一个 300s 窗口里 20 事件/5 IP/最短 3s,
-# u_1001 最密也只有 300s 间隔的 2 个事件,带宽很大,阈值取偏严一侧。
-MONITOR_BURST_MIN = 8          # burst:窗口事件数下限
-MONITOR_IP_CHURN_MIN = 3       # ip_churn:窗口去重 IP 下限
-MONITOR_RAPID_GAP_SECONDS = 5  # rapid_repeat:最短间隔上限……
-MONITOR_RAPID_MIN_EVENTS = 3   # ……且窗口内至少这么多事件
-SHARED_DEVICE_MIN_ACCOUNTS = 3  # shared_device:设备关联账号数下限
+from .intel import geo_jumps
+from .policy import active_policy
 
 
 @tool(
@@ -45,6 +46,7 @@ SHARED_DEVICE_MIN_ACCOUNTS = 3  # shared_device:设备关联账号数下限
     },
 )
 def account_monitor(uid: str, window_seconds: int = 300):
+    p = active_policy()  # 入口取一次快照,整个函数同一份口径
     events = load_events()
     mine = sorted((e for e in events if e["uid"] == uid), key=lambda e: e["ts"])
     if not mine:
@@ -63,11 +65,12 @@ def account_monitor(uid: str, window_seconds: int = 300):
         gaps = [b - a for a, b in zip(ts_list, ts_list[1:])]
         min_gap = min(gaps) if gaps else None
         signals = []
-        if len(evs) >= MONITOR_BURST_MIN:
+        if len(evs) >= p["monitor_burst_min"]:
             signals.append("burst")
-        if len({e["ip"] for e in evs}) >= MONITOR_IP_CHURN_MIN:
+        if len({e["ip"] for e in evs}) >= p["monitor_ip_churn_min"]:
             signals.append("ip_churn")
-        if min_gap is not None and min_gap <= MONITOR_RAPID_GAP_SECONDS and len(evs) >= MONITOR_RAPID_MIN_EVENTS:
+        if (min_gap is not None and min_gap <= p["monitor_rapid_gap_seconds"]
+                and len(evs) >= p["monitor_rapid_min_events"]):
             signals.append("rapid_repeat")
         if signals:
             signal_types.update(signals)
@@ -84,9 +87,34 @@ def account_monitor(uid: str, window_seconds: int = 300):
     shared_devices = []
     for dev in sorted({e["device_id"] for e in mine}):
         users = sorted({e["uid"] for e in events if e["device_id"] == dev})
-        if len(users) >= SHARED_DEVICE_MIN_ACCOUNTS:
+        if len(users) >= p["shared_device_min_accounts"]:
             signal_types.add("shared_device")
             shared_devices.append({"device_id": dev, "account_count": len(users), "accounts": users})
+
+    # 2.5) 自身基线:近窗行为 vs 自己的历史(账龄门槛见模块 docstring)
+    self_signals = []
+    recent_start = mine[-1]["ts"] - p["self_recent_window_seconds"]
+    prior = [e for e in mine if e["ts"] < recent_start]
+    recent = [e for e in mine if e["ts"] >= recent_start]
+    if len(prior) >= p["self_min_history_events"] and recent:
+        new_devs = sorted({e["device_id"] for e in recent} - {e["device_id"] for e in prior})
+        if new_devs:
+            signal_types.add("self_new_device")
+            self_signals.append("近 %d 小时出现历史未见设备: %s" % (
+                p["self_recent_window_seconds"] // 3600, ", ".join(new_devs)))
+        prior_amt = [e["amount"] for e in prior if e.get("amount") is not None]
+        recent_amt = [e["amount"] for e in recent if e.get("amount") is not None]
+        if prior_amt and recent_amt:
+            if (max(recent_amt) >= p["self_amount_spike_ratio"] * max(prior_amt)
+                    and max(recent_amt) >= p["self_amount_floor"]):
+                signal_types.add("self_amount_spike")
+                self_signals.append("近窗最大订单 %.2f,为自身历史最大 %.2f 的 %.1f 倍" % (
+                    max(recent_amt), max(prior_amt), max(recent_amt) / max(prior_amt)))
+
+    # 2.7) 地理跳变(经典盗号信号,情报缺失的网段不参与)
+    jumps = geo_jumps(mine, p["geo_jump_speed_kmh"])
+    if jumps:
+        signal_types.add("geo_jump")
 
     # 3) 黑灰名单关联(uid + 该账号用过的全部 ip/设备)
     blacklist_signals = []
@@ -106,5 +134,8 @@ def account_monitor(uid: str, window_seconds: int = 300):
         "anomalous_windows": anomalous,
         "shared_devices": shared_devices,
         "blacklist_signals": blacklist_signals,
+        "self_baseline_signals": self_signals,
+        "geo_jumps": jumps,
         "signal_types": sorted(signal_types),
+        "policy_version": p["_version"],
     }

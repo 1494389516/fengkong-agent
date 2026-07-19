@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""token 成本测量:工具 schema 总量 + 每个工具典型调用的结果大小。
+
+为什么要单独量:① 只度量"已经花掉"的 token,这里量的是"结构性成本"——
+schema 和 system prompt 每次请求都随行(缓存前缀可吸收,但决定了 miss 时的
+底价),工具结果则逐轮进入历史且无法缓存(④ 只裁旧轮)。任何一个工具的
+典型返回过大,都是复利式的上下文负担;eval 据此设了硬预算(结构性上限 +
+单工具结果上限),超了直接红。
+
+用法:python3 eval/measure_costs.py [--dataset sample|gen]
+est tokens 用 chars/2(与 core.py ⑥ 同口径,中文偏保守)。
+"""
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+
+def structural_sizes():
+    """schema / system prompt 的字符量(数据集无关)。"""
+    from agent import tools
+    schemas_json = json.dumps(tools.schemas(), ensure_ascii=False)
+    system_md = (ROOT / "agent" / "prompts" / "system.md").read_text(encoding="utf-8")
+    return {"tool_count": len(tools.schemas()),
+            "schemas_chars": len(schemas_json),
+            "system_chars": len(system_md)}
+
+
+def tool_result_sizes():
+    """每个工具一次典型调用经 dispatch(含 ② 限幅)后的结果字符量。
+    热点账号按当前数据集自动选(事件最多者 / 有属实举报者)。"""
+    from agent import tools
+    from agent.tools.datasource import load_events, load_reports
+
+    events = load_events()
+    counts = {}
+    for e in events:
+        counts[e["uid"]] = counts.get(e["uid"], 0) + 1
+    uid_hot = max(counts, key=counts.get)
+    verified = [r["reported_uid"] for r in load_reports() if r.get("status") == "verified"]
+    uid_victim = verified[0] if verified else uid_hot
+
+    calls = [
+        ("blacklist_query", {"dimension": "uid", "value": uid_victim}),
+        ("ip_intel", {"ip": "203.0.113.66"}),
+        ("report_query", {"uid": uid_victim}),
+        ("feature_stats", {"uid": uid_hot}),
+        ("rule_eval", {"event": {"uid": uid_hot, "type": "coupon_claim"}}),
+        ("account_monitor", {"uid": uid_hot}),
+        ("policy_history", {}),
+        ("consistency_check", {}),
+        ("graph_relations", {}),
+        ("scan_all", {}),
+        ("account_profile", {"uid": uid_victim}),
+        ("rule_backtest", {}),
+        ("shadow_backtest", {"overrides": {"r002_min_events": 99}}),
+        ("threshold_calibrate", {}),
+        ("chart_account_timeline", {"uid": uid_hot}),
+        ("chart_cohort_features", {}),
+        ("chart_threshold_sweep", {"param": "r002_min_events"}),
+    ]
+    rows = []
+    for name, call_args in calls:
+        payload = json.dumps(tools.dispatch(name, dict(call_args)),
+                             ensure_ascii=False, default=str)
+        rows.append((name, len(payload)))
+    return rows
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dataset", choices=["sample", "gen"], default="sample")
+    args = ap.parse_args()
+    if args.dataset == "gen":
+        os.environ["FK_DATASET"] = "gen"
+
+    s = structural_sizes()
+    print("== 结构性成本(每请求随行,prefix 缓存可吸收)==")
+    print("  工具数: %d" % s["tool_count"])
+    print("  schema 总量: %d chars ≈ %d tokens" % (s["schemas_chars"], s["schemas_chars"] // 2))
+    print("  system prompt: %d chars ≈ %d tokens" % (s["system_chars"], s["system_chars"] // 2))
+
+    rows = tool_result_sizes()
+    print("\n== 工具结果大小(数据集: %s,经 dispatch 限幅后)==" % args.dataset)
+    for name, size in sorted(rows, key=lambda r: -r[1]):
+        print("  %-24s %7d chars ≈ %5d tokens" % (name, size, size // 2))
+    total = sum(size for _, size in rows)
+    print("  合计(全部各调一次): %d chars ≈ %d tokens" % (total, total // 2))
+
+
+if __name__ == "__main__":
+    main()

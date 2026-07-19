@@ -11,18 +11,24 @@ _REGISTRY: Dict[str, Dict[str, Any]] = {}
 # ② 工具限幅:工具结果是 token 爆炸的最大来源(一次 feature_stats 可能拖出上百个 ip/设备)。
 #   dispatch 是所有工具结果回填进对话前的单点,在这里递归截断,一处生效全局。
 MAX_LIST_ITEMS = 20   # 长列表只留前 N 项 + 一条计数说明
+MAX_DICT_KEYS = 30    # 大字典留前 N 键 + 计数(教训:backtest 的 per_account 曾在
+#                       242 账号数据集上单次返回 9k+ tokens —— dict 也要设限)
 MAX_STR_LEN = 800     # 超长字符串截断
 
 
 def _cap(obj: Any) -> Any:
-    """递归限幅:长列表留前 N + "共 X 条",超长字符串截断。保留结构让模型仍能解析。"""
+    """递归限幅:长列表/大字典留前 N + "共 X 条",超长字符串截断。保留结构让模型仍能解析。"""
     if isinstance(obj, list):
         capped = [_cap(x) for x in obj[:MAX_LIST_ITEMS]]
         if len(obj) > MAX_LIST_ITEMS:
             capped.append({"_truncated": "共 %d 条,已省略 %d 条" % (len(obj), len(obj) - MAX_LIST_ITEMS)})
         return capped
     if isinstance(obj, dict):
-        return {k: _cap(v) for k, v in obj.items()}
+        items = list(obj.items())
+        capped_d = {k: _cap(v) for k, v in items[:MAX_DICT_KEYS]}
+        if len(items) > MAX_DICT_KEYS:
+            capped_d["_truncated"] = "共 %d 键,已省略 %d 个" % (len(items), len(items) - MAX_DICT_KEYS)
+        return capped_d
     if isinstance(obj, str) and len(obj) > MAX_STR_LEN:
         return obj[:MAX_STR_LEN] + "…[已截断,原长 %d 字符]" % len(obj)
     return obj
@@ -60,6 +66,9 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
         return {"error": "%s: %s" % (type(e).__name__, e)}
 
 
-# 导入即注册(注意顺序:rules 依赖 blacklist/features;backtest 依赖 rules;
-# charts 依赖 backtest;monitor 依赖 blacklist;scan 依赖 backtest;graph 依赖 charts)
-from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions  # noqa: E402,F401
+# 导入即注册(注意顺序:rules 依赖 blacklist/featurelib/policy;backtest 依赖
+# rules/policy;charts 依赖 backtest/featurelib/policy;monitor 依赖 blacklist/policy;
+# scan 依赖 backtest;graph 依赖 charts;actions 依赖 policy;calibrate 依赖
+# backtest/featurelib/policy,放最后)
+from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, calibrate, profile, reports, reconcile  # noqa: E402,F401
+# intel 由 monitor/profile 传递导入即完成注册,无需在上一行重复列出

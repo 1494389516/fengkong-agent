@@ -1,0 +1,30 @@
+[
+ {
+  "version": 1,
+  "effective_from": 0,
+  "approved_by": "bootstrap",
+  "note": "初始阈值,与 policy.DEFAULTS 一致(effective_from=0:样本事件均在过去,回放时必须能选中本版)",
+  "values": {
+   "r002_max_gap_seconds": 30,
+   "r002_min_events": 10,
+   "r002_reject_min_ips": 3,
+   "r003_high_amount": 1000.0,
+   "r003_cashout_max_amount": 20.0,
+   "r003_cashout_min_coupons": 3,
+   "r003_cashout_window_seconds": 3600,
+   "r004_max_account_age_seconds": 604800,
+   "r004_min_amount": 200.0,
+   "geo_jump_speed_kmh": 900.0,
+   "max_sim_mismatch_rate": 0.02,
+   "monitor_burst_min": 8,
+   "monitor_ip_churn_min": 3,
+   "monitor_rapid_gap_seconds": 5,
+   "monitor_rapid_min_events": 3,
+   "shared_device_min_accounts": 3,
+   "self_min_history_events": 5,
+   "self_recent_window_seconds": 86400,
+   "self_amount_spike_ratio": 3.0,
+   "self_amount_floor": 100.0
+  }
+ }
+]

@@ -13,9 +13,10 @@
                   ("领券后短时下单")必须用窗口口径,全历史计数会把一周前
                   的正常行为算进来造成误伤 —— R003 曾在生成大样本上实锤过。
 """
-from typing import Dict, List, Optional
+import statistics
+from typing import Dict, List, Optional, Tuple
 
-from .datasource import load_events
+from .datasource import data_dir, load_events
 
 
 def _account_events(uid: str, as_of_ts: Optional[float] = None) -> List[Dict]:
@@ -66,6 +67,73 @@ def accounts_per(dimension: str, value: str, as_of_ts: Optional[float] = None) -
                        if e[dimension] == value and (as_of_ts is None or e["ts"] < as_of_ts)})
     return {"dimension": dimension, "value": value,
             "count": len(accounts), "accounts": accounts}
+
+
+# ---------------------------------------------------------------------------
+# 人群基线:全量账号特征分布的稳健统计。
+# 用中位数/分位数而非均值/标准差 —— 欺诈是少数派,拖不动分位数;
+# 均值和方差会被 bot 的极端值(20 次 3 秒间隔)直接拖飞。
+# 两个用途:① 阈值推导的地基(threshold_calibrate);② 证据链定量化
+# (feature_stats 的百分位标注:"间隔 3 秒,低于人群 P17" 比 "间隔 3 秒" 有力)。
+# 纯 Python 实现(statistics),规则/监控路径保持 pandas-free。
+# ---------------------------------------------------------------------------
+
+BASELINE_FEATURES = ("event_count", "distinct_ip", "distinct_device",
+                     "coupon_claims", "min_gap_seconds", "order_amount_max")
+
+_pop_cache: Dict[str, Tuple] = {}
+
+
+def _dataset_key() -> Tuple[str, int]:
+    p = data_dir() / "events_sample.json"
+    return (str(p), p.stat().st_mtime_ns)
+
+
+def _all_account_features() -> List[Dict]:
+    """全量账号的特征 dict 列表,按数据集 (路径, mtime) 缓存。"""
+    key = _dataset_key()
+    hit = _pop_cache.get("feats")
+    if hit and hit[0] == key:
+        return hit[1]
+    uids = sorted({e["uid"] for e in load_events()})
+    feats = [account_features(u) for u in uids]
+    _pop_cache["feats"] = (key, feats)
+    return feats
+
+
+def feature_values(feature: str) -> List[float]:
+    """某特征的全量账号取值(升序,跳过缺失)。"""
+    return sorted(v for f in _all_account_features()
+                  if (v := f.get(feature)) is not None)
+
+
+def population_baseline() -> Dict[str, Dict[str, float]]:
+    """人群基线:各特征的稳健分位数与 MAD。样本量太小时(n<2)该特征跳过,
+    n 随结果返回 —— 小样本上的分位数没有推导价值,调用方要看着 n 用。"""
+    out = {}
+    for feat in BASELINE_FEATURES:
+        vals = feature_values(feat)
+        if len(vals) < 2:
+            continue
+        qs = statistics.quantiles(vals, n=1000, method="inclusive")
+        p50 = qs[499]
+        out[feat] = {
+            "n": len(vals),
+            "p50": round(p50, 2),
+            "p90": round(qs[899], 2),
+            "p99": round(qs[989], 2),
+            "p999": round(qs[998], 2),
+            "mad": round(statistics.median(abs(v - p50) for v in vals), 2),
+        }
+    return out
+
+
+def percentile_rank(feature: str, value: float) -> Optional[float]:
+    """value 在人群中的百分位(<= value 的账号占比)。无数据返回 None。"""
+    vals = feature_values(feature)
+    if not vals:
+        return None
+    return round(sum(1 for v in vals if v <= value) / len(vals), 4)
 
 
 def batch_features():

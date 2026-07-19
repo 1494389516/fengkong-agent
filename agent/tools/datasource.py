@@ -51,8 +51,49 @@ def load_labels() -> Dict[str, Dict]:
             if not k.startswith("_")}
 
 
+def load_accounts() -> Dict[str, Dict]:
+    """账号主档(注册上下文 + 价值信息)。文件缺失返回空:临时数据集/
+    旧数据集没有主档时,依赖它的规则(R004)与档案字段自动降级。"""
+    try:
+        return {k: v for k, v in _load_json(data_dir() / "accounts.json").items()
+                if not k.startswith("_")}
+    except FileNotFoundError:
+        return {}
+
+
+def load_decisions():
+    """生产决策日志(骨架里为模拟文件,设定由生产引擎写入)。
+    缺失返回 None —— 表示"对账不可用",与空日志([]) 语义不同。"""
+    try:
+        obj = _load_json(data_dir() / "decisions_log.json")
+    except FileNotFoundError:
+        return None
+    return obj.get("decisions") if isinstance(obj, dict) else obj
+
+
+def load_ip_intel() -> Dict[str, Dict]:
+    """IP 情报库(按 /24 网段)。文件缺失返回空:未知段按 unknown 处理。"""
+    try:
+        return {k: v for k, v in _load_json(data_dir() / "ip_intel.json").items()
+                if not k.startswith("_")}
+    except FileNotFoundError:
+        return {}
+
+
+def load_reports() -> list:
+    """举报记录。文件缺失返回空列表。"""
+    try:
+        return _load_json(data_dir() / "reports.json")
+    except FileNotFoundError:
+        return []
+
+
 def blacklist_path() -> Path:
     return data_dir() / "blacklist.json"
+
+
+def thresholds_path() -> Path:
+    return data_dir() / "thresholds.json"
 
 
 def pending_actions_path() -> Path:

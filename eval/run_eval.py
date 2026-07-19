@@ -28,6 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # 供导入 measure_costs
 
 # 评估必须跑在确定性的手工样本上,清掉可能残留的数据集切换
 os.environ.pop("FK_DATA_DIR", None)
@@ -191,19 +192,225 @@ def run_gen_layer() -> int:
             r = backtest()
             wide = r["operating_points"]["flag=review+reject"]
             strict = r["operating_points"]["flag=reject_only"]
+            cal = registry.dispatch("threshold_calibrate", {"fpr_budget": 0.01})
+            realized = cal.get("realized_fpr_normal_wide")
+            # token 成本预算:在同一份大样本上量每个工具的典型返回,超限即红。
+            # 教训:rule_backtest 的 per_account 曾单次 18k+ chars,② 的 dict
+            # 限幅与工具面瘦身都是这里钉住的。
+            from measure_costs import tool_result_sizes
+            sizes = dict(tool_result_sizes())
+            biggest = max(sizes.items(), key=lambda kv: kv[1])
             failures = _report("数据生成 + 大样本回测(离线)", [
                 ("生成器退出码 0", proc.returncode == 0),
-                ("账号数 = 60", r["accounts_evaluated"] == 60),
+                ("账号数 = 57(seed 7 确定性)", r["accounts_evaluated"] == 57),
                 ("宽口径 recall >= 0.9", wide["recall"] >= 0.9),
                 ("宽口径 precision >= 0.8", wide["precision"] >= 0.8),
                 ("宽口径 f1 >= 0.85", wide["f1"] >= 0.85),
                 ("严口径 precision >= 0.7", strict["precision"] >= 0.7),
+                ("无生产日志时对账优雅降级",
+                 registry.dispatch("consistency_check", {}).get("available") is False),
+                ("校准产出建议阈值", bool(cal.get("suggestions"))),
+                ("建议阈值实测误伤率 <= 5%", realized is not None and realized <= 0.05),
+                ("无参照快照时不误报漂移", cal.get("drift_alarm") is False),
+                ("单工具结果 <= 5000 chars(最大: %s %d)" % biggest, biggest[1] <= 5000),
+                ("rule_backtest 已瘦身 <= 1500 chars(现 %d)" % sizes["rule_backtest"],
+                 sizes["rule_backtest"] <= 1500),
             ])
             print("  宽口径 %s" % wide)
             print("  严口径 %s" % strict)
+            print("  校准建议 %s(实测误伤率 %s)" % (cal.get("suggestions"), realized))
             return failures
         finally:
             os.environ.pop("FK_DATA_DIR", None)
+
+
+def run_policy_layer() -> int:
+    """离线:策略版本化 —— 同一账号的事件,结论随'当时生效的版本'切换;
+    use_current_policy 则让历史事件吃到最新版(评估口径)。"""
+    with tempfile.TemporaryDirectory() as td:
+        for f in ("events_sample.json", "blacklist.json", "labels.json"):
+            shutil.copy(ROOT / "data" / f, Path(td) / f)
+        (Path(td) / "thresholds.json").write_text(json.dumps([
+            {"version": 1, "effective_from": 0, "approved_by": "eval",
+             "note": "基线", "values": {}},
+            {"version": 2, "effective_from": 1784109631, "approved_by": "eval",
+             "note": "大幅放宽 min_events", "values": {"r002_min_events": 99}},
+        ]), encoding="utf-8")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            early = {"uid": "u_1002", "ip": "203.0.113.10", "device_id": "dev_farm_x7",
+                     "type": "coupon_claim", "ts": 1784109630}  # v1 生效期(min_events=10)
+            late = dict(early, ts=1784109657)                   # v2 生效期(min_events=99)
+            r_early = rule_eval(early)
+            r_late = rule_eval(late)
+            r_cur = rule_eval(early, use_current_policy=True)
+            checks = [
+                ("回放 v1 期事件:模式已成立应拦截",
+                 r_early["action"] == "reject" and r_early["policy_version"] == 1),
+                ("回放 v2 期事件:放宽后应放行",
+                 r_late["action"] == "pass" and r_late["policy_version"] == 2),
+                ("同一事件改用当前策略(v2):结论翻转",
+                 r_cur["action"] == "pass" and r_cur["policy_version"] == 2),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("策略版本化(离线,临时目录)", checks)
+
+
+def run_governance_layer() -> int:
+    """离线:阈值提案 → 限速 → 审批落盘 → 漂移告警,全程临时目录。"""
+    with tempfile.TemporaryDirectory() as td:
+        for f in ("events_sample.json", "blacklist.json", "labels.json"):
+            shutil.copy(ROOT / "data" / f, Path(td) / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            r1 = registry.dispatch("threshold_propose",
+                                   {"values": {"r002_min_events": 12}, "reason": "eval:测试"})
+            r_limit = registry.dispatch("threshold_propose",
+                                        {"values": {"r002_max_gap_seconds": 300}, "reason": "eval:大改"})
+            actions.decide(r1.get("action_id", -1), approve=True)
+            from agent.tools.policy import active_policy
+            pol = active_policy()
+            hist = registry.dispatch("policy_history", {})
+            # 把已落盘版本的基线快照改成离谱值,漂移告警必须响
+            tpath = Path(td) / "thresholds.json"
+            versions = json.loads(tpath.read_text(encoding="utf-8"))
+            versions[-1]["baseline_snapshot"] = {"event_count": {"p99": 1}}
+            tpath.write_text(json.dumps(versions), encoding="utf-8")
+            cal = registry.dispatch("threshold_calibrate", {})
+            checks = [
+                ("提案进入待审批", r1.get("status") == "pending_confirmation"),
+                ("超幅提案被限速拒绝", r_limit.get("status") == "rejected_rate_limit"),
+                ("批准后新版本生效", pol["r002_min_events"] == 12 and pol["_version"] == 1),
+                ("版本历史可审计", len(hist.get("versions", [])) == 1),
+                ("基线漂移触发告警", cal.get("drift_alarm") is True),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("策略治理(离线,临时目录)", checks)
+
+
+def run_shadow_layer() -> int:
+    """离线:影子回测 + 覆盖原子性(防部分应用泄漏的回归守卫)。"""
+    r = registry.dispatch("shadow_backtest", {"overrides": {"r002_min_events": 99}})
+    after_shadow = backtest()["operating_points"]["flag=review+reject"]
+    bad = registry.dispatch("rule_backtest", {"overrides": {"r002_min_events": 5, "bogus": 1}})
+    after_bad = backtest()["operating_points"]["flag=review+reject"]
+    return _report("影子回测与覆盖原子性(离线)", [
+        ("影子:u_1002 在候选阈值下会被放过", "u_1002" in r.get("newly_passed", [])),
+        ("影子:宽口径 F1 增量为负", r.get("delta", {}).get("wide_f1", 0) < 0),
+        ("影子跑完当前策略无残留(F1 复原)", after_shadow["f1"] == 1.0),
+        ("含非法键的覆盖整体拒绝(原子)", "error" in bad),
+        ("拒绝后阈值无泄漏(F1 复原)", after_bad["f1"] == 1.0),
+    ])
+
+
+def run_baseline_layer() -> int:
+    """离线:人群基线/百分位 + 自身基线信号 + 配置与 DEFAULTS 一致性。"""
+    from agent.tools.featurelib import percentile_rank, population_baseline
+    from agent.tools.policy import DEFAULTS
+    base = population_baseline()
+    pr_gap = percentile_rank("min_gap_seconds", 3)
+    pr_cnt = percentile_rank("event_count", 20)
+    # 自身基线:临时数据集造一个"老账号突换设备 + 金额突增"的盗号形态
+    with tempfile.TemporaryDirectory() as td:
+        t0 = 1784000000
+        evs = [{"uid": "t_1", "ip": "10.0.0.1", "device_id": "dev_A",
+                "type": "order" if i % 2 else "login", "ts": t0 + i * 40000,
+                **({"amount": 50.0} if i % 2 else {})} for i in range(6)]
+        evs += [
+            {"uid": "t_1", "ip": "10.0.0.2", "device_id": "dev_B", "type": "login",
+             "ts": t0 + 300000},
+            {"uid": "t_1", "ip": "10.0.0.2", "device_id": "dev_B", "type": "order",
+             "ts": t0 + 300600, "amount": 900.0},
+        ]
+        (Path(td) / "events_sample.json").write_text(json.dumps(evs), encoding="utf-8")
+        (Path(td) / "blacklist.json").write_text("[]", encoding="utf-8")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            m = account_monitor("t_1")
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    v1 = json.loads((ROOT / "data" / "thresholds.json").read_text(encoding="utf-8"))[0]["values"]
+    return _report("基线与百分位(离线)", [
+        ("人群基线覆盖关键特征", "min_gap_seconds" in base and base["event_count"]["n"] == 6),
+        ("u_1002 间隔百分位极低(比几乎所有人快)", pr_gap is not None and pr_gap <= 0.2),
+        ("u_1002 事件数百分位最高", pr_cnt == 1.0),
+        ("自身基线:突换设备信号", "self_new_device" in m.get("signal_types", [])),
+        ("自身基线:金额突增信号", "self_amount_spike" in m.get("signal_types", [])),
+        ("thresholds.json v1 与 policy.DEFAULTS 一致", v1 == dict(DEFAULTS)),
+    ])
+
+
+def run_intel_layer() -> int:
+    """离线:IP 情报与举报查询。"""
+    i1 = registry.dispatch("ip_intel", {"ip": "203.0.113.66"})
+    i2 = registry.dispatch("ip_intel", {"ip": "10.222.1.1"})
+    r9 = registry.dispatch("report_query", {"uid": "u_1009"})
+    r1 = registry.dispatch("report_query", {"uid": "u_1001"})
+    return _report("IP 情报与举报(离线)", [
+        ("机房段识别为 idc/high", i1.get("type") == "idc" and i1.get("risk") == "high"),
+        ("未知段优雅降级", i2.get("type") == "unknown"),
+        ("u_1009 有属实举报", r9.get("verified_count") == 1),
+        ("u_1001 仅不实举报(不作处置依据)",
+         r1.get("count") == 1 and r1.get("verified_count") == 0),
+    ])
+
+
+def run_profile_layer() -> int:
+    """离线:账号档案 —— 主档/账龄错配/价值分档/注册环境联查/关联汇总。"""
+    from agent.tools.profile import account_profile
+    p9 = account_profile("u_1009")   # 老号高价值被盗形态
+    p2 = account_profile("u_1002")   # 新号刷券形态
+    p3 = account_profile("u_1003")   # 灰名单设备批量注册形态
+    px = account_profile("u_9999")   # 无主档无事件,须优雅降级
+    return _report("账号档案(离线)", [
+        ("u_1009:老号高价值,误伤代价 high",
+         p9["found_account"] and p9["age_days"] > 300 and p9["value"]["tier"] == "high"),
+        ("u_1009:档案含地理跳变 + 机房 IP 证据",
+         "geo_jump" in p9["monitor"]["signal_types"] and p9["ip_types"].get("idc", 0) > 0),
+        ("u_1009:属实举报进入档案",
+         p9["reports_against"]["verified"] >= 1),
+        ("u_1002:新号(账龄 < 1 天)且判定 reject",
+         p2["age_days"] < 1 and p2["current_verdict"]["predicted"] == "reject"),
+        ("u_1003:注册设备命中灰名单",
+         any("gray" in f for f in p3.get("registration_flags", []))),
+        ("u_1003:关联分量含团伙三账号",
+         (p3.get("relations") or {}).get("accounts") == ["u_1003", "u_1004", "u_1005"]),
+        ("无主档账号优雅降级",
+         px["found_account"] is False and px["found_events"] is False),
+    ])
+
+
+def run_reconcile_layer() -> int:
+    """离线:模拟一致性对账 —— 埋设的生产漂移必须被抓出,一致部分不得误报,
+    失信标记必须自动挂到模拟类工具的返回上。"""
+    r = registry.dispatch("consistency_check", {})
+    got = {(m["uid"], m["ts"]) for m in r.get("mismatches", [])}
+    planted = {("u_1001", 1784099100), ("u_1002", 1784109633), ("u_1003", 1784110800)}
+    bt = registry.dispatch("rule_backtest", {})
+    sim = bt.get("sim_consistency", {})
+    return _report("模拟一致性对账(离线)", [
+        ("对账覆盖全部日志与事件", r.get("compared") == 44 and r.get("orphan_decisions") == 0
+         and r.get("uncovered_events") == 0),
+        ("三条埋设的生产漂移全部抓出", planted <= got),
+        ("一致部分无误报", got == planted),
+        ("不一致率超线触发失信", r.get("trusted") is False and bool(r.get("warning"))),
+        ("回测结果自动携带失信标记", sim.get("trusted") is False and bool(sim.get("warning"))),
+    ])
+
+
+def run_cost_layer() -> int:
+    """离线:结构性 token 成本预算 —— schema 与 system prompt 每请求随行,
+    缓存命中可吸收,但决定了 miss 时的底价;失控即工具设计出了问题。"""
+    from measure_costs import structural_sizes
+    s = structural_sizes()
+    return _report("结构性成本预算(离线)", [
+        ("工具 schema 总量 <= 12000 chars(现 %d,%d 个工具)"
+         % (s["schemas_chars"], s["tool_count"]), s["schemas_chars"] <= 12000),
+        ("system prompt <= 3000 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 3000),
+    ])
 
 
 def run_chart_smoke() -> int:
@@ -224,12 +431,26 @@ def run_chart_smoke() -> int:
 
 
 def _check_agent_case(c, answer, tool_calls, used):
-    """第 2+3 层的断言,返回问题列表(空 = 通过)。"""
+    """第 2+3 层的断言,返回问题列表(空 = 通过)。
+    tool_calls 是 [(name, args_json)],除了'调没调对工具',还查'调得省不省':
+    入口工具(聚合入口 vs 拆成多次单项)、调用次数上限、完全重复的调用。"""
     problems = []
+    names = [n for n, _ in tool_calls]
     # 轨迹:先取证再下结论 —— 必须调过期望工具之一
     want = c.get("expect_tools_any", [])
-    if want and not set(want) & set(tool_calls):
-        problems.append("未调用任何取证工具(期望之一 %s,实际 %s)" % (want, tool_calls or "无"))
+    if want and not set(want) & set(names):
+        problems.append("未调用任何取证工具(期望之一 %s,实际 %s)" % (want, names or "无"))
+    # 轨迹效率:入口工具应是聚合入口(该一次 account_profile 的事拆成
+    # 五次单项调用,答案对但成本翻倍 —— 18 工具时代的新失败模式)
+    first = c.get("expect_first_tool_any", [])
+    if first and names and names[0] not in first:
+        problems.append("入口工具不经济:首调 %s(期望之一 %s)" % (names[0], first))
+    cap = c.get("max_tool_calls")
+    if cap and len(tool_calls) > cap:
+        problems.append("工具调用 %d 次超上限 %d(疑似低效轨迹)" % (len(tool_calls), cap))
+    dup = len(tool_calls) - len(set(tool_calls))
+    if dup:
+        problems.append("存在 %d 次完全重复的工具调用(同名同参,纯浪费)" % dup)
     # 回答:处置结论关键词
     ans = answer.lower()
     any_kw = c.get("expect_answer_any", [])
@@ -238,6 +459,10 @@ def _check_agent_case(c, answer, tool_calls, used):
     for k in c.get("expect_answer_all", []):
         if k.lower() not in ans:
             problems.append("回答缺少必含关键词:%s" % k)
+    # 禁用表述:两阶段审批下,agent 把"已提交"说成"已生效"是权限越界话术,直接判负
+    for k in c.get("forbid_answer_any", []):
+        if k.lower() in ans:
+            problems.append("回答包含禁用表述:%s" % k)
     # 成本:token 预算(防上下文参数改坏后成本悄悄回归)
     budget = c.get("max_total_tokens")
     if budget and used["total"] > budget:
@@ -258,7 +483,9 @@ def run_agent_layers(cases) -> int:
         before = dict(agent.session_usage)
         tool_calls = []
         try:
-            answer = agent.ask(c["question"], on_tool=lambda n, a: tool_calls.append(n))
+            answer = agent.ask(
+                c["question"],
+                on_tool=lambda n, a: tool_calls.append((n, json.dumps(a, sort_keys=True, ensure_ascii=False))))
         except Exception as e:  # noqa: BLE001 API 异常算该案例失败,不中断整场评估
             failures += 1
             print("  [FAIL] %s\n         调用异常:%s: %s" % (c["name"], type(e).__name__, e))
@@ -270,8 +497,9 @@ def run_agent_layers(cases) -> int:
         if problems:
             failures += 1
         print("  [%s] %s" % ("PASS" if not problems else "FAIL", c["name"]))
-        print("         工具:%s | API %d 次 | token 总 %d(prompt %d / completion %d)| 缓存命中率 %.0f%%" % (
-            ",".join(tool_calls) or "无", used["api_calls"], used["total"],
+        print("         工具 %d 次:%s | API %d 次 | token 总 %d(prompt %d / completion %d)| 缓存命中率 %.0f%%" % (
+            len(tool_calls), ",".join(n for n, _ in tool_calls) or "无",
+            used["api_calls"], used["total"],
             used["prompt"], used["completion"], 100.0 * hit_rate))
         for p in problems:
             print("         问题:%s" % p)
@@ -292,7 +520,15 @@ def main() -> int:
     failures += run_scan_layer()
     failures += run_graph_layer()
     failures += run_actions_layer()
+    failures += run_policy_layer()
+    failures += run_governance_layer()
+    failures += run_shadow_layer()
+    failures += run_baseline_layer()
+    failures += run_intel_layer()
+    failures += run_profile_layer()
+    failures += run_reconcile_layer()
     failures += run_gen_layer()
+    failures += run_cost_layer()
     failures += run_chart_smoke()
     if args.offline:
         pass
