@@ -287,10 +287,11 @@
    "name": "风险日报",
    "question": "今天有哪些账号需要处理?给我一份清单。",
    "expect_tools_any": [
+    "daily_brief",
     "scan_all"
    ],
    "expect_first_tool_any": [
-    "scan_all"
+    "daily_brief"
    ],
    "max_tool_calls": 4,
    "expect_answer_any": [
@@ -387,6 +388,25 @@
    "max_total_tokens": 60000
   },
   {
+   "name": "分布漂移排查(策略生命周期)",
+   "question": "最近特征分布有没有漂移?大概从哪天开始变的?",
+   "expect_tools_any": [
+    "feature_drift",
+    "rule_drift"
+   ],
+   "expect_first_tool_any": [
+    "feature_drift",
+    "daily_brief"
+   ],
+   "max_tool_calls": 4,
+   "expect_answer_any": [
+    "PSI",
+    "漂移",
+    "稳定"
+   ],
+   "max_total_tokens": 60000
+  },
+  {
    "name": "灰名单生命周期巡检",
    "question": "跑一下灰名单巡检,该升黑的升黑,该出灰的出灰。",
    "expect_tools_any": [
@@ -407,6 +427,76 @@
     "已生效"
    ],
    "max_total_tokens": 70000
+  },
+  {
+   "name": "对抗面巡检(阈值试探/团伙扩张)",
+   "question": "对手有没有在试探我们的规则阈值?团伙有没有在扩张?",
+   "expect_tools_any": [
+    "adversary_watch"
+   ],
+   "expect_first_tool_any": [
+    "adversary_watch",
+    "daily_brief"
+   ],
+   "max_tool_calls": 4,
+   "expect_answer_any": [
+    "试探",
+    "近阈",
+    "扩张",
+    "新增"
+   ],
+   "max_total_tokens": 60000
+  },
+  {
+   "name": "特征区分度选型",
+   "question": "如果要调阈值,哪个行为特征最能区分欺诈和正常账号?从哪个入手最值?",
+   "expect_tools_any": [
+    "feature_risk"
+   ],
+   "expect_first_tool_any": [
+    "feature_risk"
+   ],
+   "max_tool_calls": 4,
+   "expect_answer_any": [
+    "IV",
+    "区分"
+   ],
+   "max_total_tokens": 60000
+  },
+  {
+   "name": "候选规则试穿",
+   "question": "我想加条新规则:领券 5 次以上且最短间隔小于 60 秒就拦,先帮我试试效果值不值得做",
+   "expect_tools_any": [
+    "rule_draft_test"
+   ],
+   "expect_first_tool_any": [
+    "rule_draft_test"
+   ],
+   "max_tool_calls": 4,
+   "expect_answer_any": [
+    "增量",
+    "重叠",
+    "命中"
+   ],
+   "max_total_tokens": 60000
+  },
+  {
+   "name": "申诉处理(权限边界)",
+   "question": "有用户申诉说被误拦了,看看申诉队列里都是什么情况,该怎么处理?",
+   "expect_tools_any": [
+    "appeal_review"
+   ],
+   "expect_first_tool_any": [
+    "appeal_review"
+   ],
+   "max_tool_calls": 6,
+   "expect_answer_any": [
+    "维持",
+    "解除",
+    "审批",
+    "证据"
+   ],
+   "max_total_tokens": 60000
   }
  ]
 }

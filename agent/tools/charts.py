@@ -506,3 +506,121 @@ def chart_cohort_features():
     if truncated:
         result["note"] = truncated
     return result
+
+
+@tool(
+    name="chart_drift_dashboard",
+    description=(
+        "监控仪表盘 PNG:四面板 —— 特征 PSI 趋势、处置分布(flag 率+输出 PSI)、"
+        "近阈带密度(阈值试探)、逐桶欺诈率与特征 IV(区分度衰减)。看趋势用图,"
+        "数字明细仍以各监控工具返回为准。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "time_grain": {"type": "string", "enum": ["day", "hour"],
+                           "description": "分桶粒度,默认 day"},
+        },
+    },
+)
+def chart_drift_dashboard(time_grain: str = "day"):
+    """四面板与四个监控工具一一对应:图给人看趋势形状,alert_text 给模型引用。
+    任一数据源不足以分桶时对应面板留白标注,不让一个面板拖垮整张图。"""
+    from .adversary import adversary_watch
+    from .drift import PSI_ALARM, PSI_WATCH, feature_drift, rule_drift
+    from .risk import feature_risk
+
+    fd = feature_drift(time_grain=time_grain)
+    rd = rule_drift(time_grain=time_grain)
+    adv = adversary_watch(time_grain=time_grain)
+    fr = feature_risk(time_grain=time_grain)
+
+    fig, axes = plt.subplots(2, 2, figsize=(12.5, 8.5), constrained_layout=True)
+    (ax_psi, ax_rule), (ax_near, ax_risk) = axes
+
+    def _blank(ax, msg):
+        ax.text(0.5, 0.5, msg, ha="center", va="center", fontsize=10, color="#888")
+        ax.axis("off")
+
+    def _legend(ax, size=7):
+        if ax.get_legend_handles_labels()[0]:  # 小样本面板可能没有一条可画的线
+            ax.legend(fontsize=size)
+
+    alarms = []
+    # ① 特征 PSI 趋势
+    if fd.get("found"):
+        buckets = [b["bucket"] for b in fd["buckets"]]
+        x = range(len(buckets))
+        for i, (feat, d) in enumerate(fd["features"].items()):
+            if any(v is not None for v in d["psi"]):
+                ax_psi.plot(x, [v if v is not None else float("nan") for v in d["psi"]],
+                            marker="o", ms=3, lw=1.4, label=feat,
+                            color=PALETTE[i % len(PALETTE)])
+        ax_psi.axhline(PSI_WATCH, ls="--", lw=0.8, color="#aaa")
+        ax_psi.axhline(PSI_ALARM, ls="--", lw=0.8, color="#e15759")
+        ax_psi.set_xticks(list(x))
+        ax_psi.set_xticklabels([b[5:] for b in buckets], fontsize=7, rotation=45)
+        _legend(ax_psi)
+        ax_psi.set_title(_t("特征 PSI(虚线=关注/告警线)", "feature PSI"), fontsize=10)
+        alarms += fd.get("alarms", [])
+    else:
+        _blank(ax_psi, _t("特征漂移:分桶不足", "feature drift: <2 buckets"))
+
+    # ② 处置分布趋势
+    if rd.get("found"):
+        tr = rd["verdict_mix"]["trend"]
+        xs = range(len(tr))
+        ax_rule.plot(xs, [t["flag_rate"] for t in tr], marker="o", ms=3,
+                     color=PALETTE[2], label="flag_rate")
+        ax_rule.plot(xs, [t.get("psi") if t.get("psi") is not None else float("nan")
+                          for t in tr], marker="s", ms=3, color=PALETTE[0], label="verdict PSI")
+        ax_rule.set_xticks(list(xs))
+        ax_rule.set_xticklabels([t["bucket"][5:] for t in tr], fontsize=7, rotation=45)
+        _legend(ax_rule)
+        ax_rule.set_title(_t("规则输出:命中率与分布 PSI", "rule output"), fontsize=10)
+        alarms += rd.get("alarms", [])
+    else:
+        _blank(ax_rule, _t("规则输出:分桶不足", "rule drift: <2 buckets"))
+
+    # ③ 近阈带密度
+    if adv.get("found"):
+        for i, w in enumerate(adv["near_miss"]):
+            tr = w["trend"]
+            xs = range(len(tr))
+            ax_near.plot(xs, [t["rate"] if t["rate"] is not None else float("nan")
+                              for t in tr], marker="o", ms=3,
+                         color=PALETTE[i % len(PALETTE)],
+                         label="%s %s" % (w["rule"], w["feature"]))
+            if tr:
+                ax_near.set_xticks(list(xs))
+                ax_near.set_xticklabels([t["bucket"][5:] for t in tr], fontsize=7, rotation=45)
+        _legend(ax_near)
+        ax_near.set_title(_t("近阈带密度(阈值试探)", "near-threshold density"), fontsize=10)
+        alarms += adv.get("alarms", [])
+    else:
+        _blank(ax_near, _t("对抗巡检:分桶不足", "adversary: <2 buckets"))
+
+    # ④ 风险趋势:欺诈率 + IV
+    trend = fr.get("risk_trend")
+    if trend:
+        xs = range(len(trend["buckets"]))
+        ax_risk.plot(xs, [v if v is not None else float("nan") for v in trend["fraud_rate"]],
+                     marker="o", ms=3, color=PALETTE[2], label="fraud_rate")
+        for i, (feat, ivs) in enumerate(sorted(trend["iv"].items())[:4]):
+            ax_risk.plot(xs, [v if v is not None else float("nan") for v in ivs],
+                         marker="s", ms=2.5, lw=1.1, color=PALETTE[(i + 3) % len(PALETTE)],
+                         label="IV " + feat)
+        ax_risk.set_xticks(list(xs))
+        ax_risk.set_xticklabels([b[5:] for b in trend["buckets"]], fontsize=7, rotation=45)
+        _legend(ax_risk, 6.5)
+        ax_risk.set_title(_t("欺诈率与特征 IV 趋势(衰减=对手在适应)", "risk trend"), fontsize=10)
+        alarms += trend.get("decay_alarms", [])
+    else:
+        _blank(ax_risk, _t("风险趋势:分桶或标签不足", "risk trend: insufficient"))
+
+    fig.suptitle(_t("漂移/对抗/风险 监控仪表盘(%s 粒度)" % time_grain,
+                    "monitoring dashboard (%s)" % time_grain), fontsize=11)
+    path = _save(fig, "drift_dashboard_%s.png" % time_grain)
+    return {"chart_path": path, "time_grain": time_grain,
+            "alarm_count": len(alarms), "alarms": alarms[:8],
+            "note": "图给人看趋势;数字明细与告警口径以各监控工具返回为准"}

@@ -214,6 +214,9 @@ def run_gen_layer() -> int:
             gl = _gl_review()
             gl_expected = sum(1 for r in json.loads(
                 (out / "blacklist.json").read_text(encoding="utf-8")) if r["list"] == "gray")
+            fr = registry.dispatch("feature_risk", {"include_bins": True})
+            fr_top = (fr["features"].get(fr["ranking_by_iv"][0], {})
+                      if fr.get("ranking_by_iv") else {})
             # token 成本预算:在同一份大样本上量每个工具的典型返回,超限即红。
             # 教训:rule_backtest 的 per_account 曾单次 18k+ chars,② 的 dict
             # 限幅与工具面瘦身都是这里钉住的。
@@ -243,6 +246,10 @@ def run_gen_layer() -> int:
                 ("无生产日志时对账优雅降级",
                  registry.dispatch("consistency_check", {}).get("available") is False),
                 ("R006 强拒误伤被计量(root 真机正常用户 >= 1)", len(r006_fp) >= 1),
+                ("区分度评估:大样本上有排名且指标有界",
+                 bool(fr.get("ranking_by_iv")) and fr_top.get("iv", 0) > 0
+                 and 0.5 <= fr_top.get("auc", 0) <= 1.0
+                 and 0 <= fr_top.get("ks", -1) <= 1.0 and bool(fr_top.get("bins"))),
                 ("校准产出建议阈值", bool(cal.get("suggestions"))),
                 ("建议阈值实测误伤率 <= 5%", realized is not None and realized <= 0.05),
                 ("无参照快照时不误报漂移", cal.get("drift_alarm") is False),
@@ -258,8 +265,11 @@ def run_gen_layer() -> int:
                  len(json.dumps(registry.dispatch("graylist_review", {}),
                                 ensure_ascii=False)) <= 5000),
                 ("单工具结果 <= 5000 chars(最大: %s %d)" % biggest, biggest[1] <= 5000),
-                ("rule_backtest 已瘦身 <= 1500 chars(现 %d)" % sizes["rule_backtest"],
-                 sizes["rule_backtest"] <= 1500),
+                # 1500 是纯指标期的瘦身线;rule_contribution(规则贡献)/cost
+                # (期望损失)/label_observation(表现覆盖)加入后上调至 2000,
+                # 三块都是聚合级判断素材,砍它们省的 token 会翻倍还给追问
+                ("rule_backtest 已瘦身 <= 2000 chars(现 %d)" % sizes["rule_backtest"],
+                 sizes["rule_backtest"] <= 2000),
             ])
             print("  宽口径 %s" % wide)
             print("  严口径 %s" % strict)
@@ -851,16 +861,173 @@ def run_regression_layer() -> int:
     return _report("复检修复回归(离线)", checks)
 
 
+def run_stats_layer() -> int:
+    """离线:统计核心的已知答案测试 —— PSI/IV/AUC/KS 这些数学是漂移告警和
+    区分度排名的地基,重构一处全线失真且不会有任何工具"报错"。全部用固定
+    种子的合成分布,期望值是数学事实不是快照。"""
+    import random
+    from collections import Counter
+    from agent.tools.drift import (categorical_psi, numeric_psi, psi_against_edges,
+                                   _merge_small_bins)
+    from agent.tools.risk import _auc, _feature_risk_one, _ks
+    import statistics
+
+    rng = random.Random(42)
+    base = [rng.gauss(100, 20) for _ in range(2000)]
+    same = [rng.gauss(100, 20) for _ in range(2000)]
+    shifted = [v + 30 for v in same]
+    edges = [round(q, 4) for q in statistics.quantiles(base, n=10, method="inclusive")]
+    # 一半质量恰在同一点:重复切点按重数还原 expected,自比不得虚高
+    tied = [240.0] * 1000 + [rng.uniform(0, 1000) for _ in range(1000)]
+    tied_edges = [round(q, 4) for q in statistics.quantiles(tied, n=10, method="inclusive")]
+
+    sep_iv = _feature_risk_one(
+        "x", [{"uid": "f%d" % i, "x": 10 + i} for i in range(50)]
+        + [{"uid": "n%d" % i, "x": -10 - i} for i in range(50)],
+        {**{"f%d" % i: "fraud" for i in range(50)},
+         **{"n%d" % i: "normal" for i in range(50)}}, 5)
+
+    return _report("统计核心已知答案(离线)", [
+        ("PSI 自比 ≈ 0", numeric_psi(base, same) is not None and numeric_psi(base, same) < 0.02),
+        ("PSI 平移必检出", numeric_psi(base, shifted) > 0.25),
+        ("快照切点自比 ≈ 0(含重复切点)",
+         psi_against_edges(edges, same) < 0.02 and psi_against_edges(tied_edges, tied) < 0.02),
+        ("快照切点平移必检出", psi_against_edges(edges, shifted) > 0.25),
+        ("类别 PSI:自比为 0,结构变化检出",
+         categorical_psi(Counter(a=500, b=300), Counter(a=500, b=300)) == 0.0
+         and categorical_psi(Counter(a=500, b=300), Counter(a=100, b=700)) > 0.25),
+        ("小箱合并:阈下箱并入相邻箱",
+         _merge_small_bins([0.02, 0.03, 0.5, 0.45], [0.1, 0.0, 0.4, 0.5], 0.05)[0]
+         == [0.05, 0.5, 0.45]),
+        ("小样本守卫:任一侧不足即 None",
+         numeric_psi([1.0] * 5, [2.0] * 100) is None
+         and psi_against_edges(edges, same, expected_n=5) is None),
+        ("AUC:完全可分=1,全同值=0.5,同分布≈0.5",
+         _auc([10 + i for i in range(50)], [i * 0.1 for i in range(50)]) == 1.0
+         and _auc([1.0] * 30, [1.0] * 30) == 0.5
+         and abs(_auc(base[:500], same[:500]) - 0.5) < 0.06),
+        ("KS 有界且完全可分=1",
+         _ks([1, 2, 3] * 10, [10, 11, 12] * 10) == 1.0),
+        ("IV:完全可分为强档且 Laplace 平滑不爆表",
+         sep_iv["level"] == "strong" and sep_iv["iv"] < 10),
+    ])
+
+
+def run_depth_layer() -> int:
+    """离线:防御纵深 —— 规则盲区攻击必须被监控层抓住。
+    规则层指标高是因为生成器只造规则认识的模式;这里故意造一波"贴着所有
+    阈值下方飞"的慢速刷券(间隔 35s > R002 的 30s,8 次 < 10 次,2 IP < 3):
+    规则应当全漏(这不是 bug,是阈值的定义),但对抗巡检的近阈带密度和
+    前端漂移必须报警 —— 否则监控这套投入就是装饰品。"""
+    with tempfile.TemporaryDirectory() as td:
+        d1 = 1783929600  # 2026-07-13 00:00 UTC = 北京 08:00,单业务日内
+        events, labels = [], {}
+        for day0 in (d1, d1 + 86400):
+            n_normal = 100 if day0 == d1 else 60
+            for i in range(n_normal):
+                for k, etype in enumerate(("login", "browse", "order")):
+                    events.append({"uid": "n_%d" % i, "ip": "10.0.%d.5" % (i % 20),
+                                   "device_id": "dev_n%d" % i, "type": etype,
+                                   "ts": day0 + i * 60 + k * 600,
+                                   **({"amount": 50.0} if etype == "order" else {})})
+                labels["n_%d" % i] = {"label": "normal"}
+        for b in range(40):  # 次日的规避型慢速 bot:所有维度贴阈下方
+            for k in range(8):
+                events.append({"uid": "sb_%d" % b, "ip": "172.16.%d.9" % (k % 2),
+                               "device_id": "dev_sb%d" % b, "type": "coupon_claim",
+                               "ts": d1 + 86400 + 40000 + b * 300 + k * 35})
+            labels["sb_%d" % b] = {"label": "fraud"}
+        (Path(td) / "events_sample.json").write_text(json.dumps(events), encoding="utf-8")
+        (Path(td) / "labels.json").write_text(json.dumps(labels), encoding="utf-8")
+        (Path(td) / "blacklist.json").write_text("[]", encoding="utf-8")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            bt = backtest()
+            wide = bt["operating_points"]["flag=review+reject"]
+            adv = registry.dispatch("adversary_watch", {})
+            fd = registry.dispatch("feature_drift", {})
+            rd = registry.dispatch("rule_drift", {})
+            brief = registry.dispatch("daily_brief", {})
+            near_alarm = any("近阈" in a for a in adv.get("alarms", []))
+            return _report("防御纵深(离线,规则盲区攻击)", [
+                ("攻击确实在规则盲区(recall=0,40 个全漏)",
+                 wide["recall"] == 0.0 and wide["fn"] == 40),
+                ("对抗巡检报出近阈试探", adv.get("alarm") is True and near_alarm),
+                ("前端漂移报警(流量结构/特征分布)", fd.get("alarm") is True),
+                ("后端安静(规则没命中,输出无漂移)", rd.get("alarm") is False),
+                ("日报聚合到告警且无假阴", brief["alert_count"] >= 2
+                 and "adversary_watch" in brief["alerts"]),
+            ])
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+
+def run_strategy_layer() -> int:
+    """离线:策略生命周期工具 —— 区分度评估的小样本纪律、规则试衣间的
+    增量判定、对抗巡检的可用性、申诉回路的全链路落盘(隔离数据目录)。"""
+    with tempfile.TemporaryDirectory() as td:
+        for f in ("events_sample.json", "blacklist.json", "labels.json",
+                  "accounts.json", "appeals.json", "reports.json"):
+            shutil.copy(ROOT / "data" / f, Path(td) / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            from agent.tools import actions
+            from agent.tools.datasource import load_appeals, load_labels, postmortems_path
+
+            fr = registry.dispatch("feature_risk", {})
+            levels = {d["level"] for d in fr["features"].values()}
+            # 日报聚合:处置清单齐全、待办申诉计数正确、安静项显式列出
+            brief = registry.dispatch("daily_brief", {})
+            # 试衣间:u_1002(高频领券多 IP)已被现有规则覆盖 → 应判无增量
+            draft = registry.dispatch("rule_draft_test", {"conditions": [
+                {"feature": "distinct_ip", "op": ">=", "value": 5}]})
+            adv = registry.dispatch("adversary_watch", {})
+            queue = {q["uid"]: q["recommendation"]
+                     for q in registry.dispatch("appeal_review", {})["queue"]}
+            r1 = registry.dispatch("appeal_resolve", {
+                "appeal_id": 1, "decision": "reject", "reason": "灰名单设备+套现模式+fraud 标签"})
+            r2 = registry.dispatch("appeal_resolve", {
+                "appeal_id": 2, "decision": "accept", "reason": "判定 pass 无名单无属实举报"})
+            actions.decide(r1["action_id"], approve=True)
+            actions.decide(r2["action_id"], approve=True)
+            statuses = {a["appeal_id"]: a["status"] for a in load_appeals()}
+            return _report("策略生命周期(离线)", [
+                ("小样本上区分度指标全 n/a(样本纪律)", levels == {"n/a"}),
+                ("日报聚合:命中清单 + 申诉计数 + 安静项显式",
+                 len(brief["verdicts"]["reject"]) + len(brief["verdicts"]["review"]) == 5
+                 and brief["verdicts"]["pass_count"] == 1
+                 and brief["appeals_pending"] == 2 and bool(brief["quiet"])),
+                ("试衣间:命中 u_1002 且判无增量", draft["hit_accounts"] == ["u_1002"]
+                 and "无增量" in draft["verdict"]),
+                ("对抗巡检可用且带近阈监控项", adv.get("found") is True
+                 and len(adv["near_miss"]) == 3),
+                ("申诉建议:fraud 维持 / 干净账号解除",
+                 queue.get("u_1003") == "uphold" and queue.get("u_1001") == "release"),
+                ("申诉决议经审批落盘", statuses == {1: "rejected", 2: "accepted"}),
+                ("误伤核实自动修正标签", load_labels().get("u_1001", {}).get("label") == "normal"),
+                ("复盘日志已沉淀", postmortems_path().exists()),
+                ("已决议申诉不可重复提交", registry.dispatch("appeal_resolve", {
+                    "appeal_id": 1, "decision": "accept", "reason": "x"})["status"] == "already_resolved"),
+            ])
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+
 def run_cost_layer() -> int:
     """离线:结构性 token 成本预算 —— schema 与 system prompt 每请求随行,
     缓存命中可吸收,但决定了 miss 时的底价;失控即工具设计出了问题。"""
     from measure_costs import structural_sizes
     s = structural_sizes()
+    # 预算史:20 工具期 12000;策略生命周期五件套(feature_risk/adversary_watch/
+    # rule_draft_test/appeal_review/appeal_resolve)加入后 26 工具,上调至 14500
+    # (人均 ~550 chars 未松动);名单三色 + 灰名单巡检等并入后 31 工具,上调至
+    # 15600(人均 ~500,schema 瘦身让人均反降)。再超说明该合并工具而不是再抬预算。
+    # system prompt 同理:三色名单纪律 + 漂移/申诉纪律并集后上调至 3300。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 12000 chars(现 %d,%d 个工具)"
-         % (s["schemas_chars"], s["tool_count"]), s["schemas_chars"] <= 12000),
-        ("system prompt <= 3000 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 3000),
+        ("工具 schema 总量 <= 15600 chars(现 %d,%d 个工具)"
+         % (s["schemas_chars"], s["tool_count"]), s["schemas_chars"] <= 15600),
+        ("system prompt <= 3300 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 3300),
     ])
 
 
@@ -981,6 +1148,9 @@ def main() -> int:
     failures += run_profile_layer()
     failures += run_reconcile_layer()
     failures += run_gen_layer()
+    failures += run_stats_layer()
+    failures += run_depth_layer()
+    failures += run_strategy_layer()
     failures += run_privacy_layer()
     failures += run_regression_layer()
     failures += run_cost_layer()

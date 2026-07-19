@@ -17,17 +17,72 @@ from typing import Dict, Iterable, List, Optional
 from . import tool
 from . import policy
 from . import rules
-from .datasource import load_events, load_labels
+from .datasource import load_accounts, load_events, load_labels
 from .rules import rule_eval
+
+# 误伤流失系数:被误拦的正常账号流失概率的保守估计。只用于期望损失的
+# 排序比较(哪个阈值更亏),不是财务口径 —— 真实流失率应由业务侧回填。
+CHURN_RISK = 0.2
 
 # 可被 what-if 覆盖的阈值键(规则组;monitor 组不在列,回测不跑监控)。
 # 覆盖经 policy.set_overrides 生效:先全量校验后原子应用,finally 恢复旧快照。
 OVERRIDABLE = policy.RULE_KEYS
 
+# 标签口径(借鉴 MARS 的 target 规则):有效值只有这两个,其他值直接报错
+# 而不是静默当 normal —— "Fraud"/"suspect"/1 混进来会无声污染混淆矩阵,
+# 让指标看起来还行但完全不可信。清洗是标注方的责任,不在指标里兜底。
+VALID_LABELS = ("fraud", "normal")
+
+
+def label_observation(labels: Dict[str, Dict], events: List[Dict]) -> Dict:
+    """标签表现覆盖:数据集里多少账号已标注(已表现)、多少尚未标注。
+    借鉴 MARS 的 target_observation:P/R/F1 只算已标注账号,未标注不是
+    "正常",是"还不知道" —— 覆盖率低时指标只代表已表现子集,有选择偏差
+    (先被人工审的往往就是可疑的),解读回测结果必须连它一起看。"""
+    all_uids = {e["uid"] for e in events}
+    labeled = all_uids & set(labels)
+    fraud = sum(1 for u in labeled if labels[u]["label"] == "fraud")
+    return {
+        "accounts_total": len(all_uids),
+        "labeled": len(labeled),
+        "unlabeled": len(all_uids) - len(labeled),
+        "coverage": round(len(labeled) / len(all_uids), 4) if all_uids else None,
+        "observed_fraud_rate": round(fraud / len(labeled), 4) if labeled else None,
+        "note": "指标只反映已标注账号;未标注=尚未表现,不代表正常",
+    }
+
+
+# 判定缓存:daily_brief 一次调用会经 scan/rule_drift 把全量规则回放跑好几遍,
+# 真实数据量下不可接受。key 覆盖判定的全部输入面:数据文件 mtime(事件/名单/
+# 主档/策略/设备与 IP 情报)+ what-if 覆盖 + 事件切片指纹 + 账号集。任何
+# 输入变化(含审批生效、申诉解名单)都会改 mtime 使缓存自然失效。
+_VERDICT_CACHE: Dict[tuple, Dict[str, Dict]] = {}
+_VERDICT_CACHE_MAX = 64
+
+
+def _dataset_fingerprint() -> tuple:
+    from .datasource import data_dir
+    d = data_dir()
+    parts = []
+    for f in ("events_sample.json", "blacklist.json", "accounts.json",
+              "thresholds.json", "device_intel.json", "ip_intel.json"):
+        try:
+            parts.append((d / f).stat().st_mtime_ns)
+        except OSError:
+            parts.append(None)
+    return (str(d), tuple(parts))
+
 
 def account_verdicts(uids: Iterable[str], events: List[Dict]) -> Dict[str, Dict]:
     """逐账号跑规则集:账号内任一事件命中即记入,处置取最重。
     scan_all(全量巡检)与 backtest(指标回测)共用这一份口径。"""
+    uids = sorted(uids)
+    cache_key = (_dataset_fingerprint(), policy.overrides_key(),
+                 len(events), events[0]["ts"] if events else None,
+                 events[-1]["ts"] if events else None, tuple(uids))
+    hit = _VERDICT_CACHE.get(cache_key)
+    if hit is not None:
+        return hit
     verdicts = {}
     for uid in uids:
         worst = "pass"
@@ -44,6 +99,9 @@ def account_verdicts(uids: Iterable[str], events: List[Dict]) -> Dict[str, Dict]
                     reasons.append("%s: %s" % (h["rule_id"], h["reason"]))
                 hit_rules.add(h["rule_id"])
         verdicts[uid] = {"predicted": worst, "rules": sorted(hit_rules), "reasons": reasons[:3]}
+    if len(_VERDICT_CACHE) >= _VERDICT_CACHE_MAX:
+        _VERDICT_CACHE.pop(next(iter(_VERDICT_CACHE)))
+    _VERDICT_CACHE[cache_key] = verdicts
     return verdicts
 
 
@@ -67,6 +125,11 @@ def backtest(overrides: Optional[Dict] = None):
     prev = policy.set_overrides(overrides)
     try:
         labels = load_labels()
+        bad_labels = sorted(u for u, v in labels.items()
+                            if v.get("label") not in VALID_LABELS)
+        if bad_labels:
+            return {"error": "标签只允许 %s,以下账号标签非法(先清洗再回测): %s" % (
+                "/".join(VALID_LABELS), ", ".join(bad_labels[:10]))}
         events = load_events()
         verdicts = account_verdicts(labels.keys(), events)
         per_account = {
@@ -74,22 +137,72 @@ def backtest(overrides: Optional[Dict] = None):
             for uid, v in verdicts.items()
         }
 
+        # 成本素材:账号订单总额(欺诈账号的止损/漏放口径)与 LTV(误伤面临
+        # 流失的价值上限)。无主档时 LTV 记 0 并在 cost 注明 —— 宁可低估误伤
+        # 代价也不编数。
+        accounts_meta = load_accounts()
+        order_sum: Dict[str, float] = {}
+        for e in events:
+            if e["type"] == "order" and e.get("amount") is not None:
+                order_sum[e["uid"]] = order_sum.get(e["uid"], 0.0) + e["amount"]
+
         points = {}
         for point, flagged_actions in (("flag=review+reject", ("review", "reject")),
                                        ("flag=reject_only", ("reject",))):
             tp = fp = fn = tn = 0
-            for a in per_account.values():
+            blocked_amt = missed_amt = fp_ltv = 0.0
+            for uid, a in per_account.items():
                 flagged = a["predicted"] in flagged_actions
                 fraud = a["label"] == "fraud"
                 if flagged and fraud:
                     tp += 1
+                    blocked_amt += order_sum.get(uid, 0.0)
                 elif flagged:
                     fp += 1
+                    fp_ltv += (accounts_meta.get(uid) or {}).get("ltv", 0.0)
                 elif fraud:
                     fn += 1
+                    missed_amt += order_sum.get(uid, 0.0)
                 else:
                     tn += 1
-            points[point] = {"tp": tp, "fp": fp, "fn": fn, "tn": tn, **_prf(tp, fp, fn)}
+            points[point] = {
+                "tp": tp, "fp": fp, "fn": fn, "tn": tn, **_prf(tp, fp, fn),
+                # 期望损失 = 漏放的欺诈金额 + 流失系数 × 误伤账号 LTV。
+                # 只用于同数据集上不同阈值的排序比较,不是财务报表口径。
+                "cost": {
+                    "blocked_fraud_amount": round(blocked_amt, 2),
+                    "missed_fraud_amount": round(missed_amt, 2),
+                    "fp_ltv_at_risk": round(fp_ltv, 2),
+                    "expected_loss": round(missed_amt + CHURN_RISK * fp_ltv, 2),
+                    **({} if accounts_meta else {"note": "无账号主档,LTV 按 0 计"}),
+                },
+            }
+
+        # 规则贡献:逐规则 TP/FP、独有召回(只有它抓到的欺诈账号)与两两重叠。
+        # 删规则和加规则一样需要证据:unique_tp=0 的规则是精简候选,但要先看
+        # 它和谁重叠 —— 冗余可能是有意的纵深(名单挂了,行为规则还能兜住)。
+        hits_by_rule: Dict[str, set] = {}
+        for uid, a in per_account.items():
+            for rid in a["rules"]:
+                hits_by_rule.setdefault(rid, set()).add(uid)
+        rule_contribution = {}
+        for rid, uids in sorted(hits_by_rule.items()):
+            tp_uids = {u for u in uids if per_account[u]["label"] == "fraud"}
+            unique_tp = {u for u in tp_uids
+                         if all(rid2 == rid or u not in hits_by_rule[rid2]
+                                for rid2 in hits_by_rule)}
+            rule_contribution[rid] = {
+                "hits": len(uids),
+                "tp": len(tp_uids),
+                "fp": len(uids) - len(tp_uids),
+                "unique_tp": len(unique_tp),
+                # 重叠明细只在疑似冗余(无独有召回)时给:那是"能不能删"的
+                # 判断现场;有独有召回的规则本就该留,明细纯占 token
+                **({"overlap": {r2: len(uids & u2)
+                                for r2, u2 in sorted(hits_by_rule.items())
+                                if r2 != rid and uids & u2}}
+                   if not unique_tp else {}),
+            }
 
         misclassified = [
             {"uid": uid, "label": a["label"], "predicted": a["predicted"], "rules": a["rules"]}
@@ -98,8 +211,10 @@ def backtest(overrides: Optional[Dict] = None):
         ]
         return {
             "accounts_evaluated": len(per_account),
+            "label_observation": label_observation(labels, events),
             "overrides_applied": applied,
             "operating_points": points,
+            "rule_contribution": rule_contribution,
             "per_account": per_account,
             "misclassified_at_review_point": misclassified,
         }
@@ -161,9 +276,9 @@ def shadow_backtest(overrides: Dict):
     name="rule_backtest",
     description=(
         "对全量标注账号回测当前生效策略(评估口径:当前阈值 × 历史数据),返回两个"
-        "口径(flag=review+reject / flag=reject_only)的混淆矩阵与 precision/recall/F1、"
-        "逐账号预测、误判清单。overrides 临时覆盖阈值做 what-if(不修改配置,"
-        "可用键见参数说明)。凡涉及规则效果/指标的问题必须用本工具取数,不要自行推算。"
+        "口径(flag=review+reject / flag=reject_only)的混淆矩阵与 P/R/F1、规则贡献、"
+        "成本视角、误判清单。overrides 临时覆盖阈值做 what-if(不修改配置,可用键"
+        "见参数说明)。凡涉及规则效果/指标的问题必须用本工具取数,不要自行推算。"
     ),
     parameters={
         "type": "object",

@@ -242,11 +242,15 @@ def decide(action_id: int, approve: bool) -> Optional[Dict]:
     action = matched[0]
     kind = action.get("kind", "blacklist_add")
     applied_version = None
+    applied_detail = None
     # 先落盘、后出队:apply 抛异常(磁盘满/权限/文件损坏)时申请留在队列可重试,
     # 不会静默丢失一次审批。之前"先出队再 apply"在写失败时会永久吞掉批准。
     if approve:
         if kind == "threshold_change":
             applied_version = policy.apply_change(action)["version"]
+        elif kind == "appeal_resolve":
+            from .feedback import apply_appeal_decision  # 惰性:防导入环
+            applied_detail = apply_appeal_decision(action)
         elif kind == "blacklist_remove":
             records = [r for r in load_blacklist()
                        if not (r["dimension"] == action["dimension"]
@@ -279,6 +283,7 @@ def decide(action_id: int, approve: bool) -> Optional[Dict]:
             "decision": "approve" if approve else "deny",
             "kind": kind,
             "applied_policy_version": applied_version,
+            **({"applied_detail": applied_detail} if applied_detail else {}),
             "action": action,
         }, ensure_ascii=False) + "\n")
     return action
