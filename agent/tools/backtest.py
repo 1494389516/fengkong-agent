@@ -52,9 +52,37 @@ def label_observation(labels: Dict[str, Dict], events: List[Dict]) -> Dict:
     }
 
 
+# 判定缓存:daily_brief 一次调用会经 scan/rule_drift 把全量规则回放跑好几遍,
+# 真实数据量下不可接受。key 覆盖判定的全部输入面:数据文件 mtime(事件/名单/
+# 主档/策略/设备与 IP 情报)+ what-if 覆盖 + 事件切片指纹 + 账号集。任何
+# 输入变化(含审批生效、申诉解名单)都会改 mtime 使缓存自然失效。
+_VERDICT_CACHE: Dict[tuple, Dict[str, Dict]] = {}
+_VERDICT_CACHE_MAX = 64
+
+
+def _dataset_fingerprint() -> tuple:
+    from .datasource import data_dir
+    d = data_dir()
+    parts = []
+    for f in ("events_sample.json", "blacklist.json", "accounts.json",
+              "thresholds.json", "device_intel.json", "ip_intel.json"):
+        try:
+            parts.append((d / f).stat().st_mtime_ns)
+        except OSError:
+            parts.append(None)
+    return (str(d), tuple(parts))
+
+
 def account_verdicts(uids: Iterable[str], events: List[Dict]) -> Dict[str, Dict]:
     """逐账号跑规则集:账号内任一事件命中即记入,处置取最重。
     scan_all(全量巡检)与 backtest(指标回测)共用这一份口径。"""
+    uids = sorted(uids)
+    cache_key = (_dataset_fingerprint(), policy.overrides_key(),
+                 len(events), events[0]["ts"] if events else None,
+                 events[-1]["ts"] if events else None, tuple(uids))
+    hit = _VERDICT_CACHE.get(cache_key)
+    if hit is not None:
+        return hit
     verdicts = {}
     for uid in uids:
         worst = "pass"
@@ -71,6 +99,9 @@ def account_verdicts(uids: Iterable[str], events: List[Dict]) -> Dict[str, Dict]
                     reasons.append("%s: %s" % (h["rule_id"], h["reason"]))
                 hit_rules.add(h["rule_id"])
         verdicts[uid] = {"predicted": worst, "rules": sorted(hit_rules), "reasons": reasons[:3]}
+    if len(_VERDICT_CACHE) >= _VERDICT_CACHE_MAX:
+        _VERDICT_CACHE.pop(next(iter(_VERDICT_CACHE)))
+    _VERDICT_CACHE[cache_key] = verdicts
     return verdicts
 
 
@@ -245,10 +276,9 @@ def shadow_backtest(overrides: Dict):
     name="rule_backtest",
     description=(
         "对全量标注账号回测当前生效策略(评估口径:当前阈值 × 历史数据),返回两个"
-        "口径(flag=review+reject / flag=reject_only)的混淆矩阵与 precision/recall/F1、"
-        "逐账号预测、误判清单。overrides 可临时覆盖阈值做 what-if(不修改配置),"
-        "如 {\"r002_max_gap_seconds\": 60};可用键:" + ", ".join(OVERRIDABLE) + "。"
-        "凡涉及规则效果/指标的问题必须用本工具取数,不要自行推算。"
+        "口径(flag=review+reject / flag=reject_only)的混淆矩阵与 P/R/F1、规则贡献、"
+        "成本视角、误判清单。overrides 可临时覆盖阈值做 what-if(不修改配置,可用键"
+        "见参数说明)。凡涉及规则效果/指标的问题必须用本工具取数,不要自行推算。"
     ),
     parameters={
         "type": "object",

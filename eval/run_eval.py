@@ -484,6 +484,107 @@ def run_privacy_layer() -> int:
     ])
 
 
+def run_stats_layer() -> int:
+    """离线:统计核心的已知答案测试 —— PSI/IV/AUC/KS 这些数学是漂移告警和
+    区分度排名的地基,重构一处全线失真且不会有任何工具"报错"。全部用固定
+    种子的合成分布,期望值是数学事实不是快照。"""
+    import random
+    from collections import Counter
+    from agent.tools.drift import (categorical_psi, numeric_psi, psi_against_edges,
+                                   _merge_small_bins)
+    from agent.tools.risk import _auc, _feature_risk_one, _ks
+    import statistics
+
+    rng = random.Random(42)
+    base = [rng.gauss(100, 20) for _ in range(2000)]
+    same = [rng.gauss(100, 20) for _ in range(2000)]
+    shifted = [v + 30 for v in same]
+    edges = [round(q, 4) for q in statistics.quantiles(base, n=10, method="inclusive")]
+    # 一半质量恰在同一点:重复切点按重数还原 expected,自比不得虚高
+    tied = [240.0] * 1000 + [rng.uniform(0, 1000) for _ in range(1000)]
+    tied_edges = [round(q, 4) for q in statistics.quantiles(tied, n=10, method="inclusive")]
+
+    sep_iv = _feature_risk_one(
+        "x", [{"uid": "f%d" % i, "x": 10 + i} for i in range(50)]
+        + [{"uid": "n%d" % i, "x": -10 - i} for i in range(50)],
+        {**{"f%d" % i: "fraud" for i in range(50)},
+         **{"n%d" % i: "normal" for i in range(50)}}, 5)
+
+    return _report("统计核心已知答案(离线)", [
+        ("PSI 自比 ≈ 0", numeric_psi(base, same) is not None and numeric_psi(base, same) < 0.02),
+        ("PSI 平移必检出", numeric_psi(base, shifted) > 0.25),
+        ("快照切点自比 ≈ 0(含重复切点)",
+         psi_against_edges(edges, same) < 0.02 and psi_against_edges(tied_edges, tied) < 0.02),
+        ("快照切点平移必检出", psi_against_edges(edges, shifted) > 0.25),
+        ("类别 PSI:自比为 0,结构变化检出",
+         categorical_psi(Counter(a=500, b=300), Counter(a=500, b=300)) == 0.0
+         and categorical_psi(Counter(a=500, b=300), Counter(a=100, b=700)) > 0.25),
+        ("小箱合并:阈下箱并入相邻箱",
+         _merge_small_bins([0.02, 0.03, 0.5, 0.45], [0.1, 0.0, 0.4, 0.5], 0.05)[0]
+         == [0.05, 0.5, 0.45]),
+        ("小样本守卫:任一侧不足即 None",
+         numeric_psi([1.0] * 5, [2.0] * 100) is None
+         and psi_against_edges(edges, same, expected_n=5) is None),
+        ("AUC:完全可分=1,全同值=0.5,同分布≈0.5",
+         _auc([10 + i for i in range(50)], [i * 0.1 for i in range(50)]) == 1.0
+         and _auc([1.0] * 30, [1.0] * 30) == 0.5
+         and abs(_auc(base[:500], same[:500]) - 0.5) < 0.06),
+        ("KS 有界且完全可分=1",
+         _ks([1, 2, 3] * 10, [10, 11, 12] * 10) == 1.0),
+        ("IV:完全可分为强档且 Laplace 平滑不爆表",
+         sep_iv["level"] == "strong" and sep_iv["iv"] < 10),
+    ])
+
+
+def run_depth_layer() -> int:
+    """离线:防御纵深 —— 规则盲区攻击必须被监控层抓住。
+    规则层指标高是因为生成器只造规则认识的模式;这里故意造一波"贴着所有
+    阈值下方飞"的慢速刷券(间隔 35s > R002 的 30s,8 次 < 10 次,2 IP < 3):
+    规则应当全漏(这不是 bug,是阈值的定义),但对抗巡检的近阈带密度和
+    前端漂移必须报警 —— 否则监控这套投入就是装饰品。"""
+    with tempfile.TemporaryDirectory() as td:
+        d1 = 1783929600  # 2026-07-13 00:00 UTC = 北京 08:00,单业务日内
+        events, labels = [], {}
+        for day0 in (d1, d1 + 86400):
+            n_normal = 100 if day0 == d1 else 60
+            for i in range(n_normal):
+                for k, etype in enumerate(("login", "browse", "order")):
+                    events.append({"uid": "n_%d" % i, "ip": "10.0.%d.5" % (i % 20),
+                                   "device_id": "dev_n%d" % i, "type": etype,
+                                   "ts": day0 + i * 60 + k * 600,
+                                   **({"amount": 50.0} if etype == "order" else {})})
+                labels["n_%d" % i] = {"label": "normal"}
+        for b in range(40):  # 次日的规避型慢速 bot:所有维度贴阈下方
+            for k in range(8):
+                events.append({"uid": "sb_%d" % b, "ip": "172.16.%d.9" % (k % 2),
+                               "device_id": "dev_sb%d" % b, "type": "coupon_claim",
+                               "ts": d1 + 86400 + 40000 + b * 300 + k * 35})
+            labels["sb_%d" % b] = {"label": "fraud"}
+        (Path(td) / "events_sample.json").write_text(json.dumps(events), encoding="utf-8")
+        (Path(td) / "labels.json").write_text(json.dumps(labels), encoding="utf-8")
+        (Path(td) / "blacklist.json").write_text("[]", encoding="utf-8")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            bt = backtest()
+            wide = bt["operating_points"]["flag=review+reject"]
+            adv = registry.dispatch("adversary_watch", {})
+            fd = registry.dispatch("feature_drift", {})
+            rd = registry.dispatch("rule_drift", {})
+            brief = registry.dispatch("daily_brief", {})
+            near_alarm = any("近阈" in a for a in adv.get("alarms", []))
+            return _report("防御纵深(离线,规则盲区攻击)", [
+                ("攻击确实在规则盲区(recall=0,40 个全漏)",
+                 wide["recall"] == 0.0 and wide["fn"] == 40),
+                ("对抗巡检报出近阈试探", adv.get("alarm") is True and near_alarm),
+                ("前端漂移报警(流量结构/特征分布)", fd.get("alarm") is True),
+                ("后端安静(规则没命中,输出无漂移)", rd.get("alarm") is False),
+                ("日报聚合到告警且无假阴", brief["alert_count"] >= 2
+                 and "adversary_watch" in brief["alerts"]),
+            ])
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+
 def run_strategy_layer() -> int:
     """离线:策略生命周期工具 —— 区分度评估的小样本纪律、规则试衣间的
     增量判定、对抗巡检的可用性、申诉回路的全链路落盘(隔离数据目录)。"""
@@ -666,6 +767,8 @@ def main() -> int:
     failures += run_profile_layer()
     failures += run_reconcile_layer()
     failures += run_gen_layer()
+    failures += run_stats_layer()
+    failures += run_depth_layer()
     failures += run_strategy_layer()
     failures += run_privacy_layer()
     failures += run_cost_layer()

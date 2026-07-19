@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 
 from . import tool
 from .drift import (MIN_PSI_SAMPLES, _bucket_account_features, _bucket_events,
-                    _hit_rate_alarm, _tail_partial, drift_alert_text)
+                    _head_partial, _hit_rate_alarm, _tail_partial, drift_alert_text)
 from .policy import active_policy
 
 NEAR_BAND = 1.5     # 近阈带宽:阈值的 1/1.5 ~ 1.5 倍
@@ -135,12 +135,17 @@ def adversary_watch(time_grain: str = "day", benchmark_buckets: int = 1):
     growing.sort(key=lambda g: (-g["new_in_last_bucket"], -g["accounts_total"]))
 
     tail_partial = _tail_partial(buckets, labels)
+    head_partial = _head_partial(buckets, labels)
     out = {
         "found": True,
         "time_grain": time_grain,
         "bucket_count": len(labels),
         "benchmark_buckets": bench_labels,
         "tail_bucket_partial": tail_partial,
+        **({"benchmark_note": "基准桶 %s 事件量不足后续中位桶一半,可能采集不完整,"
+                              "PSI/密度基准参考价值低,建议 benchmark_buckets>=2"
+                              % labels[0]}
+           if benchmark_buckets == 1 and head_partial else {}),
         "policy_version": p["_version"],
         "near_miss": watches,
         "gang_growth": growing[:8],
