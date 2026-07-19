@@ -259,13 +259,65 @@ def _bucket_account_features(evs: List[Dict]) -> List[Dict]:
     return out
 
 
+def _grouped_profile(feats: List[str], group_col: str, psi_bins: int,
+                     min_bin_frac: float, missing_set: set) -> Dict:
+    """分群画像(MARS group_col 口径的转译):各组账号特征分布 vs 全体的 PSI。
+    时间分桶答"什么时候开始变",分群答"是谁在变" —— 某渠道新号的行为分布
+    突然和大盘不一样,就是渠道拉新作弊的样子。expected = 全体(含该组自身,
+    大组会稀释自己,小组对比更锐利 —— 这是保守方向,不放大告警)。"""
+    from .datasource import load_accounts
+    from .featurelib import _all_account_features
+    accounts = load_accounts()
+    if not accounts:
+        return {"found": False, "note": "无账号主档,分群画像不可用"}
+    groups: Dict[str, List[Dict]] = defaultdict(list)
+    rows = _all_account_features()
+    for r in rows:
+        groups[(accounts.get(r["uid"]) or {}).get(group_col) or "unknown"].append(r)
+
+    def _vals(rs: List[Dict], feat: str) -> List[float]:
+        return [r[feat] for r in rs
+                if r.get(feat) is not None and r[feat] not in missing_set]
+
+    alarms: List[str] = []
+    feature_out: Dict[str, Dict] = {}
+    for feat in feats:
+        all_vals = _vals(rows, feat)
+        per_group, worst_psi, worst_group = {}, None, None
+        for g, rs in sorted(groups.items()):
+            psi = numeric_psi(all_vals, _vals(rs, feat), psi_bins, min_bin_frac)
+            per_group[g] = psi
+            if psi is not None and (worst_psi is None or psi > worst_psi):
+                worst_psi, worst_group = psi, g
+        level = psi_level(worst_psi)
+        if level == "alarm":
+            alarms.append("%s 在分组 %s=%s PSI=%.3f(>%.2f),该群体行为分布异于大盘" % (
+                feat, group_col, worst_group, worst_psi, PSI_ALARM))
+        feature_out[feat] = {"psi_by_group": per_group, "worst_group": worst_group,
+                             "level": level}
+    out = {
+        "found": True,
+        "group_col": group_col,
+        "groups": {g: len(rs) for g, rs in sorted(groups.items())},
+        "psi_reference": "<%.1f 稳定; %.1f~%.2f 关注; >%.2f 告警;n<%d 的组记 null" % (
+            PSI_WATCH, PSI_WATCH, PSI_ALARM, PSI_ALARM, MIN_PSI_SAMPLES),
+        "features": feature_out,
+        "alarm": bool(alarms),
+        "alarms": alarms,
+        "note": "分组 PSI 高 = 该群体行为异于大盘;渠道维度告警先查该渠道新号占比"
+                "与注册风险分,再谈渠道处置",
+    }
+    out["alert_text"] = drift_alert_text(out)
+    return out
+
+
 @tool(
     name="feature_drift",
     description=(
-        "特征漂移画像:按时间粒度分桶,逐桶算特征质量(缺失率)与统计(均值/P50),"
-        "以最早基准桶为参照算各桶 PSI(<0.1 稳,0.1~0.25 关注,>0.25 告警)及事件"
-        "类型构成的类别 PSI。答'分布最近有没有变、从哪天开始变'。缺失默认不进 "
-        "PSI,业务缺失码用 missing_values 声明。告警先查流量(防养基线)再谈重校准。"
+        "特征漂移画像:按时间分桶算特征缺失率/均值/P50 与逐桶 PSI(<0.1 稳,"
+        "0.1~0.25 关注,>0.25 告警)及事件类型类别 PSI,答'分布何时开始变';"
+        "group_col 则按账号属性分群答'是谁在变'。缺失默认不进 PSI。"
+        "告警先查流量(防养基线)再谈重校准。"
     ),
     parameters={
         "type": "object",
@@ -273,16 +325,16 @@ def _bucket_account_features(evs: List[Dict]) -> List[Dict]:
             "time_grain": {"type": "string", "enum": ["day", "hour"],
                            "description": "分桶粒度,默认 day"},
             "features": {"type": "array", "items": {"type": "string"},
-                         "description": "要画像的特征,默认全部行为特征"},
-            "benchmark_buckets": {"type": "integer",
-                                  "description": "作为基准(expected)的最早桶数,默认 1"},
-            "psi_bins": {"type": "integer", "description": "数值 PSI 分箱数,默认 5"},
-            "psi_min_bin_frac": {"type": "number",
-                                 "description": "小箱合并阈值(基准占比),默认 0.05"},
-            "psi_include_missing": {"type": "boolean",
-                                    "description": "缺失是否计入 PSI,默认 false"},
+                         "description": "要画像的特征,默认全部"},
+            "benchmark_buckets": {"type": "integer", "description": "基准桶数,默认 1"},
+            "psi_bins": {"type": "integer", "description": "PSI 分箱数,默认 5"},
+            "psi_min_bin_frac": {"type": "number", "description": "小箱合并阈值,默认 0.05"},
+            "psi_include_missing": {"type": "boolean", "description": "缺失计入 PSI,默认 false"},
             "missing_values": {"type": "array", "items": {"type": "number"},
-                               "description": "业务缺失码列表(如 -999),命中视为缺失"},
+                               "description": "业务缺失码(如 -999)"},
+            "group_col": {"type": "string", "enum": ["register_channel", "register_method",
+                                                     "register_os"],
+                          "description": "按账号属性分群代替时间分桶(渠道作弊检测)"},
         },
     },
 )
@@ -292,7 +344,8 @@ def feature_drift(time_grain: str = "day",
                   psi_bins: int = 5,
                   psi_min_bin_frac: float = 0.05,
                   psi_include_missing: bool = False,
-                  missing_values: Optional[List[float]] = None):
+                  missing_values: Optional[List[float]] = None,
+                  group_col: Optional[str] = None):
     if time_grain not in _GRAIN:
         return {"error": "time_grain 只支持 day / hour"}
     feats = list(features) if features else list(DRIFT_FEATURES)
@@ -300,6 +353,8 @@ def feature_drift(time_grain: str = "day",
     if unknown:
         return {"error": "未知特征: %s,可选: %s" % (unknown, list(DRIFT_FEATURES))}
     missing_set = set(missing_values or [])
+    if group_col is not None:
+        return _grouped_profile(feats, group_col, psi_bins, psi_min_bin_frac, missing_set)
 
     buckets = _bucket_events(time_grain)
     labels = sorted(buckets)
@@ -419,11 +474,9 @@ def _hit_rate_alarm(bench_rate: float, rate: float) -> bool:
 @tool(
     name="rule_drift",
     description=(
-        "规则输出漂移(后端监控):按时间粒度分桶,用当前策略跑各桶账号,输出"
-        "处置分布(pass/review/reject 占比)趋势与其相对基准桶的类别 PSI,以及"
-        "逐规则命中率趋势(相对基准翻倍/腰斩且变幅超 5pp 报警)。不依赖标签,"
-        "比回测指标灵敏 —— 适合'规则最近有没有异常、命中率什么时候开始变'。"
-        "与 feature_drift 搭配定位:入参特征稳而输出动 = 查规则,一起动 = 流量变了。"
+        "规则输出漂移(后端监控):按时间分桶输出处置分布趋势与其相对基准的类别 "
+        "PSI、逐规则命中率趋势(翻倍/腰斩且超 5pp 报警)。不依赖标签,比回测灵敏。"
+        "与 feature_drift 搭配:入参稳而输出动 = 查规则,一起动 = 流量变了。"
     ),
     parameters={
         "type": "object",

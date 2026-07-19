@@ -984,6 +984,19 @@ def run_strategy_layer() -> int:
             adv = registry.dispatch("adversary_watch", {})
             queue = {q["uid"]: q["recommendation"]
                      for q in registry.dispatch("appeal_review", {})["queue"]}
+            # 值班台:盯梢 + 告警确认(确认后静默但计数可见,凭空 ack 被拒)
+            registry.dispatch("duty_ops", {"action": "watch_add", "dimension": "uid",
+                                           "value": "u_1002", "reason": "eval 盯梢"})
+            b_watch = registry.dispatch("daily_brief", {})
+            first_alerts = [a for v in b_watch["alerts"].values()
+                            for a in (v if isinstance(v, list) else [v])]
+            ack_ok = ack_after = bogus = None
+            if first_alerts:
+                ack_ok = registry.dispatch("duty_ops", {
+                    "action": "ack_alarm", "alarm": first_alerts[0], "reason": "eval 确认"})
+                ack_after = registry.dispatch("daily_brief", {})
+            bogus = registry.dispatch("duty_ops", {
+                "action": "ack_alarm", "alarm": "不存在的告警 PSI=9.9"})
             r1 = registry.dispatch("appeal_resolve", {
                 "appeal_id": 1, "decision": "reject", "reason": "灰名单设备+套现模式+fraud 标签"})
             r2 = registry.dispatch("appeal_resolve", {
@@ -997,6 +1010,12 @@ def run_strategy_layer() -> int:
                  len(brief["verdicts"]["reject"]) + len(brief["verdicts"]["review"]) == 5
                  and brief["verdicts"]["pass_count"] == 1
                  and brief["appeals_pending"] == 2 and bool(brief["quiet"])),
+                ("值班台:盯梢进日报", any(w["watch"] == "uid=u_1002"
+                                          for w in b_watch.get("watched", []))),
+                ("值班台:确认后告警静默且计数可见",
+                 not first_alerts or (ack_ok.get("status") == "acked"
+                                      and ack_after["acked_alarms"] >= 1)),
+                ("值班台:凭空确认被拒", "error" in bogus),
                 ("试衣间:命中 u_1002 且判无增量", draft["hit_accounts"] == ["u_1002"]
                  and "无增量" in draft["verdict"]),
                 ("对抗巡检可用且带近阈监控项", adv.get("found") is True
@@ -1013,6 +1032,57 @@ def run_strategy_layer() -> int:
             os.environ.pop("FK_DATA_DIR", None)
 
 
+def run_serve_layer() -> int:
+    """离线:在线决策服务冒烟 —— 服务起得来、决策与离线 rule_eval 完全一致
+    (线上线下同一引擎是对账的前提)、坏请求不 500、决策留痕。"""
+    import socket
+    import urllib.request
+
+    with socket.socket() as s:  # 拿一个空闲端口
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = subprocess.Popen([sys.executable, str(ROOT / "serve.py"), "--port", str(port)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = "http://127.0.0.1:%d" % port
+
+    def _req(path, payload=None, timeout=5):
+        req = urllib.request.Request(
+            base + path,
+            data=json.dumps(payload).encode() if payload is not None else None,
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    try:
+        health = None
+        for _ in range(50):  # 等服务就绪,最多 5s
+            try:
+                health = _req("/health")
+                break
+            except OSError:
+                import time as _t
+                _t.sleep(0.1)
+        event = {"uid": "u_1002", "type": "coupon_claim", "ts": 1784109633}
+        offline = rule_eval(dict(event), use_current_policy=True)
+        code, online = _req("/decide", event)
+        bad_code, _ = _req("/decide", {"type": "order"})  # 缺 uid
+        return _report("在线决策服务冒烟(离线)", [
+            ("健康检查带策略版本", health is not None and health[1].get("ok") is True
+             and health[1].get("policy_version") is not None),
+            ("线上决策与离线 rule_eval 一致", code == 200
+             and online["action"] == offline["action"]
+             and online["rules"] == sorted({h["rule_id"] for h in offline["hits"]})),
+            ("坏请求 400 而非 500", bad_code == 400),
+            ("决策留痕(serve_decisions.jsonl)", (ROOT / "out" / "serve_decisions.jsonl").exists()),
+        ])
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
 def run_cost_layer() -> int:
     """离线:结构性 token 成本预算 —— schema 与 system prompt 每请求随行,
     缓存命中可吸收,但决定了 miss 时的底价;失控即工具设计出了问题。"""
@@ -1021,11 +1091,13 @@ def run_cost_layer() -> int:
     # 预算史:20 工具期 12000;策略生命周期五件套(feature_risk/adversary_watch/
     # rule_draft_test/appeal_review/appeal_resolve)加入后 26 工具,上调至 14500
     # (人均 ~550 chars 未松动);名单三色 + 灰名单巡检等并入后 31 工具,上调至
-    # 15600(人均 ~500,schema 瘦身让人均反降)。再超说明该合并工具而不是再抬预算。
+    # 预算随工具数走但人均 500 不放松:31 工具期 15600;值班台(duty_ops,
+    # 三操作合一)加入后 32 工具上调至 16000,当前人均 ~491 —— 合并优先于
+    # 抬预算的纪律仍然有效,duty_ops 本身就是三合一的产物。
     # system prompt 同理:三色名单纪律 + 漂移/申诉纪律并集后上调至 3300。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 15600 chars(现 %d,%d 个工具)"
-         % (s["schemas_chars"], s["tool_count"]), s["schemas_chars"] <= 15600),
+        ("工具 schema 总量 <= 16000 chars(现 %d,%d 个工具)"
+         % (s["schemas_chars"], s["tool_count"]), s["schemas_chars"] <= 16000),
         ("system prompt <= 3300 chars(现 %d)" % s["system_chars"],
          s["system_chars"] <= 3300),
     ])
@@ -1151,6 +1223,7 @@ def main() -> int:
     failures += run_stats_layer()
     failures += run_depth_layer()
     failures += run_strategy_layer()
+    failures += run_serve_layer()
     failures += run_privacy_layer()
     failures += run_regression_layer()
     failures += run_cost_layer()

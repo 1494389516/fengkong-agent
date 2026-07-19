@@ -90,5 +90,5 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
 # backtest/featurelib/policy/drift,放 drift 之后;risk/adversary/draft 依赖
 # backtest/drift/policy;feedback 依赖 backtest/reports,actions 惰性回调它;
 # graylist 依赖 backtest/blacklist/policy,放最后)
-from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, drift, calibrate, risk, adversary, draft, reports, feedback, brief, profile, reconcile, graylist  # noqa: E402,F401
+from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, drift, calibrate, risk, adversary, draft, reports, feedback, ops, brief, profile, reconcile, graylist  # noqa: E402,F401
 # intel 由 monitor/profile 传递导入即完成注册,无需在上一行重复列出

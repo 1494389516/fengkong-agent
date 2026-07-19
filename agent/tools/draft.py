@@ -41,8 +41,7 @@ OPS = {">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b,
         "properties": {
             "conditions": {
                 "type": "array",
-                "description": "条件列表,如 [{\"feature\": \"coupon_claims\", \"op\": \">=\", "
-                               "\"value\": 5}];特征可用 " + "/".join(DRAFT_FEATURES),
+                "description": "条件列表(特征可用 " + "/".join(DRAFT_FEATURES) + ")",
                 "items": {
                     "type": "object",
                     "properties": {

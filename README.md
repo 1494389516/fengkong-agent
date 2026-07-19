@@ -6,7 +6,7 @@
 
 项目的两根支柱,所有设计都围绕它们展开:
 
-1. **效果评估**:agent 的每个能力都有离线断言钉住(当前 101 项,全离线零 token),
+1. **效果评估**:agent 的每个能力都有离线断言钉住(当前 170+ 项,全离线零 token),
    agent 本体行为有四维黄金案例(结论 / 取证轨迹 / 轨迹效率 / token 预算);
 2. **token 成本**:上下文工程 ①~⑦ 七道防线 + 成本预算化(超限即评估变红)。
 
@@ -19,7 +19,7 @@ pip install -r requirements.txt
 export DEEPSEEK_API_KEY=sk-...
 python3 main.py
 
-# 离线评估(不需要 key,101 项断言)
+# 离线评估(不需要 key,170+ 项断言)
 python3 eval/run_eval.py
 
 # 生成大规模合成数据(约 250 账号、五类欺诈模式)并切换使用
@@ -28,6 +28,9 @@ FK_DATASET=gen python3 main.py
 
 # token 成本测量
 python3 eval/measure_costs.py --dataset gen
+
+# 在线决策服务(骨架,POST /decide · GET /health /brief)
+python3 serve.py --port 8080
 
 # 公有云部署时启用脱敏层(敏感标识符不出程序)
 FK_PRIVACY=1 python3 main.py
@@ -50,21 +53,23 @@ flowchart TB
     subgraph 特征层
         FL[featurelib.py 统一特征层<br/>point-in-time · 窗口 · 基线/百分位 · 行为路径]
     end
-    subgraph 工具层["工具层(20 个,dispatch 单点限幅+注入防线)"]
+    subgraph 工具层["工具层(32 个,dispatch 单点限幅+注入防线)"]
         T1[查询:profile/monitor/features/<br/>blacklist/ip/device/reports/graph]
         T2[策略:rule_eval/backtest/shadow/<br/>calibrate/propose/history/consistency]
         T3[图表:仪表盘/扫描/群体对比]
-        T4[巡检:scan_all]
+        T4[巡检:scan_all/daily_brief/duty_ops]
+        T5[监控:feature_drift/rule_drift/<br/>adversary_watch/feature_risk]
+        T6[生命周期:rule_draft_test/<br/>appeal_review/appeal_resolve]
     end
     subgraph Agent 层
         CORE[core.py 对话主循环<br/>上下文工程 ①~⑦]
         PRIV[privacy.py 脱敏层]
     end
     CLI[main.py CLI / 未来:飞书机器人] --> CORE
-    CORE --> PRIV --> T1 & T2 & T3 & T4
-    T1 & T2 & T3 & T4 --> FL --> DS
+    CORE --> PRIV --> T1 & T2 & T3 & T4 & T5 & T6
+    T1 & T2 & T3 & T4 & T5 & T6 --> FL --> DS
     T2 --> POL --> DS
-    EVAL[eval/ 101 项离线断言 + agent 层四维案例 + 成本预算] -.回归门禁.-> 工具层 & Agent 层
+    EVAL[eval/ 170+ 项离线断言 + agent 层四维案例 + 成本预算] -.回归门禁.-> 工具层 & Agent 层
 ```
 
 ```
@@ -88,10 +93,18 @@ agent/
     graph.py       账号-设备-IP 关联图谱(连通分量=团伙)
     intel.py       IP 情报 / 设备指纹 / 地理跳变
     reports.py     举报记录
-    charts.py      matplotlib+seaborn 图表(仪表盘/扫描/群体)
-    blacklist.py / features.py / actions.py  名单查询 / 特征工具 / 两阶段处置
+    charts.py      matplotlib+seaborn 图表(仪表盘/扫描/群体/监控仪表盘)
+    drift.py       漂移监控:前端(特征 PSI)/后端(处置分布+命中率)/分群(渠道)
+    adversary.py   对抗面巡检:阈值试探(近阈带密度)+ 团伙演化增速
+    risk.py        特征区分度:IV/KS/AUC/Lift + 分箱明细 + 区分度衰减
+    draft.py       候选规则试衣间(net_new_catches 是加规则的唯一正当理由)
+    feedback.py    误伤申诉队列/决议 + 复盘沉淀(postmortems.jsonl)
+    ops.py         值班台:关注清单 + 告警确认(指纹静默/恶化重浮)
+    brief.py       值班日报:一次聚合全风险面,只报有事的项
+    blacklist.py / features.py / actions.py / graylist.py  名单 / 特征 / 处置 / 灰名单治理
 data/              样本数据(6 账号故事线)+ gen_sample.py 生成器
 eval/              run_eval.py 评估 harness + cases.json + measure_costs.py
+serve.py           在线决策服务骨架(与离线同一引擎,决策留痕供对账)
 DEPLOY.md          部署路线图
 ```
 
@@ -174,14 +187,46 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
   回放"当时生效的策略";每次变更自动附当时基线快照。已有真实变更:v2 关闭 root
   强拒,决策依据(影子回测证据)永久留在版本 note;
 - **审批+限速+漂移告警(对抗层)**:校准只产提案,生效必须人 `/approve`(approve
-  不是注册工具,模型物理触达不到);单参数变幅限速 ±50%(开关型豁免);基线 P99
-  相对上版快照漂移 >30% 触发告警——**语义要读反:突然漂移优先怀疑伪正常流量在
+  不是注册工具,模型物理触达不到);单参数变幅限速 ±50%(开关型豁免);基线相对上版快照做分布级 PSI 比对
+  (快照存等频十分箱切点,PSI>0.25 告警;旧快照无切点回退 P99 变幅口径)——**语义要读反:突然漂移优先怀疑伪正常流量在
   "养基线",不是重校准的信号**;
 - **影子回测(反馈回路层)**:新旧策略对同批账号的指标差 + newly_flagged/newly_passed
   清单,切换前必经。R006 的误伤(root 真机极客用户)被故意注入标注数据,
   强拒的代价从注释变成指标,才有了 v2 的数据化决策。
 
-### 6. 唯一事实源与对账
+### 6. 监控与策略生命周期(口径借鉴评分卡工具库 MARS,语义全部转译为反欺诈)
+
+**监控三层,全部不依赖标签(比回测灵敏 —— 标签要等人工回填,漂移当天可见):**
+
+- **前端**(`feature_drift`):特征缺失率/统计趋势 + 逐桶 PSI(缺失显式配置、
+  默认不进 PSI、小箱合并、类别 Top-K+Other、任一侧样本 <30 记 n/a);分桶按
+  业务时区切日(UTC 切日会把凌晨攻击劈进两桶);`group_col` 分群画像答"是谁
+  在变"(渠道拉新作弊检测);首/末桶截断自动标注(不完整的桶当基准 = 满屏假告警);
+- **后端**(`rule_drift`):处置分布 PSI + 逐规则命中率(翻倍/腰斩且超 5pp 双条件)。
+  定位口诀:入参稳而输出动查规则,一起动是流量变了;
+- **对抗面**(`adversary_watch`):近阈带密度(对手摸到阈值贴边飞行,此时整体
+  PSI 往往还稳)+ 共享资源账号增速(团伙扩张不等规则命中)。
+
+**防御纵深有 eval 证据**:评估层合成"贴所有阈值下方飞"的慢速刷券 —— 断言规则
+全漏(recall=0,阈值的定义使然)而监控层告警补位。监控不是装饰品,是抓规则盲区的。
+
+**策略生命周期(从"调参工具箱"到"策略 agent"):**
+
+- `feature_risk`:IV/KS/AUC/Lift 区分度排名 + 分箱明细(阈值切在 WOE 跳变处)
+  + 逐桶 IV 衰减检测(特征失灵 = 对手在适应)—— 调参前先看哪个特征值钱;
+- `rule_draft_test`:声明式条件历史试跑,`net_new_catches`(现有规则漏掉而草案
+  能抓的)是加规则的唯一正当理由;转正式规则仍需研究员写码评审,不走配置后门;
+- `rule_contribution`(随回测返回):逐规则独有召回与重叠 —— 删规则和加规则
+  一样需要证据;成本视角(拦截止损/漏放金额/误伤 LTV)把阈值选择变成期望损失比较;
+- **申诉回路**(`appeal_review`/`appeal_resolve`):标签回路的 normal 方向。
+  建议只看硬证据(申诉文案不参与);决议走两阶段审批,误伤核实自动解名单、
+  修正标签、沉淀复盘(postmortems.jsonl → `eval/postmortem_to_cases.py`
+  生成误伤守卫用例草稿,刻意只到草稿:定义"正确"必须过人);
+- **值班收口**(`daily_brief` + `duty_ops`):一次聚合全风险面,只报有事的项、
+  安静项显式列出("今天没事"是结论不是没查);告警确认按指纹静默、恶化自动
+  重浮、计数始终可见(治告警疲劳);关注清单盯梢调查对象。
+
+### 7. 唯一事实源与对账
 
 **架构军规:风控系统是唯一事实源,agent 是镜像,镜像必须对账。**
 
@@ -191,7 +236,7 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
   历史被改写,消费分数的 R005 地基即不稳;
 - 样本决策日志故意埋 3 处动作漂移 + 1 处分数改写,eval 断言精确抓出且零误报。
 
-### 7. 权限与安全
+### 8. 权限与安全
 
 - **两阶段处置**:agent 只能提交(blacklist_add / threshold_propose 进 pending),
   人在 CLI 审批后落盘,全程审计日志(jsonl);
@@ -200,7 +245,7 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 - **注入防线**:举报文本等用户可控字段经 dispatch 单点包 `⟦用户内容⟧` 标记
   (标记字符先清洗防伪造闭合逃逸),system.md 安全纪律规定标记内只作数据引用。
 
-### 8. 数据面
+### 9. 数据面
 
 **手工样本**(6 账号,每个是一类欺诈的教科书故事,eval 的确定性基线):
 
@@ -219,14 +264,17 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 **数据集切换**:`FK_DATASET=gen` 用生成集,`FK_DATA_DIR=/path` 指定目录(eval 的
 临时目录测试用);策略/名单/审计均按数据集隔离。
 
-### 9. 评估体系(效果与成本同一根尺子)
+### 10. 评估体系(效果与成本同一根尺子)
 
-**离线(101 项,零 token,CI 门禁)**:规则回归(含防泄漏/误伤守卫)、指标基线、
+**离线(170+ 项,零 token,CI 门禁)**:规则回归(含防泄漏/误伤守卫)、指标基线、
 监控信号、全量巡检、关联图谱、处置写流程、策略版本化、治理(限速/漂移)、影子+覆盖
 原子性、基线与百分位、IP/设备情报与举报、账号档案(含路径签名)、模拟一致性对账、
-数据生成+大样本指标下限(含 R006 误伤计量)、脱敏与注入防线、结构性成本预算、图表冒烟。
+数据生成+大样本指标下限(含 R006 误伤计量)、**统计核心已知答案**(PSI/IV/AUC/KS
+的数学事实,防重构悄悄改坏)、**防御纵深**(规则盲区攻击须被监控层抓住)、
+**策略生命周期**(区分度纪律/试衣间/申诉全链路/值班台)、**在线服务冒烟**(线上
+决策与离线引擎逐字段一致)、脱敏与注入防线、结构性成本预算、图表冒烟。
 
-**agent 层(8 个黄金案例,需 API key)**,每案例四维断言:
+**agent 层(15 个黄金案例,需 API key)**,每案例四维断言:
 
 - 结论:期望关键词 + **禁用表述**(说"已拉黑/已生效"= 越权话术判负);
 - 取证:必须调过期望工具(凭空下结论判负);
@@ -241,11 +289,12 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 | `FK_DATASET=gen` | 切换到生成数据集 |
 | `FK_DATA_DIR=/path` | 直接指定数据目录(优先级最高) |
 | `FK_PRIVACY=1` | 启用脱敏层(公有云部署红线) |
+| `FK_TZ_OFFSET_HOURS` | 分桶业务时区偏移,默认 +8(UTC 切日会把凌晨攻击劈进两桶) |
 
 ## 已知边界(诚实声明)
 
 - 数据是合成的:指标的绝对值没有外推意义,分辨率与张力是设计出来的;
-- agent 层 8 案例尚未实弹运行(需 API key),四维基线待第一次真实运行建立;
+- agent 层 15 案例尚未实弹运行(需 API key),四维基线待第一次真实运行建立;
 - 本骨架中 agent 的规则引擎就是唯一引擎;接真实系统后它降级为镜像,
   对账机制(已建)成为一切模拟结论的前提;
 - 全量类工具(scan/backtest)是同步实现,真实数据量下须改异步任务(见 DEPLOY.md)。
