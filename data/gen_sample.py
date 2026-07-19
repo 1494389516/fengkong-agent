@@ -42,8 +42,10 @@ class Gen:
         self.blacklist = []
         self.accounts = {}
         self.ip_intel = {}
+        self.device_intel = {}
         self.reports = []
         self._report_seq = 0
+        self._rooted_normal_planted = False
 
     def emit(self, uid, ip, device, etype, ts, amount=None):
         e = {"uid": uid, "ip": ip, "device_id": device, "type": etype, "ts": int(ts)}
@@ -63,22 +65,56 @@ class Gen:
             entry["note"] = note
         self.ip_intel.setdefault(seg, entry)
 
+    def dev_intel(self, device, platform="安卓", emulator=False, brand=None,
+                  rooted=False, hook=False, signals=None):
+        """登记设备指纹(固定内容,不消耗随机数,保持 seed 序列稳定)。"""
+        entry = {"platform": platform, "is_emulator": emulator, "is_rooted": rooted,
+                 "hook_detected": hook, "signals": signals or [],
+                 "risk": "high" if (emulator or rooted or hook) else "low"}
+        if emulator and brand:
+            entry["emulator_brand"] = brand
+        self.device_intel.setdefault(device, entry)
+
     def report(self, uid, ts, category, text, status):
         self._report_seq += 1
         self.reports.append({"report_id": self._report_seq, "reported_uid": uid,
                              "reporter": "g_rpt_%04d" % self.rng.randint(1, 9999),
                              "ts": int(ts), "category": category, "text": text, "status": status})
 
-    def register(self, uid, registered_at, channel, method, ip, device, kyc, ltv, rebind=0):
+    def _reg_risk(self, channel, method, os_, os_ver, kyc, ip, device):
+        """注册风险分(0~100):生成器在此扮演'生产注册风控'——分数在注册
+        时刻按出生信息加权打出,写入主档后不再重算(历史事实)。"""
+        score = 0
+        score += {"积分墙": 35, "好友邀请": 20, "抖音投放": 15, "朋友圈广告": 15}.get(channel, 0)
+        score += 15 if method in ("抖音号", "微信") else 0   # 三方号池可批量,先验高于手机号
+        score += 5 if os_ == "安卓" else 0                    # 模拟器/改机几乎全在安卓生态
+        try:
+            if os_ == "安卓" and int(str(os_ver).split(".")[0]) < 10:
+                score += 10  # 老安卓镜像:模拟器/群控农场标配(好破解、hook 兼容)
+        except ValueError:
+            pass
+        score += {0: 20, 1: 5}.get(kyc, 0)
+        seg = ip.rsplit(".", 1)[0]
+        seg_type = self.ip_intel.get(seg, {}).get("type", "unknown")
+        score += {"idc": 25, "proxy": 25, "unknown": 5}.get(seg_type, 0)
+        if any(b["value"] == device for b in self.blacklist):  # 注册设备已在名单
+            score += 30
+        return min(score, 100)
+
+    def register(self, uid, registered_at, channel, method, ip, device, kyc, ltv,
+                 rebind=0, os_="安卓", os_ver="13"):
         self.accounts[uid] = {
             "registered_at": int(registered_at),
             "register_channel": channel,
             "register_method": method,
+            "register_os": os_,
+            "register_os_version": str(os_ver),
             "register_ip": ip,
             "register_device": device,
             "kyc_level": kyc,
             "ltv": round(ltv, 2),
             "phone_rebind_count": rebind,
+            "register_risk_score": self._reg_risk(channel, method, os_, os_ver, kyc, ip, device),
         }
 
     # ---- 正常用户:每天 1~3 个会话,登录 -> 偶尔领券/下单,间隔分钟到小时级 ----
@@ -111,10 +147,28 @@ class Gen:
                         self.emit(uid, ip, device, "coupon_claim", t)
         # 老账号(注册远早于观察窗),LTV = 观察窗内消费 + 历史存量
         spent = sum(e.get("amount", 0) for e in self.events if e["uid"] == uid)
-        self.register(uid, T0 - r.randint(30, 400) * DAY,
-                      r.choice(["appstore_organic", "android_store", "web_organic"]),
-                      "phone", ips[0], device, r.choice([1, 2]),
-                      spent + r.uniform(0, 2000))
+        # 注册方式分布贴近真实:手机号为主,微信/抖音三方登录为辅;
+        # 渠道以商店自然量为主、投放为辅
+        method = r.choices(["手机号", "微信", "抖音号"], weights=[6, 3, 1])[0]
+        channel = r.choices(["应用商店", "华为商店", "小米商店", "抖音投放", "朋友圈广告"],
+                            weights=[4, 2, 1, 2, 1])[0]
+        os_ = r.choices(["安卓", "iOS"], weights=[6, 4])[0]
+        # 正常用户跑主流较新版本
+        os_ver = r.choice(["12", "13", "14", "15"]) if os_ == "安卓" \
+            else r.choice(["16.7", "17.2", "17.4", "18.1"])
+        self.register(uid, T0 - r.randint(30, 400) * DAY, channel,
+                      method, ips[0], device, r.choice([1, 2]),
+                      spent + r.uniform(0, 2000), os_=os_, os_ver=os_ver)
+        # ~3% 安卓极客用户用 root 真机 —— R006 强拒策略的真实误伤面,
+        # 故意让它出现在标注数据里:强拒的代价必须被指标计量,不能只活在注释里。
+        # 首个安卓正常用户保底 root(小样本下概率抽样可能为 0,计量断言会空转)
+        geek = r.random() < 0.03
+        if os_ == "安卓" and (geek or not self._rooted_normal_planted):
+            self._rooted_normal_planted = True
+            self.dev_intel(device, platform=os_, rooted=True,
+                           signals=["Magisk root(极客用户,无 hook/自动化痕迹)"])
+        else:
+            self.dev_intel(device, platform=os_)  # 正常真机,指纹干净
         if r.random() < 0.01:  # 恶意/误举报噪音:正常用户偶被举报,核实后不属实
             self.report(uid, T0 + r.randint(0, days * DAY), "promo_abuse",
                         "怀疑抢券", "dismissed")
@@ -136,15 +190,21 @@ class Gen:
         if r.random() < 0.4:  # 名单不完整:只有部分 bot 设备被收录
             self.blacklist.append({"dimension": "device_id", "value": device, "list": "gray",
                                    "reason": "生成:批量行为设备指纹", "added_at": "2026-07-15"})
-        # 新注册 + 渠道包 + 无 KYC 零消费:bot 的典型出生证明
-        self.register(uid, T0 - r.randint(0, 2 * DAY), "web_promo", "email",
-                      ips[0], device, 0, 0.0)
+        # 新注册 + 拉新奖励类渠道 + 三方号池(抖音/微信批量号)+ 无 KYC 零消费:
+        # bot 的典型出生证明(积分墙这类带奖励的渠道天然是批量注册重灾区)
+        self.register(uid, T0 - r.randint(0, 2 * DAY), r.choice(["积分墙", "抖音投放"]),
+                      r.choice(["抖音号", "微信"]), ips[0], device, 0, 0.0,
+                      os_="安卓", os_ver=r.choice(["7.1", "8.1", "9"]))  # 群控农场老镜像
+        self.dev_intel(device, rooted=True, hook=True,
+                       signals=["无障碍自动化框架运行中", "电池恒 100%"])
         self.labels[uid] = {"label": "fraud", "note": "生成:刷券脚本%s" % ("(慢速)" if slow else "")}
 
     # ---- 套现团伙:共用模拟器设备,领券 -> 小额单 ----
     def cashout_ring(self, i, days):
         r = self.rng
         device = "g_dev_emu%03d" % i
+        self.dev_intel(device, emulator=True, brand="雷电", rooted=True,
+                       signals=["传感器无数据", "电池恒 100%", "CPU x86 架构"])
         members = r.randint(3, 6)
         if r.random() < 0.5:  # 一半团伙设备在灰名单里
             self.blacklist.append({"dimension": "device_id", "value": device, "list": "gray",
@@ -154,9 +214,9 @@ class Gen:
             ip = "198.51.100.%d" % r.randint(1, 250)
             self.seg_intel(ip, "idc", ("上海", 31.23, 121.47), "medium", "云主机段")
             t = T0 + r.randint(0, days - 1) * DAY + m * r.randint(1800, 5400)
-            # 批量注册:开工前几分钟到两小时,邀请渠道,同一台设备
-            self.register(uid, t - r.randint(600, 7200), "invite", "phone",
-                          ip, device, 0, 0.0)
+            # 批量注册:开工前几分钟到两小时,好友邀请(赚邀请奖励)+ 接码手机号,同一台设备
+            self.register(uid, t - r.randint(600, 7200), "好友邀请", "手机号",
+                          ip, device, 0, 0.0, os_="安卓", os_ver="7.1")  # 模拟器经典镜像
             self.emit(uid, ip, device, "login", t)
             for _ in range(r.randint(3, 5)):
                 t += r.randint(120, 600)
@@ -181,8 +241,9 @@ class Gen:
             # 新号盗卡:秒拨段(地理不可信,不参与跳变计算 —— 这正是秒拨的意义)
             ip = "192.0.2.%d" % r.randint(1, 250)
             self.seg_intel(ip, "proxy", None, "high", "秒拨池,地理位置漂移不可信")
-            self.register(uid, t - r.randint(600, 43200), "web_promo", "email",
-                          ip, device, 0, 0.0)
+            self.register(uid, t - r.randint(600, 43200), r.choice(["积分墙", "抖音投放"]),
+                          r.choice(["抖音号", "微信"]), ip, device, 0, 0.0,
+                          os_="安卓", os_ver=r.choice(["7.1", "9"]))
             note = "生成:新号盗卡"
         else:
             # 老号盗用:机主刚在常驻城市下线,盗号者 15~60 分钟后从境外机房上线
@@ -193,12 +254,17 @@ class Gen:
             home = r.choice(CITIES)
             self.seg_intel(home_ip, "residential", home, "low")
             owner_device = "g_dev_owner%03d" % i
-            self.register(uid, T0 - r.randint(200, 700) * DAY, "appstore_organic", "phone",
-                          home_ip, owner_device, 2, r.uniform(2000, 20000), rebind=1)
+            os_ = r.choices(["iOS", "安卓"], weights=[6, 4])[0]
+            self.register(uid, T0 - r.randint(200, 700) * DAY, "应用商店", "手机号",
+                          home_ip, owner_device, 2, r.uniform(2000, 20000), rebind=1,
+                          os_=os_, os_ver=r.choice(["16.6", "17.2"]) if os_ == "iOS"
+                          else r.choice(["12", "13", "14"]))
+            self.dev_intel(owner_device, platform=os_)  # 机主真机干净
             self.emit(uid, home_ip, owner_device, "login", t - r.randint(900, 3600))
             self.report(uid, t + r.randint(3600, DAY), "unauthorized_charge",
                         "机主申诉:本人未操作,账号异地下单", "verified")
             note = "生成:老号盗用销赃"
+        self.dev_intel(device, rooted=True, hook=True, signals=["检测到 Frida 注入"])  # 作案设备改机
         if r.random() < 0.5:  # 一半坏 IP 已被名单收录
             self.blacklist.append({"dimension": "ip", "value": ip, "list": "black",
                                    "reason": "生成:代理池出口,批量盗号", "added_at": "2026-07-10"})
@@ -243,6 +309,8 @@ def main():
         json.dumps(g.accounts, ensure_ascii=False, indent=1), encoding="utf-8")
     (args.out / "ip_intel.json").write_text(
         json.dumps(g.ip_intel, ensure_ascii=False, indent=1), encoding="utf-8")
+    (args.out / "device_intel.json").write_text(
+        json.dumps(g.device_intel, ensure_ascii=False, indent=1), encoding="utf-8")
     (args.out / "reports.json").write_text(
         json.dumps(g.reports, ensure_ascii=False, indent=1), encoding="utf-8")
     fraud = sum(1 for v in g.labels.values() if v["label"] == "fraud")

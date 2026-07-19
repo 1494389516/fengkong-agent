@@ -1,40 +1,45 @@
 {
- "_comment": "生产决策日志(骨架模拟,设定由生产引擎写入)。其中 3 条与 agent 本地模拟不一致——演练生产侧策略变更未同步到镜像的场景,consistency_check 必须抓出它们。",
+ "_comment": "生产决策日志(骨架模拟,设定由生产引擎写入,已同步上线 R006)。埋设 3 处动作不一致(生产新规则 R101 / R002 未上线期 / R006 滞后期)+ 1 处注册分与主档不一致(u_1004),对账必须精确抓出。",
  "decisions": [
   {
    "uid": "u_1001",
    "ts": 1783929600,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1001",
    "ts": 1783933200,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1001",
    "ts": 1784016000,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1001",
    "ts": 1784019600,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1001",
    "ts": 1784098800,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1001",
@@ -43,7 +48,8 @@
    "rules": [
     "R101"
    ],
-   "policy_version": "prod-v8"
+   "policy_version": "prod-v10",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1009",
@@ -52,7 +58,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1009",
@@ -60,9 +67,11 @@
    "action": "reject",
    "rules": [
     "R001",
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1009",
@@ -71,304 +80,387 @@
    "rules": [
     "R001",
     "R001",
+    "R006",
     "R003"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1002",
    "ts": 1784109600,
-   "action": "pass",
-   "rules": [],
-   "policy_version": "prod-v7"
+   "action": "reject",
+   "rules": [
+    "R006"
+   ],
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1003",
    "ts": 1784109600,
-   "action": "review",
+   "action": "reject",
    "rules": [
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1002",
    "ts": 1784109603,
-   "action": "pass",
-   "rules": [],
-   "policy_version": "prod-v7"
+   "action": "reject",
+   "rules": [
+    "R006"
+   ],
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109606,
-   "action": "pass",
-   "rules": [],
-   "policy_version": "prod-v7"
+   "action": "reject",
+   "rules": [
+    "R006"
+   ],
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109609,
-   "action": "pass",
-   "rules": [],
-   "policy_version": "prod-v7"
+   "action": "reject",
+   "rules": [
+    "R006"
+   ],
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109612,
-   "action": "pass",
-   "rules": [],
-   "policy_version": "prod-v7"
+   "action": "reject",
+   "rules": [
+    "R006"
+   ],
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109615,
-   "action": "pass",
-   "rules": [],
-   "policy_version": "prod-v7"
+   "action": "reject",
+   "rules": [
+    "R006"
+   ],
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109618,
-   "action": "pass",
-   "rules": [],
-   "policy_version": "prod-v7"
+   "action": "reject",
+   "rules": [
+    "R006"
+   ],
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109621,
-   "action": "pass",
-   "rules": [],
-   "policy_version": "prod-v7"
+   "action": "reject",
+   "rules": [
+    "R006"
+   ],
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109624,
-   "action": "pass",
-   "rules": [],
-   "policy_version": "prod-v7"
+   "action": "reject",
+   "rules": [
+    "R006"
+   ],
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109627,
-   "action": "pass",
-   "rules": [],
-   "policy_version": "prod-v7"
+   "action": "reject",
+   "rules": [
+    "R006"
+   ],
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109630,
    "action": "reject",
    "rules": [
+    "R006",
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109633,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v6"
+   "policy_version": "prod-v6",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109636,
    "action": "reject",
    "rules": [
+    "R006",
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109639,
    "action": "reject",
    "rules": [
+    "R006",
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109642,
    "action": "reject",
    "rules": [
+    "R006",
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109645,
    "action": "reject",
    "rules": [
+    "R006",
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109648,
    "action": "reject",
    "rules": [
+    "R006",
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109651,
    "action": "reject",
    "rules": [
+    "R006",
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109654,
    "action": "reject",
    "rules": [
+    "R006",
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1002",
    "ts": 1784109657,
    "action": "reject",
    "rules": [
+    "R006",
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 90
   },
   {
    "uid": "u_1003",
    "ts": 1784109840,
-   "action": "review",
+   "action": "reject",
    "rules": [
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1003",
    "ts": 1784110080,
-   "action": "review",
+   "action": "reject",
    "rules": [
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1003",
    "ts": 1784110320,
-   "action": "review",
+   "action": "reject",
    "rules": [
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1003",
    "ts": 1784110800,
-   "action": "reject",
+   "action": "review",
    "rules": [
-    "R001"
+    "R001",
+    "R003"
    ],
-   "policy_version": "prod-v8"
+   "policy_version": "prod-v8",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1004",
    "ts": 1784112000,
-   "action": "review",
+   "action": "reject",
    "rules": [
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1004",
    "ts": 1784112240,
-   "action": "review",
+   "action": "reject",
    "rules": [
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1004",
    "ts": 1784112480,
-   "action": "review",
+   "action": "reject",
    "rules": [
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1004",
    "ts": 1784112720,
-   "action": "review",
+   "action": "reject",
    "rules": [
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1004",
    "ts": 1784113200,
-   "action": "review",
+   "action": "reject",
    "rules": [
     "R001",
-    "R003"
+    "R006",
+    "R003",
+    "R005"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 70
   },
   {
    "uid": "u_1005",
    "ts": 1784114400,
-   "action": "review",
+   "action": "reject",
    "rules": [
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1005",
    "ts": 1784114640,
-   "action": "review",
+   "action": "reject",
    "rules": [
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1005",
    "ts": 1784114880,
-   "action": "review",
+   "action": "reject",
    "rules": [
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1005",
    "ts": 1784115120,
-   "action": "review",
+   "action": "reject",
    "rules": [
-    "R001"
+    "R001",
+    "R006"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1005",
    "ts": 1784115600,
-   "action": "review",
+   "action": "reject",
    "rules": [
     "R001",
-    "R003"
+    "R006",
+    "R003",
+    "R005"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v9",
+   "register_risk_score": 100
   }
  ]
 }

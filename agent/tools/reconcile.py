@@ -18,7 +18,7 @@ max_sim_mismatch_rate(policy)时:
 from typing import Dict, Optional
 
 from . import tool
-from .datasource import data_dir, load_decisions, load_events
+from .datasource import data_dir, load_accounts, load_decisions, load_events
 from .policy import active_policy
 from .rules import rule_eval
 
@@ -49,8 +49,10 @@ def reconcile() -> Optional[Dict]:
     events: Dict = {}
     for e in load_events():
         events.setdefault((e["uid"], e["ts"]), e)
+    accounts = load_accounts()
     compared = agree = orphan = 0
     mismatches = []
+    master_mismatches = []
     for d in decisions:
         ev = events.get((d["uid"], d["ts"]))
         if ev is None:
@@ -67,6 +69,18 @@ def reconcile() -> Optional[Dict]:
                 "local_rules": [h["rule_id"] for h in local["hits"]],
                 "prod_rules": d.get("rules", []),
             })
+        # 主档完整性:注册分是注册时刻的历史事实,生产决策当时记录的分
+        # 必须与现在主档一致 —— 不一致意味着主档被事后改写、或生产用了
+        # 另一版打分,历史被动过,R005 这类消费分数的规则地基就不稳
+        log_score = d.get("register_risk_score")
+        acct = accounts.get(d["uid"])
+        if log_score is not None and acct is not None \
+                and acct.get("register_risk_score") != log_score:
+            master_mismatches.append({
+                "uid": d["uid"], "ts": d["ts"],
+                "log_score": log_score,
+                "master_score": acct.get("register_risk_score"),
+            })
     rate = round(len(mismatches) / compared, 4) if compared else 0.0
     threshold = active_policy()["max_sim_mismatch_rate"]
     result = {
@@ -76,6 +90,7 @@ def reconcile() -> Optional[Dict]:
         "max_sim_mismatch_rate": threshold,
         "trusted": rate <= threshold,
         "mismatches": mismatches,
+        "master_mismatches": master_mismatches,
         "orphan_decisions": orphan,
         "uncovered_events": len(events) - compared,
     }
@@ -84,6 +99,12 @@ def reconcile() -> Optional[Dict]:
             "模拟器失信:本地模拟与生产决策不一致率 %.1f%% 超过阈值 %.1f%%,"
             "回测/影子/校准等模拟类结论不可作为变更依据,先排查规则与阈值是否与生产同步"
             % (100 * rate, 100 * threshold))
+    if master_mismatches:
+        result["integrity_warning"] = (
+            "主档完整性告警:%d 处决策日志记录的注册风险分与当前主档不一致 —— "
+            "分数是注册时刻的历史事实,不一致意味着主档被事后改写或生产打分版本"
+            "未同步,先对齐数据面再信任 R005 等消费分数的规则"
+            % len(master_mismatches))
     if not active_policy()["_overridden"]:
         _cache["r"] = (key, result)
     return result
@@ -97,6 +118,8 @@ def sim_trust() -> Optional[Dict]:
     out = {"mismatch_rate": r["mismatch_rate"], "trusted": r["trusted"]}
     if not r["trusted"]:
         out["warning"] = r["warning"]
+    if r.get("integrity_warning"):
+        out["integrity_warning"] = r["integrity_warning"]
     return out
 
 

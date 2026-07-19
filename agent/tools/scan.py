@@ -32,8 +32,11 @@ def scan_all():
         if v["predicted"] == "pass":
             pass_count += 1
         else:
+            # 日报只给"命中什么 + 一句话为什么",细节走 account_profile ——
+            # R006 上线后 reject 组变大,每条多带理由曾把日报顶到预算边缘
             groups[v["predicted"]].append(
-                {"uid": uid, "rules": v["rules"], "reasons": v["reasons"]})
+                {"uid": uid, "rules": v["rules"],
+                 "reason": v["reasons"][0] if v["reasons"] else ""})
     return {
         "accounts_total": len(uids),
         "reject_count": len(groups["reject"]),

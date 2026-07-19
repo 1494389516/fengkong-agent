@@ -109,12 +109,14 @@ def account_profile(uid: str):
         result["current_verdict"] = account_verdicts([uid], events)[uid]
         feats = feature_stats(uid)
         result["features"] = feats
+        result["behavior_paths"] = feats.get("behavior")  # 序列签名,档案顶层直读
         # IP 质量:distinct_ip 是数量,这里是物种(家宽/基站/机房/代理)
         result["ip_types"] = ip_type_summary({e["ip"] for e in mine})
         mon = account_monitor(uid)
         result["monitor"] = {k: mon[k] for k in
                              ("signal_types", "anomalous_windows", "shared_devices",
-                              "blacklist_signals", "self_baseline_signals", "geo_jumps")}
+                              "blacklist_signals", "self_baseline_signals", "geo_jumps",
+                              "risky_devices")}
         result["relations"] = component_summary(uid)
 
     # 举报摘要:verified 是强证据;dismissed 是"曾被误举报"的澄清证据,不作处置依据

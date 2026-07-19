@@ -116,8 +116,10 @@ def threshold_propose(values: Dict, reason: str):
     if bad:
         return {"error": "未知阈值参数: %s" % ", ".join(bad)}
     current = policy.active_policy()
+    # 开关型参数(0/1)不适用比例限速:1->0 的变幅是 100%,按比例永远提不了案
     too_big = ["%s: %s -> %s" % (k, current[k], v) for k, v in values.items()
-               if current[k] and abs(v - current[k]) / abs(current[k]) > policy.MAX_CHANGE_RATIO]
+               if not {current[k], v} <= {0, 1}
+               and current[k] and abs(v - current[k]) / abs(current[k]) > policy.MAX_CHANGE_RATIO]
     if too_big:
         return {"status": "rejected_rate_limit",
                 "detail": too_big,

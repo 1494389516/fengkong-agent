@@ -19,9 +19,12 @@ import pandas as pd  # noqa: E402
 import seaborn as sns  # noqa: E402
 
 from . import tool  # noqa: E402
-from .backtest import backtest  # noqa: E402
-from .datasource import load_events, load_labels  # noqa: E402
-from .featurelib import batch_features  # noqa: E402
+from .backtest import account_verdicts, backtest  # noqa: E402
+from .blacklist import blacklist_query  # noqa: E402
+from .datasource import load_accounts, load_events, load_labels, load_reports  # noqa: E402
+from .featurelib import account_features, batch_features, behavior_paths, percentile_rank  # noqa: E402
+from .intel import device_type_summary, ip_info, ip_type_summary  # noqa: E402
+from .monitor import account_monitor  # noqa: E402
 from .policy import active_policy  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -46,6 +49,11 @@ SWEEP_DEFAULTS = {
     "r003_cashout_window_seconds": [600, 1800, 3600, 7200, 14400],
     "r004_max_account_age_seconds": [3600, 86400, 259200, 604800, 1209600],
     "r004_min_amount": [50, 100, 200, 500, 1000],
+    "r005_min_register_score": [40, 60, 70, 80, 90],
+    "r005_max_account_age_seconds": [86400, 259200, 604800, 1209600],
+    "r006_reject_emulator": [0, 1],
+    "r006_reject_rooted": [0, 1],
+    "r006_reject_hook": [0, 1],
 }
 
 
@@ -92,13 +100,119 @@ def _events_df(uid: Optional[str] = None) -> pd.DataFrame:
     return df
 
 
+# 基线百分位面板的特征集:(键, 中文名, 低值可疑, 对应阈值的 policy 键)
+PCT_FEATURES = [
+    ("event_count", "事件数", False, "r002_min_events"),
+    ("distinct_ip", "去重 IP", False, None),
+    ("coupon_claims", "领券数", False, None),
+    ("order_amount_max", "最大订单", False, "r003_high_amount"),
+    ("min_gap_seconds", "最短间隔(低=可疑)", True, "r002_max_gap_seconds"),
+]
+
+VERDICT_COLOR = {"reject": "#b00020", "review": "#e07b00", "pass": "#2a7d4f"}
+
+
+def _draw_profile_header(ax, uid, feats, mon, verdict):
+    """档案栏:注册上下文 / 价值与判定 / 活跃与信号 —— 回答'这个账号是谁'。"""
+    ax.axis("off")
+    acct = load_accounts().get(uid)
+    clock = max((e["ts"] for e in load_events()), default=0)
+    lines = []
+    if acct:
+        reg_hit = any(blacklist_query(d, v)["hit"] for d, v in
+                      (("ip", acct.get("register_ip")), ("device_id", acct.get("register_device"))) if v)
+        kyc_names = {0: "未认证", 1: "手机实名", 2: "身份证实名"}
+        os_txt = ("%s %s" % (acct.get("register_os", "?"),
+                             acct.get("register_os_version", ""))).strip()
+        lines.append((_t("注册:%s(账龄 %d 天)· 渠道:%s · 注册方式:%s · 系统:%s · KYC:%s · 换绑:%d 次%s" % (
+            pd.to_datetime(acct["registered_at"], unit="s").strftime("%Y-%m-%d"),
+            (clock - acct["registered_at"]) // 86400, acct["register_channel"],
+            acct["register_method"], os_txt,
+            kyc_names.get(acct["kyc_level"], acct["kyc_level"]),
+            acct.get("phone_rebind_count", 0),
+            " · [!]注册环境命中名单" if reg_hit else ""),
+            "registered %s" % acct["registered_at"]), "#333"))
+        ltv = acct.get("ltv", 0.0)
+        tier = "high" if ltv >= 1000 else ("medium" if ltv >= 100 else "low")
+        tier_note = {"high": "误伤代价高", "medium": "误伤代价中", "low": "误伤代价低"}[tier]
+        lines.append((_t("价值:LTV %.0f · 档位:%s(%s)" % (ltv, tier, tier_note),
+                         "LTV %.0f" % ltv), "#333"))
+    else:
+        lines.append((_t("无账号主档(注册信息缺失)", "no account record"), "#999"))
+    reports_v = sum(1 for r in load_reports()
+                    if r.get("reported_uid") == uid and r.get("status") == "verified")
+    lines.append((_t("事件:%d · 活跃跨度:%.1f 天 · IP:%d(%s)· 设备:%d(%s)· 属实举报:%d" % (
+        feats["event_count"], feats["span_seconds"] / 86400, feats["distinct_ip"],
+        "/".join("%s×%d" % kv for kv in ip_type_summary(feats["ips"]).items()),
+        feats["distinct_device"],
+        "/".join("%s×%d" % kv for kv in device_type_summary(feats["devices"]).items()),
+        reports_v),
+        "activity"), "#333"))
+    # 行为路径:会话级序列签名(套现/盗号/bot 各有语法),直奔下单的间隔单独点名
+    bp = behavior_paths(uid)
+    if bp.get("found"):
+        path_txt = " | ".join("%s(%d 次)" % (p["path"], p["count"])
+                              for p in bp["top_paths"][:3])
+        l2o = bp.get("login_to_order_min_seconds")
+        if l2o is not None:
+            path_txt += _t(" · 登录→下单最短 %d 分钟" % (l2o // 60),
+                           " login->order min %dm" % (l2o // 60))
+        lines.append((_t("路径:%s" % path_txt, "paths: %s" % path_txt), "#555"))
+    for i, (text, c) in enumerate(lines):
+        ax.text(0.0, 0.95 - 0.25 * i, text, fontsize=9.5, color=c, va="top")
+    ax.text(1.0, 0.92, _t("判定 %s" % verdict["predicted"].upper(),
+                          verdict["predicted"].upper()),
+            fontsize=13, fontweight="bold", ha="right", va="top",
+            color=VERDICT_COLOR.get(verdict["predicted"], "#333"))
+    ax.text(1.0, 0.50, _t("命中 %s" % ("、".join(verdict["rules"]) or "无"),
+                          ",".join(verdict["rules"]) or "-"),
+            fontsize=9, ha="right", va="top", color="#555")
+    score = (acct or {}).get("register_risk_score")
+    if score is not None:
+        sc = "#b00020" if score >= 70 else ("#e07b00" if score >= 40 else "#2a7d4f")
+        ax.text(1.0, 0.16, _t("注册风险分 %d" % score, "reg risk %d" % score),
+                fontsize=10, fontweight="bold", ha="right", va="top", color=sc)
+
+
+def _draw_baseline_panel(ax, feats):
+    """特征 vs 人群基线:横条 = 该账号的人群百分位;黑色竖标 = 现行阈值折算成的
+    百分位位置 —— 一眼看出'这个账号在人群什么水位、离阈值多远'。"""
+    pol = active_policy()
+    rows = [(f, label, low_bad, thr) for f, label, low_bad, thr in PCT_FEATURES
+            if feats.get(f) is not None]
+    for i, (f, label, low_bad, thr_key) in enumerate(rows):
+        val = feats[f]
+        pct = (percentile_rank(f, val) or 0) * 100
+        # 可疑方向因特征而异:低值可疑的特征(最短间隔)只在低分位标红,
+        # 高分位是"比谁都慢"= 正常
+        extreme = (pct <= 10) if low_bad else (pct >= 95)
+        ax.barh(i, pct, height=0.55, color="#e15759" if extreme else "#4e79a7", alpha=0.85)
+        ax.text(min(pct + 2, 70), i, _t("%s=%g · P%.0f" % (label, val, pct),
+                                        "%s=%g P%.0f" % (f, val, pct)),
+                fontsize=8, va="center")
+        if thr_key:
+            tp = (percentile_rank(f, pol[thr_key]) or 0) * 100
+            ax.plot([tp], [i], marker="|", ms=20, color="#222", zorder=5)
+            ax.text(tp, i - 0.42, _t("阈值", "thr"), fontsize=6.5, ha="center", color="#222")
+    ax.set_yticks([])
+    ax.set_xlim(0, 108)
+    ax.set_xlabel(_t("人群百分位(%)", "population percentile (%)"), fontsize=8)
+    ax.invert_yaxis()
+    ax.grid(axis="x", color="#eee")
+    ax.set_title(_t("特征 vs 人群基线(| = 现行阈值水位)",
+                    "features vs population baseline"), fontsize=9)
+
+
 @tool(
     name="chart_account_timeline",
     description=(
-        "把某 uid 的事件流画成 PNG 图(上:时间线,按事件类型分道、按 IP 着色、"
-        "订单点标金额;下:5 分钟窗口事件数柱状图,叠加监控 burst 阈值线)。"
-        "返回文件路径与数字摘要。适合排查单账号行为模式;回答时把路径告诉研究员"
-        "即可,不要尝试用文字复述图形。"
+        "单账号监控仪表盘(PNG)。顶部档案栏:注册时间/账龄/渠道/KYC/换绑/注册环境"
+        "名单联查、LTV 价值分档(误伤代价)、活跃摘要(事件数/跨度/IP 类型分布/"
+        "属实举报)、当前判定与命中规则;左侧时间线:按类型分道、按 IP 着色(图例带"
+        "情报类型)、订单标金额、地理跳变红箭头、异常窗口红纹+信号名 + 5 分钟窗口"
+        "事件数与 burst 阈值线;右侧:各特征的人群百分位横条与现行阈值水位标记"
+        "(基线对比 + 阈值对比)。返回文件路径、信号列表与数字摘要。"
+        "回答时把路径告诉研究员即可,不要尝试用文字复述图形。"
     ),
     parameters={
         "type": "object",
@@ -110,27 +224,51 @@ def chart_account_timeline(uid: str):
     df = _events_df(uid)
     if df.empty:
         return {"uid": uid, "found": False}
+    mon = account_monitor(uid)  # 图上画的 = 监控报的,同一份口径
+    signals = mon.get("signal_types", [])
+    jumps = mon.get("geo_jumps", [])
+    feats = account_features(uid)
+    verdict = account_verdicts([uid], load_events())[uid]
     types = sorted(df["type"].unique())
     ips = sorted(df["ip"].unique())
     color = {ip: PALETTE[i % len(PALETTE)] for i, ip in enumerate(ips)}
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True,
-                                   height_ratios=[2, 1], constrained_layout=True)
+    fig = plt.figure(figsize=(12.5, 8.5), constrained_layout=True)
+    gs = fig.add_gridspec(3, 5, height_ratios=[0.72, 2.1, 1.0])
+    ax_info = fig.add_subplot(gs[0, :])
+    ax1 = fig.add_subplot(gs[1, :3])
+    ax_pct = fig.add_subplot(gs[1:, 3:])
+    ax2 = fig.add_subplot(gs[2, :3], sharex=ax1)
+
+    _draw_profile_header(ax_info, uid, feats, mon, verdict)
+    _draw_baseline_panel(ax_pct, feats)
     # 每个 IP 一条微偏移的水平条带:bot 轮换 IP 时点会精确重叠,不偏移就只剩最后画的颜色
     off_step = min(0.09, 0.5 / max(len(ips), 1))
     ip_off = {ip: (i - (len(ips) - 1) / 2) * off_step for i, ip in enumerate(ips)}
     for ip, g in df.groupby("ip"):
+        info = ip_info(ip)  # 图例带情报类型:同样的 IP 数,家宽和机房是两个物种
+        label = ip if info["type"] == "unknown" else "%s (%s)" % (ip, info["type"])
         ax1.scatter(g["dt"], g["type"].map(types.index) + ip_off[ip], s=45, color=color[ip],
-                    label=ip, alpha=0.85, edgecolors="none")
+                    label=label, alpha=0.85, edgecolors="none")
     if "amount" in df.columns:
         for _, row in df[df["amount"].notna()].iterrows():
             ax1.annotate("%.1f" % row["amount"], (row["dt"], types.index(row["type"])),
                          textcoords="offset points", xytext=(0, 9), ha="center", fontsize=8)
+    # 地理跳变:红色箭头横跨两次事件,标注城市与不可能的速度
+    for j in jumps:
+        x0 = pd.to_datetime(j["from_ts"], unit="s")
+        x1 = pd.to_datetime(j["to_ts"], unit="s")
+        y = len(types) - 0.25
+        ax1.annotate("", xy=(x1, y), xytext=(x0, y),
+                     arrowprops={"arrowstyle": "->", "color": "#b00", "lw": 1.6})
+        ax1.annotate(_t("地理跳变 %s→%s %d km/h" % (j["from_city"], j["to_city"], j["speed_kmh"]),
+                        "geo jump %s->%s %d km/h" % (j["from_city"], j["to_city"], j["speed_kmh"])),
+                     (x0 + (x1 - x0) / 2, y), textcoords="offset points", xytext=(0, 7),
+                     ha="center", fontsize=8.5, color="#b00")
     ax1.set_yticks(range(len(types)), types)
-    ax1.set_ylim(-0.6, len(types) - 0.4)
+    ax1.set_ylim(-0.6, len(types) - 0.4 + (0.55 if jumps else 0))
     ax1.grid(axis="y", color="#eee")
-    ax1.legend(title="IP", loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8)
-    ax1.set_title(_t("账号 %s 事件时间线" % uid, "Account %s event timeline" % uid))
+    ax1.legend(title="IP", loc="upper left", fontsize=7, title_fontsize=8, framealpha=0.85)
 
     # 下图窗口大小与 account_monitor 默认窗口(300s)对齐;burst 阈值线在
     # 画图时从 policy 现取(不能 import 时冻结,否则版本更新后图线和监控口径分叉)。
@@ -139,16 +277,31 @@ def chart_account_timeline(uid: str):
     ax2.bar(win.index, win.values, width=300 / 86400, color="#4e79a7", alpha=0.8)
     ax2.axhline(burst_min, ls="--", lw=1, color="#e15759",
                 label=_t("burst 阈值 %d" % burst_min, "burst threshold %d" % burst_min))
+    # 监控命中的异常窗口:两图同步红色底纹,窗口上方标信号名
+    ymax = max(float(win.max()), burst_min) * 1.15
+    for aw in mon.get("anomalous_windows", []):
+        x0 = pd.to_datetime(aw["window_start_ts"], unit="s")
+        x1 = pd.to_datetime(aw["window_start_ts"] + mon["window_seconds"], unit="s")
+        for ax in (ax1, ax2):
+            ax.axvspan(x0, x1, color="#e15759", alpha=0.10, zorder=0)
+        ax2.annotate(",".join(aw["signals"]), (x0, ymax * 0.92),
+                     fontsize=7, color="#b00")
+    ax2.set_ylim(0, ymax)
     ax2.set_ylabel(_t("5 分钟事件数", "events / 5min"))
-    ax2.legend(fontsize=8)
+    ax2.legend(fontsize=8, loc="upper right")
     ax2.grid(axis="y", color="#eee")
-    fig.autofmt_xdate()
+    plt.setp(ax1.get_xticklabels(), visible=False)
+    plt.setp(ax2.get_xticklabels(), rotation=25, ha="right")
+    fig.suptitle(_t("账号 %s 监控仪表盘 | 信号: %s" % (uid, "、".join(signals) or "无"),
+                    "Account %s monitor dashboard | signals: %s" % (uid, ",".join(signals) or "none")),
+                 fontsize=12)
 
     path = _save(fig, "timeline_%s.png" % uid)
     return {
         "uid": uid,
         "found": True,
         "chart_path": path,
+        "signals": signals,
         "summary": {
             "event_count": len(df),
             "span_seconds": int(df["ts"].max() - df["ts"].min()),
