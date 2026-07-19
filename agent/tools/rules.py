@@ -3,11 +3,11 @@
 
 处置动作只有三档:pass < review < reject,多条规则命中时取最重的。
 """
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from . import tool
 from .blacklist import blacklist_query
-from .features import feature_stats
+from .featurelib import account_features
 
 ACTION_ORDER = {"pass": 0, "review": 1, "reject": 2}
 RULE_COUNT = 3  # 当前规则集条数,便于 agent 感知覆盖范围
@@ -22,6 +22,10 @@ R002_REJECT_MIN_IPS = 3    # 高频之上再叠加多 IP 轮换,基本可排除�
 R003_HIGH_AMOUNT = 1000.0       # 大额订单:金额越大,盗号销赃收益越高
 R003_CASHOUT_MAX_AMOUNT = 20.0  # 小额套现:金额本身无害,必须叠加领券行为信号
 R003_CASHOUT_MIN_COUPONS = 3
+# 套现的领券计数只看下单前这个窗口内的(会话口径)。全历史计数曾在生成
+# 大样本上实锤误伤:一周攒 3 张券又碰巧买便宜货的正常用户会被扫进来。
+# 1 小时能覆盖"领券->凑单->下单"的完整会话,又不会把隔天行为串起来。
+R003_CASHOUT_WINDOW_SECONDS = 3600
 
 
 def _blacklist_hit(dimension: str, value: str) -> bool:
@@ -34,9 +38,12 @@ def _blacklist_records(dimension: str, value: str) -> List[Dict[str, Any]]:
     return blacklist_query(dimension, value)["records"]
 
 
-def _uid_features(uid: str):
-    """特征联动取数:返回 uid 的行为特征 dict,无数据时返回 None。"""
-    r = feature_stats(uid)
+def _uid_features(uid: str, as_of_ts: Optional[float] = None,
+                  window_seconds: Optional[int] = None):
+    """特征联动取数:返回 uid 的行为特征 dict,无数据时返回 None。
+    as_of_ts = 被评估事件的 ts —— 只用事件之前的历史(point-in-time),
+    否则特征会偷看未来,回测虚高、线上对不上。"""
+    r = account_features(uid, as_of_ts, window_seconds)
     return r if r.get("found") else None
 
 
@@ -77,7 +84,9 @@ def rule_eval(event: Dict[str, Any]):
     device_id = event.get("device_id", "")
     event_type = event.get("type", "")
     amount = event.get("amount")
-    feats = _uid_features(uid)
+    # 事件带 ts 时以事件时点取证(point-in-time);不带 ts(假设性咨询)用全历史
+    as_of = event.get("ts")
+    feats = _uid_features(uid, as_of)
 
     # ------------------------------------------------------------------
     # R001 名单硬拦截:uid / ip / device_id 三个维度带值的全查。
@@ -110,17 +119,19 @@ def rule_eval(event: Dict[str, Any]):
     # R003 金额异常,两个互斥分支:
     # 大额(>= 1000):销赃收益高,但正常大单也存在,单金额只到 review;
     #   要不要 reject 交给名单/行为规则叠加决定(u_1009 即由 R001 升到 reject)。
-    # 小额套现(<= 20):9.9 本身无害,必须叠加"此前领券 >= 3 次"的行为
-    #   信号才 review,否则会扫到海量正常小额订单。
+    # 小额套现(<= 20):9.9 本身无害,必须叠加"下单前 1 小时窗口内领券 >= 3 次"
+    #   的会话信号才 review —— 窗口口径,不是全历史计数(见常量处的实锤教训)。
     # 非 order 或未带 amount 的事件不评估。
     # ------------------------------------------------------------------
     if event_type == "order" and amount is not None:
         if amount >= R003_HIGH_AMOUNT:
             _hit(hits, "R003", "订单金额 %.2f 达到大额阈值 %.0f" % (amount, R003_HIGH_AMOUNT), "review")
-        elif amount <= R003_CASHOUT_MAX_AMOUNT and feats:
-            coupons = feats["event_types"].get("coupon_claim", 0)
+        elif amount <= R003_CASHOUT_MAX_AMOUNT:
+            wf = _uid_features(uid, as_of, R003_CASHOUT_WINDOW_SECONDS)
+            coupons = wf["coupon_claims"] if wf else 0
             if coupons >= R003_CASHOUT_MIN_COUPONS:
-                _hit(hits, "R003", "小额订单 %.2f 且此前领券 %d 次,疑似领券套现" % (amount, coupons), "review")
+                _hit(hits, "R003", "下单前 %d 分钟内领券 %d 次后下小额订单 %.2f,疑似领券套现"
+                     % (R003_CASHOUT_WINDOW_SECONDS // 60, coupons, amount), "review")
 
     action = "pass"
     for h in hits:

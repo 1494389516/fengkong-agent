@@ -36,6 +36,18 @@
       "event": {"uid": "u_9999", "ip": "10.0.0.1", "device_id": "dev_new_1", "type": "login"},
       "expect_action": "pass",
       "expect_rules": []
+    },
+    {
+      "name": "取证时点正确性:u_1002 首个事件时尚无历史,不应命中(防泄漏守卫)",
+      "event": {"uid": "u_1002", "ip": "203.0.113.10", "device_id": "dev_farm_x7", "type": "coupon_claim", "ts": 1784109600},
+      "expect_action": "pass",
+      "expect_rules": []
+    },
+    {
+      "name": "取证时点正确性:u_1002 末个事件时模式已成立,应拦截",
+      "event": {"uid": "u_1002", "ip": "203.0.113.14", "device_id": "dev_farm_x7", "type": "coupon_claim", "ts": 1784109657},
+      "expect_action": "reject",
+      "expect_rules": ["R002"]
     }
   ],
   "backtest_checks": {

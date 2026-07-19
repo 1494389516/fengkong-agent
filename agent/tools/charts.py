@@ -21,14 +21,15 @@ import seaborn as sns  # noqa: E402
 from . import tool  # noqa: E402
 from .backtest import backtest  # noqa: E402
 from .datasource import load_events, load_labels  # noqa: E402
+from .featurelib import batch_features  # noqa: E402
 from .monitor import MONITOR_BURST_MIN  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 OUT = ROOT / "out" / "charts"
 
-# chart_cohort_features 的特征列(与 heatmap/箱线图共用)
-FEATURE_COLS = ["event_count", "distinct_ip", "distinct_device",
-                "coupon_claims", "max_order_amount", "min_gap_seconds"]
+# chart_cohort_features 的特征列(列名与 featurelib.batch_features 对齐)
+FEATURE_COLS = ["event_count", "distinct_ip", "distinct_device", "coupon_claims",
+                "order_amount_max", "min_gap_seconds", "shared_device_accounts"]
 LABEL_COLORS = {"fraud": "#e15759", "normal": "#4e79a7", "unlabeled": "#bab0ac"}
 
 PALETTE = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
@@ -42,6 +43,7 @@ SWEEP_DEFAULTS = {
     "r003_high_amount": [200, 500, 1000, 2000, 5000, 8000],
     "r003_cashout_max_amount": [5, 10, 20, 50, 100],
     "r003_cashout_min_coupons": [1, 2, 3, 4, 5],
+    "r003_cashout_window_seconds": [600, 1800, 3600, 7200, 14400],
 }
 
 
@@ -209,19 +211,8 @@ def _labels() -> dict:
 
 
 def _account_features() -> pd.DataFrame:
-    """逐账号特征表(pandas groupby 聚合),行序:label 分组内按 uid。"""
-    df = _events_df()
-    feats = df.groupby("uid").agg(
-        event_count=("ts", "size"),
-        distinct_ip=("ip", "nunique"),
-        distinct_device=("device_id", "nunique"),
-    )
-    feats["coupon_claims"] = (
-        df[df["type"] == "coupon_claim"].groupby("uid").size().reindex(feats.index).fillna(0).astype(int))
-    feats["max_order_amount"] = (
-        df.groupby("uid")["amount"].max() if "amount" in df.columns else float("nan"))
-    # _events_df 已按 ts 全局排序,组内顺序即时间序,diff 就是相邻间隔
-    feats["min_gap_seconds"] = df.groupby("uid")["ts"].diff().groupby(df["uid"]).min()
+    """逐账号特征表:featurelib 统一特征层 + 标签,行序:label 分组内按 uid。"""
+    feats = batch_features()
     labels = _labels()
     feats["label"] = [labels.get(u, "unlabeled") for u in feats.index]
     return feats.sort_values(["label", "uid"])

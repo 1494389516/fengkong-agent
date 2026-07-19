@@ -195,7 +195,8 @@ def run_gen_layer() -> int:
                 ("生成器退出码 0", proc.returncode == 0),
                 ("账号数 = 60", r["accounts_evaluated"] == 60),
                 ("宽口径 recall >= 0.9", wide["recall"] >= 0.9),
-                ("宽口径 f1 >= 0.75", wide["f1"] >= 0.75),
+                ("宽口径 precision >= 0.8", wide["precision"] >= 0.8),
+                ("宽口径 f1 >= 0.85", wide["f1"] >= 0.85),
                 ("严口径 precision >= 0.7", strict["precision"] >= 0.7),
             ])
             print("  宽口径 %s" % wide)

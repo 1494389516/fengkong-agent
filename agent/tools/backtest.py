@@ -27,6 +27,7 @@ OVERRIDABLE = {
     "r003_high_amount": "R003_HIGH_AMOUNT",
     "r003_cashout_max_amount": "R003_CASHOUT_MAX_AMOUNT",
     "r003_cashout_min_coupons": "R003_CASHOUT_MIN_COUPONS",
+    "r003_cashout_window_seconds": "R003_CASHOUT_WINDOW_SECONDS",
 }
 
 
