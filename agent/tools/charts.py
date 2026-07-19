@@ -22,6 +22,8 @@ from . import tool  # noqa: E402
 from .backtest import backtest  # noqa: E402
 from .datasource import load_events, load_labels  # noqa: E402
 from .featurelib import batch_features  # noqa: E402
+from .intel import ip_info  # noqa: E402
+from .monitor import account_monitor  # noqa: E402
 from .policy import active_policy  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -95,10 +97,11 @@ def _events_df(uid: Optional[str] = None) -> pd.DataFrame:
 @tool(
     name="chart_account_timeline",
     description=(
-        "把某 uid 的事件流画成 PNG 图(上:时间线,按事件类型分道、按 IP 着色、"
-        "订单点标金额;下:5 分钟窗口事件数柱状图,叠加监控 burst 阈值线)。"
-        "返回文件路径与数字摘要。适合排查单账号行为模式;回答时把路径告诉研究员"
-        "即可,不要尝试用文字复述图形。"
+        "把某 uid 的事件流画成单账号监控图(PNG)。上图:时间线,按事件类型分道、"
+        "按 IP 着色(图例带 IP 情报类型,idc/proxy 即风险)、订单标金额、地理跳变"
+        "画红色箭头;下图:5 分钟窗口事件数 + burst 阈值线,监控命中的异常窗口"
+        "红色底纹并标注信号名;标题汇总全部监控信号。返回文件路径、数字摘要与"
+        "信号列表。回答时把路径告诉研究员即可,不要尝试用文字复述图形。"
     ),
     parameters={
         "type": "object",
@@ -110,6 +113,9 @@ def chart_account_timeline(uid: str):
     df = _events_df(uid)
     if df.empty:
         return {"uid": uid, "found": False}
+    mon = account_monitor(uid)  # 图上画的 = 监控报的,同一份口径
+    signals = mon.get("signal_types", [])
+    jumps = mon.get("geo_jumps", [])
     types = sorted(df["type"].unique())
     ips = sorted(df["ip"].unique())
     color = {ip: PALETTE[i % len(PALETTE)] for i, ip in enumerate(ips)}
@@ -120,17 +126,31 @@ def chart_account_timeline(uid: str):
     off_step = min(0.09, 0.5 / max(len(ips), 1))
     ip_off = {ip: (i - (len(ips) - 1) / 2) * off_step for i, ip in enumerate(ips)}
     for ip, g in df.groupby("ip"):
+        info = ip_info(ip)  # 图例带情报类型:同样的 IP 数,家宽和机房是两个物种
+        label = ip if info["type"] == "unknown" else "%s (%s)" % (ip, info["type"])
         ax1.scatter(g["dt"], g["type"].map(types.index) + ip_off[ip], s=45, color=color[ip],
-                    label=ip, alpha=0.85, edgecolors="none")
+                    label=label, alpha=0.85, edgecolors="none")
     if "amount" in df.columns:
         for _, row in df[df["amount"].notna()].iterrows():
             ax1.annotate("%.1f" % row["amount"], (row["dt"], types.index(row["type"])),
                          textcoords="offset points", xytext=(0, 9), ha="center", fontsize=8)
+    # 地理跳变:红色箭头横跨两次事件,标注城市与不可能的速度
+    for j in jumps:
+        x0 = pd.to_datetime(j["from_ts"], unit="s")
+        x1 = pd.to_datetime(j["to_ts"], unit="s")
+        y = len(types) - 0.25
+        ax1.annotate("", xy=(x1, y), xytext=(x0, y),
+                     arrowprops={"arrowstyle": "->", "color": "#b00", "lw": 1.6})
+        ax1.annotate(_t("地理跳变 %s→%s %d km/h" % (j["from_city"], j["to_city"], j["speed_kmh"]),
+                        "geo jump %s->%s %d km/h" % (j["from_city"], j["to_city"], j["speed_kmh"])),
+                     (x0 + (x1 - x0) / 2, y), textcoords="offset points", xytext=(0, 7),
+                     ha="center", fontsize=8.5, color="#b00")
     ax1.set_yticks(range(len(types)), types)
-    ax1.set_ylim(-0.6, len(types) - 0.4)
+    ax1.set_ylim(-0.6, len(types) - 0.4 + (0.55 if jumps else 0))
     ax1.grid(axis="y", color="#eee")
     ax1.legend(title="IP", loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8)
-    ax1.set_title(_t("账号 %s 事件时间线" % uid, "Account %s event timeline" % uid))
+    ax1.set_title(_t("账号 %s 监控视图 | 信号: %s" % (uid, "、".join(signals) or "无"),
+                     "Account %s monitor view | signals: %s" % (uid, ",".join(signals) or "none")))
 
     # 下图窗口大小与 account_monitor 默认窗口(300s)对齐;burst 阈值线在
     # 画图时从 policy 现取(不能 import 时冻结,否则版本更新后图线和监控口径分叉)。
@@ -139,8 +159,18 @@ def chart_account_timeline(uid: str):
     ax2.bar(win.index, win.values, width=300 / 86400, color="#4e79a7", alpha=0.8)
     ax2.axhline(burst_min, ls="--", lw=1, color="#e15759",
                 label=_t("burst 阈值 %d" % burst_min, "burst threshold %d" % burst_min))
+    # 监控命中的异常窗口:两图同步红色底纹,窗口上方标信号名
+    ymax = max(float(win.max()), burst_min) * 1.15
+    for aw in mon.get("anomalous_windows", []):
+        x0 = pd.to_datetime(aw["window_start_ts"], unit="s")
+        x1 = pd.to_datetime(aw["window_start_ts"] + mon["window_seconds"], unit="s")
+        for ax in (ax1, ax2):
+            ax.axvspan(x0, x1, color="#e15759", alpha=0.10, zorder=0)
+        ax2.annotate(",".join(aw["signals"]), (x0, ymax * 0.92),
+                     fontsize=7, color="#b00")
+    ax2.set_ylim(0, ymax)
     ax2.set_ylabel(_t("5 分钟事件数", "events / 5min"))
-    ax2.legend(fontsize=8)
+    ax2.legend(fontsize=8, loc="upper right")
     ax2.grid(axis="y", color="#eee")
     fig.autofmt_xdate()
 
@@ -149,6 +179,7 @@ def chart_account_timeline(uid: str):
         "uid": uid,
         "found": True,
         "chart_path": path,
+        "signals": signals,
         "summary": {
             "event_count": len(df),
             "span_seconds": int(df["ts"].max() - df["ts"].min()),

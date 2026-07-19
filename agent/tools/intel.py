@@ -58,7 +58,8 @@ def geo_jumps(events_sorted: List[Dict], speed_limit_kmh: float) -> List[Dict]:
             if dist >= MIN_JUMP_KM and speed > speed_limit_kmh:
                 jumps.append({
                     "from_ip": prev[0]["ip"], "from_city": prev[1].get("city"),
-                    "to_ip": e["ip"], "to_city": info.get("city"),
+                    "from_ts": prev[0]["ts"],
+                    "to_ip": e["ip"], "to_city": info.get("city"), "to_ts": e["ts"],
                     "km": round(dist), "minutes": round(dt / 60),
                     "speed_kmh": round(speed),
                 })
