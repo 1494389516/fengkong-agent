@@ -61,7 +61,7 @@ flowchart TB
         T5[监控:feature_drift/rule_drift/<br/>adversary_watch/feature_risk]
         T6[生命周期:rule_draft_test/<br/>appeal_review/appeal_resolve]
     end
-    subgraph Agent 层
+    subgraph AGENT["Agent 层"]
         CORE[core.py 对话主循环<br/>上下文工程 ①~⑦]
         PRIV[privacy.py 脱敏层]
     end
@@ -69,7 +69,7 @@ flowchart TB
     CORE --> PRIV --> T1 & T2 & T3 & T4 & T5 & T6
     T1 & T2 & T3 & T4 & T5 & T6 --> FL --> DS
     T2 --> POL --> DS
-    EVAL[eval/ 170+ 项离线断言 + agent 层四维案例 + 成本预算] -.回归门禁.-> 工具层 & Agent 层
+    EVAL[eval/ 170+ 项离线断言 + agent 层四维案例 + 成本预算] -. 回归门禁 .-> 工具层 & AGENT
 ```
 
 ```
