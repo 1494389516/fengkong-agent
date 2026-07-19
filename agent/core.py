@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from . import tools
-from .llm import load_config, make_client
 from .privacy import Tokenizer, privacy_enabled
 
 MAX_TOOL_ROUNDS = 8
@@ -70,6 +69,9 @@ def _extract_usage(resp) -> Dict[str, int]:
 
 class Agent:
     def __init__(self):
+        # 惰性导入:离线评估要单测 ⑤/⑥ 压缩逻辑(Agent.__new__ 构造),
+        # 不能让"导入 core"就强依赖 openai 包
+        from .llm import load_config, make_client
         self.cfg = load_config()
         self.client = make_client(self.cfg)
         self.model = self.cfg.get("model", "deepseek-chat")
@@ -123,12 +125,14 @@ class Agent:
     # ⑤/⑥ 共用:把 system 之后、最后一个用户轮次之前的历史压成一条摘要。
     #   保留最后一个用户轮次的完整尾巴 —— 兜底可能在工具循环中途触发,
     #   当前轮的 user/assistant(tool_calls)/tool 配对不能拆。
-    def _checkpoint_now(self) -> None:
+    def _checkpoint_now(self) -> bool:
+        """把最后一个用户轮次之前的历史压成摘要。返回是否真的压缩了 ——
+        单轮内工具结果自身撑爆时,可压的旧历史为空,调用方据此改走当前轮兜底。"""
         user_pos = [i for i, m in enumerate(self.messages) if m["role"] == "user"]
         cut = user_pos[-1] if user_pos else len(self.messages)
         body = self.messages[1:cut]
         if len(body) < 2:  # 没什么可压的,别浪费一次 LLM 调用
-            return
+            return False
         convo = "\n".join(
             "%s: %s" % (m["role"], (m.get("content") or "")[:500]) for m in body
         )
@@ -147,6 +151,20 @@ class Agent:
             {"role": "system", "content": self._system},
             {"role": "assistant", "content": "【历史摘要】\n" + summary},
         ] + self.messages[cut:]
+        return True
+
+    # ⑥ 当前轮兜底:单轮内 tool 结果自身撑爆上下文时,checkpoint 压不动(全在
+    #   最后一个用户轮之后),这里把当前轮除最近一条外的 tool 结果降级为占位符。
+    #   只改 content、保留配对结构,不破坏 assistant.tool_calls/tool 契约。
+    #   返回是否有改动。
+    def _force_trim_current_turn(self) -> bool:
+        live = [i for i, m in enumerate(self.messages)
+                if m["role"] == "tool" and m["content"] != TRIM_PLACEHOLDER]
+        if len(live) <= 1:  # 只剩一条工具结果,再压就没数据可用了
+            return False
+        for i in live[:-1]:  # 保留最近一条
+            self.messages[i]["content"] = TRIM_PLACEHOLDER
+        return True
 
     # ⑤ 周期触发:每 CHECKPOINT_EVERY 次 ask 压缩一次。
     def _maybe_checkpoint(self) -> None:
@@ -177,10 +195,12 @@ class Agent:
             if (CONTEXT_EST_TOKEN_BUDGET > 0 and not compacted_this_ask
                     and self._estimate_context_tokens() > CONTEXT_EST_TOKEN_BUDGET):
                 compacted_this_ask = True
-                if on_notice:
-                    on_notice("上下文估算超 %d tokens,强制压缩旧历史(⑥ 兜底)"
+                # 先压旧历史;压不动(单轮工具结果自身撑爆)再降级当前轮工具结果。
+                # 只在真的减了上下文时才通告,不谎报"已压缩"。
+                did = self._checkpoint_now() or self._force_trim_current_turn()
+                if did and on_notice:
+                    on_notice("上下文估算超 %d tokens,已强制压缩(⑥ 兜底)"
                               % CONTEXT_EST_TOKEN_BUDGET)
-                self._checkpoint_now()
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=self.messages,

@@ -6,7 +6,7 @@
 from typing import Any, Dict, List, Optional
 
 from . import tool
-from .blacklist import blacklist_query
+from .blacklist import active_records
 from .datasource import load_accounts
 from .featurelib import account_features
 from .intel import device_info
@@ -19,14 +19,27 @@ RULE_COUNT = 6  # 当前规则集条数,便于 agent 感知覆盖范围
 # 覆盖),定阈依据见 policy.DEFAULTS 的注释,数值回归见 eval 第 1 层。
 
 
-def _blacklist_hit(dimension: str, value: str) -> bool:
-    """名单联动取数:该维度值是否在黑/灰名单中。"""
-    return blacklist_query(dimension, value)["hit"]
+def _blacklist_records(dimension: str, value: str,
+                       as_of_ts: Any = None) -> List[Dict[str, Any]]:
+    """R001 口径:黑/灰记录(白名单不进 R001,是反方向的抑制层),按事件时点过滤有效期。"""
+    return active_records(dimension, value, as_of_ts, lists=("black", "gray"))
 
 
-def _blacklist_records(dimension: str, value: str) -> List[Dict[str, Any]]:
-    """名单联动取数:返回命中记录(含 list=black/gray 和 reason),未命中为空列表。"""
-    return blacklist_query(dimension, value)["records"]
+def _apply_whitelist(hits: List[Dict[str, str]], white: List[Dict],
+                     conflict: bool) -> None:
+    """白名单 = 全体命中降一档(就地修改):reject 级证据降为 review(白名单
+    账号被盗/被收买是真实攻击路径,人工闸门不能撤),review 级证据抑制为
+    pass(误伤抑制的本职)。绝不是免死金牌。conflict(同值既黑又白)时
+    以黑为准、白名单整体失效,只留告警 —— 名单打架是数据治理问题,
+    不能让规则引擎替人裁决。"""
+    if not white or conflict:
+        return
+    for h in hits:
+        new_action = "review" if h["action"] == "reject" else "pass"
+        if ACTION_ORDER[new_action] < ACTION_ORDER[h["action"]]:
+            h["original_action"] = h["action"]
+            h["action"] = new_action
+            h["whitelisted"] = True
 
 
 def _uid_features(uid: str, as_of_ts: Optional[float] = None,
@@ -46,11 +59,12 @@ def _hit(hits: List[Dict[str, str]], rule_id: str, reason: str, action: str) -> 
 @tool(
     name="rule_eval",
     description=(
-        "对一个事件试跑规则集,返回命中的规则列表和最终处置动作(pass/review/reject)。"
-        "事件字段:uid(必填)、ip、device_id、type(如 login/order/coupon_claim)、"
-        "amount、ts。带 ts 时默认完整回放:特征只用事件之前的数据,阈值用当时生效"
-        "的策略版本(审计口径,'当时会怎么判');use_current_policy=true 则改用当前"
-        "最新阈值评估该事件('现在会怎么判'),特征仍按事件时点取证。"
+        "对一个事件试跑规则集,返回命中规则与最终处置(pass/review/reject)。"
+        "事件字段:uid(必填)、ip、device_id、type、amount、ts。带 ts 默认完整"
+        "回放(当时的特征 + 当时的策略版本,审计口径);use_current_policy=true "
+        "用当前最新阈值('现在会怎么判'),特征仍按事件时点。白名单命中降一档"
+        "(hits 保留 original_action);黑白冲突返回 whitelist_conflict;"
+        "灰名单+行为命中返回 gray_escalation_hint。"
     ),
     parameters={
         "type": "object",
@@ -96,11 +110,26 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
     # gray 只是设备指纹嫌疑(模拟器上也有正常用户),给 review 留人工兜底
     # —— 误伤代价是真实模拟器用户多走一道审核,可接受。
     # ------------------------------------------------------------------
+    # 白名单联动(误伤抑制层,评估在所有规则之后):收集三维度的有效白记录;
+    # 同一值既黑又白 = 名单冲突,白名单失效以黑为准(数据治理告警)
+    white: List[Dict[str, Any]] = []
+    white_conflict = False
     for dim, val in (("uid", uid), ("ip", ip), ("device_id", device_id)):
         if not val:
             continue
-        for rec in _blacklist_records(dim, val):
+        for rec in active_records(dim, val, as_of, lists=("white",)):
+            white.append({"dimension": dim, "value": val, "reason": rec["reason"],
+                          "expires_at": rec.get("expires_at")})
+            if active_records(dim, val, as_of, lists=("black",)):
+                white_conflict = True
+
+    gray_hit = False
+    for dim, val in (("uid", uid), ("ip", ip), ("device_id", device_id)):
+        if not val:
+            continue
+        for rec in _blacklist_records(dim, val, as_of):
             action = "reject" if rec["list"] == "black" else "review"
+            gray_hit = gray_hit or rec["list"] == "gray"
             _hit(hits, "R001", "%s=%s 命中%s名单: %s" % (dim, val, rec["list"], rec["reason"]), action)
 
     # ------------------------------------------------------------------
@@ -134,10 +163,15 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
     # ------------------------------------------------------------------
     if feats and event_type == "coupon_claim":
         gap = feats.get("min_gap_seconds")
-        if gap is not None and gap <= p["r002_max_gap_seconds"] and feats["event_count"] >= p["r002_min_events"]:
+        # 特征按 ts < as_of 取证(防泄漏),不含当前被评估事件;但"第 N 次领券"
+        # 的计数必须含当次 —— 生产引擎在第 N 次到达时就计数并拦截,而回放里
+        # feats 只数到 N-1,strict 比较让实际生效阈值变成 N+1:恰好刷满阈值的
+        # bot 会在回放里漏过、与生产结论分歧。当次即一次 coupon_claim,+1 对齐。
+        count = feats["event_count"] + 1
+        if gap is not None and gap <= p["r002_max_gap_seconds"] and count >= p["r002_min_events"]:
             action = "reject" if feats["distinct_ip"] >= p["r002_reject_min_ips"] else "review"
             _hit(hits, "R002", "领券最短间隔 %ds,累计 %d 次,涉及 %d 个 IP" % (
-                gap, feats["event_count"], feats["distinct_ip"]), action)
+                gap, count, feats["distinct_ip"]), action)
 
     # ------------------------------------------------------------------
     # R003 金额异常,两个互斥分支:
@@ -181,11 +215,13 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
                 _hit(hits, "R005", "注册风险分 %d(阈值 %d)的新号下单 %.2f,账龄 %.1f 小时"
                      % (score, p["r005_min_register_score"], amount, age / 3600), "review")
 
+    _apply_whitelist(hits, white, white_conflict)
+
     action = "pass"
     for h in hits:
         if ACTION_ORDER.get(h["action"], 0) > ACTION_ORDER[action]:
             action = h["action"]
-    return {
+    result = {
         "hits": hits,
         "action": action,
         "rule_count_evaluated": RULE_COUNT,
@@ -193,3 +229,17 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
         "policy_overridden": p["_overridden"],
         "features_snapshot": feats,
     }
+    if white:
+        result["whitelist"] = {"records": white, "applied": not white_conflict}
+        if white_conflict:
+            result["whitelist_conflict"] = (
+                "名单冲突:同一值同时在黑名单与白名单,已以黑为准、白名单失效 —— "
+                "请先修复名单数据(这是治理问题,规则引擎不替人裁决)")
+    # 灰名单联动:嫌疑资源上又出现行为规则命中 = 双重证据。处置动作不在此升级
+    # (保守),但给出升黑评估提示 —— 结论走 graylist_review 的证据化裁决
+    if gray_hit and any(h["rule_id"] != "R001"
+                        and ACTION_ORDER.get(h.get("original_action", h["action"]), 0) >= 1
+                        for h in hits):
+        result["gray_escalation_hint"] = (
+            "灰名单资源 + 行为规则命中(双重证据):建议跑 graylist_review 评估升黑")
+    return result

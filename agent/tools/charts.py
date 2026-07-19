@@ -112,15 +112,18 @@ PCT_FEATURES = [
 VERDICT_COLOR = {"reject": "#b00020", "review": "#e07b00", "pass": "#2a7d4f"}
 
 
-def _draw_profile_header(ax, uid, feats, mon, verdict):
+def _draw_profile_header(ax, uid, feats, verdict):
     """档案栏:注册上下文 / 价值与判定 / 活跃与信号 —— 回答'这个账号是谁'。"""
+    from .profile import _value_tier  # 惰性导入避开 charts<->graph<->profile 环
     ax.axis("off")
     acct = load_accounts().get(uid)
     clock = max((e["ts"] for e in load_events()), default=0)
     lines = []
     if acct:
-        reg_hit = any(blacklist_query(d, v)["hit"] for d, v in
-                      (("ip", acct.get("register_ip")), ("device_id", acct.get("register_device"))) if v)
+        reg_hit = any(r["list"] != "white" and not r.get("expired")
+                      for d, v in (("ip", acct.get("register_ip")),
+                                   ("device_id", acct.get("register_device"))) if v
+                      for r in blacklist_query(d, v)["records"])
         kyc_names = {0: "未认证", 1: "手机实名", 2: "身份证实名"}
         os_txt = ("%s %s" % (acct.get("register_os", "?"),
                              acct.get("register_os_version", ""))).strip()
@@ -132,11 +135,15 @@ def _draw_profile_header(ax, uid, feats, mon, verdict):
             acct.get("phone_rebind_count", 0),
             " · [!]注册环境命中名单" if reg_hit else ""),
             "registered %s" % acct["registered_at"]), "#333"))
-        ltv = acct.get("ltv", 0.0)
-        tier = "high" if ltv >= 1000 else ("medium" if ltv >= 100 else "low")
-        tier_note = {"high": "误伤代价高", "medium": "误伤代价中", "low": "误伤代价低"}[tier]
-        lines.append((_t("价值:LTV %.0f · 档位:%s(%s)" % (ltv, tier, tier_note),
-                         "LTV %.0f" % ltv), "#333"))
+        # 价值分档走 profile 的单一实现,阈值(1000/100)不在这里重钉一份
+        vt = _value_tier(acct.get("ltv", 0.0))
+        tier_note = {"high": "误伤代价高", "medium": "误伤代价中", "low": "误伤代价低"}[vt["tier"]]
+        wl = any(r["list"] == "white" and not r.get("expired")
+                 for r in blacklist_query("uid", uid)["records"])
+        lines.append((_t("价值:LTV %.0f · 档位:%s(%s)%s" % (
+            vt["ltv"], vt["tier"], tier_note,
+            " · 白名单账号(行为规则抑制,reject 降档 review)" if wl else ""),
+            "LTV %.0f" % vt["ltv"]), "#2a7d4f" if wl else "#333"))
     else:
         lines.append((_t("无账号主档(注册信息缺失)", "no account record"), "#999"))
     reports_v = sum(1 for r in load_reports()
@@ -240,7 +247,7 @@ def chart_account_timeline(uid: str):
     ax_pct = fig.add_subplot(gs[1:, 3:])
     ax2 = fig.add_subplot(gs[2, :3], sharex=ax1)
 
-    _draw_profile_header(ax_info, uid, feats, mon, verdict)
+    _draw_profile_header(ax_info, uid, feats, verdict)
     _draw_baseline_panel(ax_pct, feats)
     # 每个 IP 一条微偏移的水平条带:bot 轮换 IP 时点会精确重叠,不偏移就只剩最后画的颜色
     off_step = min(0.09, 0.5 / max(len(ips), 1))
@@ -302,12 +309,14 @@ def chart_account_timeline(uid: str):
         "found": True,
         "chart_path": path,
         "signals": signals,
+        # 数字摘要复用 featurelib 的 feats(单一事实源),不从 df 另算一份 ——
+        # 避免"图上的数"和"特征层的数"两处口径漂移;窗口峰值是图独有的才留 df
         "summary": {
-            "event_count": len(df),
-            "span_seconds": int(df["ts"].max() - df["ts"].min()),
-            "distinct_ip": len(ips),
-            "distinct_device": int(df["device_id"].nunique()),
-            "types": {k: int(v) for k, v in df["type"].value_counts().items()},
+            "event_count": feats["event_count"],
+            "span_seconds": int(feats["span_seconds"]),
+            "distinct_ip": feats["distinct_ip"],
+            "distinct_device": feats["distinct_device"],
+            "types": feats["event_types"],
             "busiest_window_events": int(win.max()),
         },
     }
@@ -316,10 +325,11 @@ def chart_account_timeline(uid: str):
 @tool(
     name="chart_threshold_sweep",
     description=(
-        "对单个规则阈值做扫描回测:逐个候选值跑 rule_backtest,画出 precision/"
-        "recall/F1 随阈值变化的曲线(PNG),返回文件路径、逐点指标表与 F1 最优值。"
-        "规则调参前先用它看指标对该参数的敏感度。param 可选:"
-        + ", ".join(SWEEP_DEFAULTS)
+        "对单个规则阈值扫描回测:逐候选值画 precision/recall/F1 曲线 + 该规则"
+        "自身命中归因曲线(命中欺诈/误伤正常,右轴)。aggregate_insensitive=true "
+        "= 聚合指标全程无变化(被其他规则遮蔽/无边界样本),无 best 值;"
+        "nothing_to_plot=true = 连归因也平直,不出图,把 note 原因转告研究员。"
+        "可选参数见 param 枚举。"
     ),
     parameters={
         "type": "object",
@@ -333,33 +343,89 @@ def chart_account_timeline(uid: str):
 )
 def chart_threshold_sweep(param: str, values: Optional[List[float]] = None):
     values = values or SWEEP_DEFAULTS[param]
+    # 参数命名约定 rNNN_* -> 所属规则:聚合指标之外必须看"该规则自己命中了谁"。
+    # 教训:小样本上其他规则(名单/指纹/金额)把欺诈账号全兜住,扫这条规则的
+    # 参数时聚合 F1 恒 1.0 —— 图一条平线还标着 best F1,等于宣称"随便设都最优"。
+    rule_id = param.split("_")[0].upper()
     rows = []
     for v in values:
         r = backtest({param: v})
         m = r["operating_points"]["flag=review+reject"]
-        rows.append({"value": v, "precision": m["precision"], "recall": m["recall"], "f1": m["f1"]})
+        per = list(r["per_account"].values())
+        rows.append({
+            "value": v, "precision": m["precision"], "recall": m["recall"], "f1": m["f1"],
+            # 归因:该规则命中的欺诈数(覆盖)与正常数(误伤)——聚合被遮蔽时
+            # 这两条曲线仍能显示参数的真实作用面
+            "rule_hits_fraud": sum(1 for a in per
+                                   if a["label"] == "fraud" and rule_id in a["rules"]),
+            "rule_hits_normal": sum(1 for a in per
+                                    if a["label"] == "normal" and rule_id in a["rules"]),
+        })
     df = pd.DataFrame(rows)
+    # 钝感检测:聚合线纹丝不动 = 参数作用被其他规则遮蔽,或数据集没有
+    # 该参数的边界样本。此时"最优值"是幻觉,必须显式说出来
+    flat = int(df[["precision", "recall", "f1"]].nunique().max()) == 1
+    attr_flat = int(df[["rule_hits_fraud", "rule_hits_normal"]].nunique().max()) == 1
+    if flat and attr_flat:
+        # 连归因曲线都不动:这张图没有任何信息量,画出来就是误导 —— 不出图,
+        # 把"为什么无可画"直接当结果返回(研究员实锤过:平线图纯瞎扯淡)
+        return {
+            "param": param, "rule_id": rule_id, "aggregate_insensitive": True,
+            "nothing_to_plot": True, "accounts_evaluated": len(per),
+            "rows": rows[:2],  # 留两行证明确实扫过
+            "note": ("扫描区间内聚合指标与 %s 归因曲线全部无变化,不出图。"
+                     "原因:当前数据集(%d 账号)没有该参数的边界样本,或其作用被"
+                     "其他规则完全遮蔽。请换更大数据集(FK_DATASET=gen)或先用 "
+                     "rule_backtest 确认该规则在此数据集上有独立命中"
+                     % (rule_id, len(per))),
+        }
 
     fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
     # x 用等距类目位置而非数值:扫描序列常跨数量级(5~600),数值轴会挤成一团
     x = range(len(df))
     for i, metric in enumerate(("precision", "recall", "f1")):
         ax.plot(x, df[metric], marker="o", ms=4, lw=2, color=PALETTE[i], label=metric)
-    best_i = int(df["f1"].idxmax())
-    ax.annotate("best F1=%.3f" % df.loc[best_i, "f1"], (best_i, df.loc[best_i, "f1"]),
-                textcoords="offset points", xytext=(0, 12), ha="center", fontsize=9)
+    ax2 = ax.twinx()
+    ax2.plot(x, df["rule_hits_fraud"], marker="s", ms=4, lw=1.6, ls="--", color="#7b1fa2",
+             label=_t("%s 命中欺诈(右轴)" % rule_id, "%s hits fraud (right)" % rule_id))
+    ax2.plot(x, df["rule_hits_normal"], marker="x", ms=6, lw=1.6, ls=":", color="#e07b00",
+             label=_t("%s 误伤正常(右轴)" % rule_id, "%s hits normal (right)" % rule_id))
+    ax2.set_ylabel(_t("%s 命中账号数" % rule_id, "%s hit accounts" % rule_id), fontsize=9)
+    ax2.set_ylim(bottom=0)
+    ax2.yaxis.get_major_locator().set_params(integer=True)
+    if flat:
+        ax.annotate(_t("聚合指标对该参数不敏感:作用被其他规则遮蔽或无边界样本\n"
+                       "以右轴规则归因曲线为准;勿据此选'最优阈值'",
+                       "aggregate metrics insensitive to this param\n(masked by other rules "
+                       "or no boundary cases); see rule-attribution curves"),
+                    (0.5, 0.55), xycoords="axes fraction", ha="center", fontsize=10,
+                    color="#b00020",
+                    bbox={"boxstyle": "round", "fc": "#fff3f3", "ec": "#b00020"})
+    else:
+        best_i = int(df["f1"].idxmax())
+        ax.annotate("best F1=%.3f" % df.loc[best_i, "f1"], (best_i, df.loc[best_i, "f1"]),
+                    textcoords="offset points", xytext=(0, 12), ha="center", fontsize=9)
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=8, loc="center right")
     ax.set_xticks(list(x), ["%g" % v for v in df["value"]])
     ax.set_xlabel(param)
     ax.set_ylim(-0.05, 1.1)
     ax.grid(axis="y", color="#eee")
-    ax.legend()
     ax.set_title(_t("阈值扫描:%s(口径 flag=review+reject)" % param,
                     "Threshold sweep: %s (flag=review+reject)" % param))
 
     path = _save(fig, "sweep_%s.png" % param)
-    best = rows[best_i]
-    return {"param": param, "chart_path": path, "rows": rows,
-            "best_by_f1": {"value": best["value"], "f1": best["f1"]}}
+    out = {"param": param, "rule_id": rule_id, "chart_path": path, "rows": rows,
+           "aggregate_insensitive": flat}
+    if flat:
+        out["note"] = ("聚合指标在整个扫描区间无变化:该参数的作用被其他规则遮蔽,"
+                       "或当前数据集没有它的边界样本。不存在'最优值';请看 rows 里"
+                       "rule_hits_* 归因,或换更大数据集(FK_DATASET=gen)再扫")
+    else:
+        best = rows[int(df["f1"].idxmax())]
+        out["best_by_f1"] = {"value": best["value"], "f1": best["f1"]}
+    return out
 
 
 def _labels() -> dict:

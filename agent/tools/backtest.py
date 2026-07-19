@@ -277,7 +277,7 @@ def shadow_backtest(overrides: Dict):
     description=(
         "对全量标注账号回测当前生效策略(评估口径:当前阈值 × 历史数据),返回两个"
         "口径(flag=review+reject / flag=reject_only)的混淆矩阵与 P/R/F1、规则贡献、"
-        "成本视角、误判清单。overrides 可临时覆盖阈值做 what-if(不修改配置,可用键"
+        "成本视角、误判清单。overrides 临时覆盖阈值做 what-if(不修改配置,可用键"
         "见参数说明)。凡涉及规则效果/指标的问题必须用本工具取数,不要自行推算。"
     ),
     parameters={

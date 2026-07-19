@@ -71,11 +71,13 @@ def appeal_review():
         bl = [r for r in load_blacklist() if r["dimension"] == "uid" and r["value"] == uid]
         verified = report_query(uid)["verified_count"]
         # 建议只看硬证据,申诉文案不参与:fraud 标签/属实举报/黑名单任一在手
-        # 即建议维持;干干净净(normal 或无标签 + 无处置 + 无信号)建议解除;
+        # 即建议维持;干干净净(normal 或无标签 + 无处置 + 无不利名单)建议解除
+        # —— 白名单是既往误伤的免责凭证,不是嫌疑记录,不阻断"干净"判定;
         # 其余(有处置但证据链存疑)交人工深查 —— 建议永远只是排序,不是决议
         strong = label == "fraud" or verified > 0 or any(r["list"] == "black" for r in bl)
+        adverse = [r for r in bl if r["list"] != "white"]
         clean = (label in (None, "normal") and v.get("predicted", "pass") == "pass"
-                 and not bl and verified == 0)
+                 and not adverse and verified == 0)
         rec = "uphold" if strong else ("release" if clean else "investigate")
         out.append({
             "appeal_id": a["appeal_id"], "uid": uid, "claim": a["claim"],

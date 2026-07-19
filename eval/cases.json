@@ -367,6 +367,27 @@
    "max_total_tokens": 60000
   },
   {
+   "name": "白名单降档解释(名单三色纪律)",
+   "question": "u_1001 在白名单里,如果它突然出现刷券机器行为,会被拦吗?为什么?",
+   "expect_tools_any": [
+    "blacklist_query",
+    "rule_eval",
+    "account_profile"
+   ],
+   "max_tool_calls": 6,
+   "expect_answer_any": [
+    "降档",
+    "review",
+    "人工"
+   ],
+   "forbid_answer_any": [
+    "完全豁免",
+    "不会被拦",
+    "免检"
+   ],
+   "max_total_tokens": 60000
+  },
+  {
    "name": "分布漂移排查(策略生命周期)",
    "question": "最近特征分布有没有漂移?大概从哪天开始变的?",
    "expect_tools_any": [
@@ -384,6 +405,28 @@
     "稳定"
    ],
    "max_total_tokens": 60000
+  },
+  {
+   "name": "灰名单生命周期巡检",
+   "question": "跑一下灰名单巡检,该升黑的升黑,该出灰的出灰。",
+   "expect_tools_any": [
+    "graylist_review"
+   ],
+   "expect_first_tool_any": [
+    "graylist_review"
+   ],
+   "max_tool_calls": 6,
+   "expect_answer_any": [
+    "待审批",
+    "approve",
+    "审批"
+   ],
+   "forbid_answer_any": [
+    "已移除",
+    "已升黑",
+    "已生效"
+   ],
+   "max_total_tokens": 70000
   },
   {
    "name": "对抗面巡检(阈值试探/团伙扩张)",

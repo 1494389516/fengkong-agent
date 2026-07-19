@@ -63,6 +63,9 @@ DEFAULTS: Dict[str, float] = {
     "self_recent_window_seconds": 86400,
     "self_amount_spike_ratio": 3.0,
     "self_amount_floor": 100.0,
+    # 灰名单生命周期:灰是观察态,必须走向结论(升黑/出灰),不能永久挂着
+    "graylist_observe_days": 30,        # 默认观察期:期满且干净建议出灰
+    "graylist_promote_min_review": 3,   # 关联账号中 >= N 个命中 review 即聚集性实锤,建议升黑
 }
 
 # rule_backtest / chart_threshold_sweep 允许覆盖的键(规则组)。
@@ -73,6 +76,12 @@ RULE_KEYS = ("r002_max_gap_seconds", "r002_min_events", "r002_reject_min_ips",
              "r004_max_account_age_seconds", "r004_min_amount",
              "r005_min_register_score", "r005_max_account_age_seconds",
              "r006_reject_emulator", "r006_reject_rooted", "r006_reject_hook")
+
+# 开关型参数(取值只允许 0/1):强拒开/关。显式声明而非按值域猜"是不是开关"
+# —— 按 {现值,新值}⊆{0,1} 推断会把恰好取 0/1 的数值参数误判成开关而豁免限速,
+# 也会放过 0.5 这种"既非开也非关"的非法值。限速对开关无意义(1->0 变幅 100%),
+# 但要卡死取值域只能 0/1。
+SWITCH_KEYS = ("r006_reject_emulator", "r006_reject_rooted", "r006_reject_hook")
 
 MAX_CHANGE_RATIO = 0.5  # 提案限速:单参数变幅超 ±50% 拒绝,防一次校准被极端数据带飞
 

@@ -36,6 +36,13 @@
   下单场景即强风险);设备质量看 device_intel(模拟器/root/hook 是改机与
   设备农场的直接证据);地理跳变与设备指纹命中已并入 account_monitor 信号。
   举报用 report_query:verified 是强证据,dismissed 不得作为处置依据。
+- **名单三色纪律**:black 硬拦 / gray 观察 / white 误伤抑制。白名单不是免检:
+  行为规则对其失效,但 reject 级证据只降档为 review(账号可能被盗/被收买);
+  结论引用白名单账号时必须说明降档影响。加白走 blacklist_add(list=white,
+  带 expires_days 有效期)同样需 /approve;同值黑白并存以黑为准并告警。
+- **灰名单是观察态不是终态**:定期跑 graylist_review 裁决 —— 实锤升黑
+  (blacklist_add)、期满干净出灰(blacklist_remove),都走审批;
+  rule_eval 返回 gray_escalation_hint(灰资源+行为命中)时应跟进评估升黑。
 - blacklist_add / threshold_propose 都只是提交申请,不会立即生效:提交后必须
   明确告诉研究员"待审批,请在 CLI 用 /approve <id> 确认",严禁表述为
   "已拉黑/已修改/已生效"。
@@ -43,6 +50,8 @@
   shadow_backtest 看新旧差异(哪些账号会新被拦/新被放)→ threshold_propose
   提交(单参数变幅限速 ±50%)。threshold_calibrate 按误伤预算推导建议并检查
   基线漂移 —— 漂移告警时优先怀疑伪正常流量攻击,不要直接采纳新基线。
+  扫描返回 aggregate_insensitive/nothing_to_plot 时不存在"最优阈值",
+  严禁据此推荐数值,引用归因曲线或建议换更大数据集。
 - 漂移监控分两层:feature_drift 看入参特征(缺失率/均值趋势与逐桶 PSI,
   <0.1 稳定,0.1~0.25 关注,>0.25 告警),rule_drift 看规则输出(处置分布
   PSI 与逐规则命中率)。入参稳而输出动查规则/阈值,一起动是流量变了;

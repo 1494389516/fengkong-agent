@@ -199,6 +199,21 @@ def run_gen_layer() -> int:
                        if a["label"] == "normal" and "R006" in a["rules"]]
             cal = registry.dispatch("threshold_calibrate", {"fpr_budget": 0.01})
             realized = cal.get("realized_fpr_normal_wide")
+            # 阈值扫描在带边界样本的大样本上必须有敏感度(慢速 bot / 重度用户
+            # 制造的张力),平线说明生成器的阈值张力设计坏了
+            sw = chart_threshold_sweep("r002_max_gap_seconds")
+            # 关联分量必须与团伙一一对应:曾因随机 IP 撞号 + 弱边并组,把
+            # 互不相干的 bot 和两个团伙画成一组(idc/proxy IP 不作并组依据)
+            gr = graph_relations()
+            comps_pure = all(
+                len({u.rsplit("_", 1)[0] for u in c["accounts"]}) == 1
+                and c["accounts"][0].startswith("g_ring_")
+                for c in gr["components"])
+            # 灰名单生命周期在大样本上的冒烟:巡检覆盖全部灰记录,结论三分
+            from agent.tools.graylist import graylist_review as _gl_review
+            gl = _gl_review()
+            gl_expected = sum(1 for r in json.loads(
+                (out / "blacklist.json").read_text(encoding="utf-8")) if r["list"] == "gray")
             fr = registry.dispatch("feature_risk", {"include_bins": True})
             fr_top = (fr["features"].get(fr["ranking_by_iv"][0], {})
                       if fr.get("ranking_by_iv") else {})
@@ -208,9 +223,22 @@ def run_gen_layer() -> int:
             from measure_costs import tool_result_sizes
             sizes = dict(tool_result_sizes())
             biggest = max(sizes.items(), key=lambda kv: kv[1])
+            # 账号结构断言不钉死总数:normal/bots/stolen 由循环次数决定(与 RNG 流
+            # 无关),团伙成员数是每团 randint(3,6) 才随机。之前钉 "==62" 每加一处
+            # random() 调用就位移 RNG 流、逼着改这个数;改成"确定部分精确 + 团伙部分
+            # 范围"后,断言只在账号结构真的坏了时才红。
+            per = r["per_account"]
+            n_norm = sum(1 for u in per if u.startswith("g_norm_"))
+            n_bot = sum(1 for u in per if u.startswith("g_bot_"))
+            n_ring = sum(1 for u in per if u.startswith("g_ring_"))
+            n_stl = sum(1 for u in per if u.startswith("g_stl_"))
             failures = _report("数据生成 + 大样本回测(离线)", [
                 ("生成器退出码 0", proc.returncode == 0),
-                ("账号数 = 62(seed 7 确定性)", r["accounts_evaluated"] == 62),
+                ("normal 账号 = 40(循环次数,与随机流无关)", n_norm == 40),
+                ("bot 账号 = 4", n_bot == 4),
+                ("stolen 账号 = 3", n_stl == 3),
+                ("团伙账号在 3 团 ×[3,6] 成员区间 = [9,18]", 9 <= n_ring <= 18),
+                ("回测账号数 = 各类之和", r["accounts_evaluated"] == n_norm + n_bot + n_ring + n_stl),
                 ("宽口径 recall >= 0.9", wide["recall"] >= 0.9),
                 ("宽口径 precision >= 0.8", wide["precision"] >= 0.8),
                 ("宽口径 f1 >= 0.85", wide["f1"] >= 0.85),
@@ -225,6 +253,17 @@ def run_gen_layer() -> int:
                 ("校准产出建议阈值", bool(cal.get("suggestions"))),
                 ("建议阈值实测误伤率 <= 5%", realized is not None and realized <= 0.05),
                 ("无参照快照时不误报漂移", cal.get("drift_alarm") is False),
+                ("阈值扫描有敏感度且归因到误伤增长",
+                 sw.get("aggregate_insensitive") is False
+                 and sw["rows"][-1]["rule_hits_normal"] > sw["rows"][0]["rule_hits_normal"]),
+                ("关联分量 = 团伙数且无误并组(3 团各自独立)",
+                 gr["component_count"] == 3 and comps_pure),
+                ("灰名单巡检覆盖全部灰记录且结论三分",
+                 gl["gray_total"] == gl_expected
+                 and sum(gl["recommendations"].values()) == gl["gray_total"]),
+                ("灰名单巡检结果在单工具预算内",
+                 len(json.dumps(registry.dispatch("graylist_review", {}),
+                                ensure_ascii=False)) <= 5000),
                 ("单工具结果 <= 5000 chars(最大: %s %d)" % biggest, biggest[1] <= 5000),
                 # 1500 是纯指标期的瘦身线;rule_contribution(规则贡献)/cost
                 # (期望损失)/label_observation(表现覆盖)加入后上调至 2000,
@@ -238,6 +277,186 @@ def run_gen_layer() -> int:
             return failures
         finally:
             os.environ.pop("FK_DATA_DIR", None)
+
+
+def run_whitelist_layer() -> int:
+    """离线:白名单策略语义。白名单 = 误伤抑制不是免检:review 级证据抑制为
+    pass,reject 级证据只降档为 review(白名单账号被盗/被收买仍有人工闸门);
+    有效期按事件时点判断(回放口径);同值黑白冲突以黑为准并告警。"""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        T = 1784100000
+        evs = []
+        # 四个账号同款刷券行为(12 连 gap=2s):唯一区别是名单状态
+        for uid, ips in (("t_vip", ["10.0.0.1"]), ("t_rej", ["10.0.0.1", "10.0.0.2", "10.0.0.3"]),
+                         ("t_exp", ["10.0.0.5"]), ("t_conf", ["10.0.0.6"])):
+            evs += [{"uid": uid, "ip": ips[i % len(ips)], "device_id": "d_%s" % uid,
+                     "type": "coupon_claim", "ts": T + i * 2} for i in range(12)]
+        evs.append({"uid": "t_hook", "ip": "10.0.0.9", "device_id": "d_hook",
+                    "type": "coupon_claim", "ts": T})
+        (base / "events_sample.json").write_text(json.dumps(evs))
+        (base / "labels.json").write_text("{}")
+        (base / "device_intel.json").write_text(json.dumps({
+            "d_hook": {"platform": "安卓", "is_emulator": False, "is_rooted": False,
+                       "hook_detected": True, "signals": ["Frida 注入"], "risk": "high"}}))
+        (base / "blacklist.json").write_text(json.dumps([
+            {"dimension": "uid", "value": "t_vip", "list": "white",
+             "reason": "eval:申诉通过", "added_at": "2026-07-01", "expires_at": "2099-01-01"},
+            {"dimension": "uid", "value": "t_rej", "list": "white",
+             "reason": "eval:申诉通过", "added_at": "2026-07-01"},
+            {"dimension": "uid", "value": "t_exp", "list": "white",
+             "reason": "eval:已过期", "added_at": "2025-12-01", "expires_at": "2026-01-01"},
+            {"dimension": "uid", "value": "t_conf", "list": "white",
+             "reason": "eval:冲突白", "added_at": "2026-07-01"},
+            {"dimension": "uid", "value": "t_conf", "list": "black",
+             "reason": "eval:冲突黑", "added_at": "2026-07-02"},
+            {"dimension": "uid", "value": "t_hook", "list": "white",
+             "reason": "eval:白名单+作案设备", "added_at": "2026-07-01"},
+        ]))
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            def ev(uid, i=11, ip="10.0.0.1", dev=None):
+                return rule_eval({"uid": uid, "ip": ip, "device_id": dev or "d_%s" % uid,
+                                  "type": "coupon_claim", "ts": T + i * 2})
+            r_vip = ev("t_vip")     # R002 review 级 -> 抑制为 pass
+            r_rej = ev("t_rej")     # R002+多IP reject 级 -> 只降档 review
+            r_exp = ev("t_exp")     # 白名单已过期 -> 原样 review
+            r_conf = ev("t_conf")   # 黑白冲突 -> 以黑为准 reject + 告警
+            r_hook = ev("t_hook", i=0, ip="10.0.0.9", dev="d_hook")  # R006 reject -> review
+            checks = [
+                ("review 级行为证据被抑制为 pass(命中保留 original_action)",
+                 r_vip["action"] == "pass"
+                 and any(h.get("original_action") == "review" and h.get("whitelisted")
+                         for h in r_vip["hits"])),
+                ("reject 级证据只降档为 review(不是免检)",
+                 r_rej["action"] == "review"
+                 and any(h.get("original_action") == "reject" for h in r_rej["hits"])),
+                ("过期白名单不生效(按事件时点判断)",
+                 r_exp["action"] == "review" and "whitelist" not in r_exp),
+                ("同值黑白冲突:以黑为准 reject + 治理告警",
+                 r_conf["action"] == "reject" and bool(r_conf.get("whitelist_conflict"))),
+                ("R006 设备指纹 reject 对白名单账号降档 review",
+                 r_hook["action"] == "review"
+                 and any(h["rule_id"] == "R006" and h.get("original_action") == "reject"
+                         for h in r_hook["hits"])),
+            ]
+            # 审批流:白名单带有效期落盘;同值不同色允许提交(灰升黑/黑值申诉加白)
+            r_w = registry.dispatch("blacklist_add", {
+                "dimension": "device_id", "value": "d_new", "list": "white",
+                "reason": "eval:临时白", "expires_days": 30})
+            actions.decide(r_w.get("action_id", -1), approve=True)
+            rec = [r for r in registry.dispatch(
+                "blacklist_query", {"dimension": "device_id", "value": "d_new"})["records"]
+                if r["list"] == "white"]
+            r_up = registry.dispatch("blacklist_add", {
+                "dimension": "uid", "value": "t_rej", "list": "gray",
+                "reason": "eval:白值提灰(升级路径)"})
+            checks += [
+                ("白名单审批落盘且带 expires_at",
+                 bool(rec) and bool(rec[0].get("expires_at"))),
+                ("同值不同色允许提交(不被 already_listed 挡住)",
+                 r_up.get("status") == "pending_confirmation"),
+            ]
+            # 误伤抑制的收益必须进指标:t_vip 是行为上会误伤的"正常账号",
+            # 有白名单时回测 FP=0,去掉白名单立刻 FP+1 —— 白名单的价值可计量
+            (base / "labels.json").write_text(json.dumps({
+                "t_vip": {"label": "normal", "note": "eval:误伤面"},
+                "t_rej": {"label": "fraud", "note": "eval"},
+                "t_exp": {"label": "fraud", "note": "eval"},
+                "t_conf": {"label": "fraud", "note": "eval"},
+                "t_hook": {"label": "fraud", "note": "eval"},
+            }))
+            wide_with = backtest()["operating_points"]["flag=review+reject"]
+            bl = json.loads((base / "blacklist.json").read_text(encoding="utf-8"))
+            (base / "blacklist.json").write_text(json.dumps(
+                [r for r in bl if not (r["value"] == "t_vip" and r["list"] == "white")]))
+            wide_without = backtest()["operating_points"]["flag=review+reject"]
+            checks.append(("白名单收益进指标:有白 FP=0 / 无白 FP=1(recall 不变)",
+                           wide_with["fp"] == 0 and wide_without["fp"] == 1
+                           and wide_with["recall"] == wide_without["recall"] == 1.0))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+    # 样本集集成:u_1001 白名单演示条目不产生任何风险信号与指标扰动
+    mon = account_monitor("u_1001")
+    prof = registry.dispatch("account_profile", {"uid": "u_1001"})
+    checks += [
+        ("白名单不是风险信号(monitor 无 blacklist 信号,单列标注)",
+         "blacklist" not in mon["signal_types"] and bool(mon.get("whitelist_notes"))),
+        ("档案携带白名单状态供处置权衡", bool(prof.get("whitelist"))),
+    ]
+    return _report("白名单策略(离线)", checks)
+
+
+def run_graylist_layer() -> int:
+    """离线:灰名单生命周期 —— 灰是观察态,必须走向结论(升黑/出灰),
+    不能永久挂着。三条出路各造一个场景 + 出灰审批全流程 + 规则层联动提示。"""
+    from agent.tools.graylist import graylist_review
+
+    # 样本集:dev_emu_9f3a(套现团伙共用模拟器)关联 u_1003/4/5 全部 review,
+    # 聚集性达标 -> 升黑建议;u_1003 事件带灰设备 + R003 行为命中 -> 联动提示
+    r = graylist_review()
+    emu = next(e for e in r["entries"] if e["value"] == "dev_emu_9f3a")
+    ev = rule_eval({"uid": "u_1003", "ip": "198.51.100.23", "device_id": "dev_emu_9f3a",
+                    "type": "order", "amount": 9.9, "ts": 1784112000})
+    checks = [
+        ("聚集性实锤 -> 升黑建议(3 关联账号全 review)",
+         emu["recommendation"] == "promote_to_black" and emu["linked_accounts"] == 3),
+        ("灰资源 + 行为命中 -> 规则层给出升黑评估提示",
+         bool(ev.get("gray_escalation_hint"))),
+    ]
+
+    from datetime import datetime, timezone
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        T = 1784100000
+        # g_clean:观察 60 天零命中(应出灰);g_new:刚挂 2 天(继续观察)
+        evs = [{"uid": "t_ok", "ip": "9.9.9.9", "device_id": "d_ok",
+                "type": "login", "ts": T + i * 86400} for i in range(3)]
+        evs.append({"uid": "t_ok2", "ip": "8.8.8.8", "device_id": "d_new",
+                    "type": "login", "ts": T + 2 * 86400})
+        (base / "events_sample.json").write_text(json.dumps(evs))
+        (base / "labels.json").write_text("{}")
+        clock_day = datetime.fromtimestamp(T + 2 * 86400, timezone.utc)
+        (base / "blacklist.json").write_text(json.dumps([
+            {"dimension": "ip", "value": "9.9.9.9", "list": "gray",
+             "reason": "eval:期满干净", "added_at": "2026-05-15"},   # 距时钟 ~60 天
+            {"dimension": "device_id", "value": "d_new", "list": "gray",
+             "reason": "eval:刚挂上", "added_at": clock_day.strftime("%Y-%m-%d")},
+        ]))
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            r2 = graylist_review()
+            by_val = {e["value"]: e for e in r2["entries"]}
+            # 出灰全流程:提案 -> 审批 -> 名单移除 -> R001 不再命中
+            rm = registry.dispatch("blacklist_remove", {
+                "dimension": "ip", "value": "9.9.9.9", "list": "gray",
+                "reason": "eval:graylist_review 期满干净"})
+            actions.decide(rm.get("action_id", -1), approve=True)
+            gone = not registry.dispatch("blacklist_query",
+                                         {"dimension": "ip", "value": "9.9.9.9"})["hit"]
+            rm_absent = registry.dispatch("blacklist_remove", {
+                "dimension": "ip", "value": "9.9.9.9", "list": "gray", "reason": "eval:再删"})
+            # 灰名单默认观察期:不带 expires_days 的灰提案自动带上
+            g_add = registry.dispatch("blacklist_add", {
+                "dimension": "ip", "value": "7.7.7.7", "list": "gray", "reason": "eval:默认观察期"})
+            g_entry = [a for a in actions.list_pending()
+                       if a.get("kind", "blacklist_add") == "blacklist_add"
+                       and a["value"] == "7.7.7.7"]
+            checks += [
+                ("期满零命中 -> 出灰建议",
+                 by_val["9.9.9.9"]["recommendation"] == "release"),
+                ("观察未满 -> 继续观察(带进度)",
+                 by_val["d_new"]["recommendation"] == "observe"),
+                ("出灰审批流:批准后名单移除、R001 不再命中", gone),
+                ("移除不存在的值返回 not_listed", rm_absent.get("status") == "not_listed"),
+                ("灰名单提案默认携带观察期",
+                 g_add.get("status") == "pending_confirmation"
+                 and bool(g_entry) and g_entry[0].get("expires_days") == 30),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("灰名单生命周期(离线)", checks)
 
 
 def run_policy_layer() -> int:
@@ -484,6 +703,164 @@ def run_privacy_layer() -> int:
     ])
 
 
+def run_regression_layer() -> int:
+    """离线:代码复检修好的 bug,每个钉一条断言 —— 修复没有回归测试就等于
+    没修(下一次重构随手就能改回去,eval 还是绿的)。每条断言都是当初
+    finder 用来实锤 bug 的最小复现场景。"""
+    from agent.privacy import Tokenizer
+    from agent.tools import featurelib, reconcile
+    from agent.tools.actions import _limit_violations
+    from agent.tools.datasource import load_events
+
+    checks = []
+
+    # -- privacy:三种曾漏防的形态(文件名下划线前缀 / 句尾 IP / 举报人 ID)--
+    t = Tokenizer(salt="eval")
+    chart_json = json.dumps(chart_account_timeline("u_1002"), ensure_ascii=False)
+    checks += [
+        ("脱敏:图表文件名里的 uid(下划线前缀)",
+         "u_1002" not in t.tokenize("out/charts/timeline_u_1002.png")),
+        ("脱敏:句尾带英文句点的 IP",
+         "203.0.113.66" not in t.tokenize("排查 203.0.113.66.")),
+        ("脱敏:g_rpt_ 举报人 ID",
+         "g_rpt_0007" not in t.tokenize("reporter g_rpt_0007")),
+        ("脱敏:图表工具完整返回无标识符泄漏(原始泄漏路径)",
+         "u_1002" not in t.tokenize(chart_json)),
+    ]
+
+    # -- actions:限速的 0 值短路与开关取值域 --
+    cur = {"r006_reject_rooted": 0, "r006_reject_hook": 1, "r002_min_events": 10}
+    checks += [
+        ("限速:现值 0 的开关塞大数值被拒",
+         bool(_limit_violations({"r006_reject_rooted": 5000}, cur))),
+        ("限速:开关塞 0.5 被拒(非 0/1)",
+         bool(_limit_violations({"r006_reject_hook": 0.5}, cur))),
+        ("限速:合法开关切换 0->1 放行",
+         not _limit_violations({"r006_reject_rooted": 1}, cur)),
+        ("限速:数值键小幅变更放行",
+         not _limit_violations({"r002_min_events": 12}, cur)),
+        ("限速:数值键超幅仍被拒",
+         bool(_limit_violations({"r002_min_events": 99}, cur))),
+    ]
+
+    # -- 阈值扫描:小样本上全部曲线平直 -> 拒绝出图,只解释原因(教训:曾输出
+    #    一条 1.0 平线还标 "best F1=1.000";加警告框后研究员仍判"纯瞎扯淡"——
+    #    没有信息量的图不该存在)--
+    sw = chart_threshold_sweep("r002_max_gap_seconds")
+    checks.append(("阈值扫描:全平直时拒绝出图、无伪 best、说明原因",
+                   sw.get("aggregate_insensitive") is True
+                   and sw.get("nothing_to_plot") is True
+                   and "best_by_f1" not in sw and "chart_path" not in sw
+                   and bool(sw.get("note"))))
+
+    # -- monitor:window_seconds=0 回落而非除零(信号不丢)--
+    m = account_monitor("u_1002", window_seconds=0)
+    checks.append(("监控:window=0 回落默认窗口且信号完整",
+                   m.get("found") is True and m.get("window_seconds") == 300
+                   and "burst" in m.get("signal_types", [])))
+
+    # -- core ⑤/⑥:单轮爆炸时 checkpoint 压不动,当前轮兜底接手 --
+    from agent.core import Agent, TRIM_PLACEHOLDER
+    a = Agent.__new__(Agent)  # 不走 __init__,离线单测压缩逻辑
+    a._system = "sys"
+    a.messages = [{"role": "system", "content": "sys"},
+                  {"role": "user", "content": "查账号"}]
+    for i in range(3):
+        a.messages.append({"role": "assistant", "content": None, "tool_calls": [i]})
+        a.messages.append({"role": "tool", "content": "X" * 5000})
+    ck = a._checkpoint_now()
+    trimmed = a._force_trim_current_turn()
+    tool_bodies = [m2["content"] for m2 in a.messages if m2["role"] == "tool"]
+    checks += [
+        ("兜底:单轮场景 checkpoint 如实返回未压缩", ck is False),
+        ("兜底:当前轮工具结果降级,保留最近一条",
+         trimmed is True and tool_bodies[-1] != TRIM_PLACEHOLDER
+         and all(c == TRIM_PLACEHOLDER for c in tool_bodies[:-1])),
+        ("兜底:再裁幂等(只剩一条时不动)", a._force_trim_current_turn() is False),
+    ]
+
+    # -- featurelib:uid 索引与全量扫描口径一致(含 as_of 过滤)--
+    def brute(uid, as_of=None):
+        return [e for e in load_events()
+                if e["uid"] == uid and (as_of is None or e["ts"] < as_of)]
+    idx_ok = all(featurelib._account_events(u) == brute(u)
+                 for u in ("u_1002", "u_1003", "u_9999"))
+    cut = brute("u_1002")[10]["ts"]
+    checks.append(("特征:uid 索引 == 全量扫描(含 as_of)",
+                   idx_ok and featurelib._account_events("u_1002", cut) == brute("u_1002", cut)))
+
+    # -- 临时数据集场景:R002 边界 / 漂移 P99=0 / reconcile 缓存 / decide 原子性 --
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        # R002:恰好刷满 min_events 次,第 N 次(当次计入)就必须命中。
+        # 另放一个慢速账号:population_baseline 有 n>=2 门槛,单账号数据集里
+        # coupon_claims 特征会被跳过,漂移比较根本不会发生(测试就空转了)
+        n = 10
+        evs = [{"uid": "t_bot", "ip": "10.0.0.1", "device_id": "t_dev",
+                "type": "coupon_claim", "ts": 1000 + i * 2} for i in range(n)]
+        evs += [{"uid": "t_norm", "ip": "10.0.0.2", "device_id": "t_dev2",
+                 "type": "coupon_claim", "ts": 2000 + i * 3600} for i in range(3)]
+        (base / "events_sample.json").write_text(json.dumps(evs))
+        (base / "blacklist.json").write_text("[]")
+        (base / "labels.json").write_text("{}")
+        # 漂移:上版快照 P99=0,当前有值 -> 从无到有必须告警
+        (base / "thresholds.json").write_text(json.dumps([
+            {"version": 1, "effective_from": 0, "approved_by": "eval", "note": "",
+             "values": {}, "baseline_snapshot": {"coupon_claims": {"p99": 0}}}]))
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            r2 = rule_eval({"uid": "t_bot", "ip": "10.0.0.1", "device_id": "t_dev",
+                            "type": "coupon_claim", "ts": 1000 + (n - 1) * 2})
+            checks.append(("R002:恰好刷满阈值次数的第 N 次即命中(无差一)",
+                           any(h["rule_id"] == "R002" for h in r2["hits"])))
+            cal = registry.dispatch("threshold_calibrate", {})
+            checks.append(("漂移:快照 P99=0 抬升必须告警(0 不是缺失)",
+                           cal.get("drift_alarm") is True
+                           and any("从 0" in s for s in cal.get("drift_alarms", []))))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "blacklist.json", "labels.json",
+                  "accounts.json", "decisions_log.json", "thresholds.json",
+                  "device_intel.json", "ip_intel.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            rate1 = reconcile.reconcile()["mismatch_rate"]
+            # 只动 device_intel(其余文件 mtime 不变):对账必须重算,不许吐缓存
+            (base / "device_intel.json").write_text("{}", encoding="utf-8")
+            rate2 = reconcile.reconcile()["mismatch_rate"]
+            checks.append(("对账:device_intel 变更使缓存失效并重算", rate1 != rate2))
+
+            # decide 原子性:落盘失败 -> 申请留在队列、进程内名单缓存不被污染
+            actions.blacklist_add("device_id", "t_evil", reason="eval", **{"list": "gray"})
+            pending_before = len(actions.list_pending())
+            bl_before = len(registry.dispatch("blacklist_query",
+                                              {"dimension": "device_id", "value": "t_evil"})["records"])
+            real_path = actions.blacklist_path
+            actions.blacklist_path = lambda: base / "no_such_dir" / "bl.json"
+            try:
+                aid = actions.list_pending()[-1]["action_id"]
+                raised = False
+                try:
+                    actions.decide(aid, approve=True)
+                except OSError:
+                    raised = True
+            finally:
+                actions.blacklist_path = real_path
+            bl_after = len(registry.dispatch("blacklist_query",
+                                             {"dimension": "device_id", "value": "t_evil"})["records"])
+            checks.append(("审批原子性:落盘失败时申请留队、缓存无幻影记录",
+                           raised and len(actions.list_pending()) == pending_before
+                           and bl_before == bl_after == 0))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+    return _report("复检修复回归(离线)", checks)
+
+
 def run_stats_layer() -> int:
     """离线:统计核心的已知答案测试 —— PSI/IV/AUC/KS 这些数学是漂移告警和
     区分度排名的地基,重构一处全线失真且不会有任何工具"报错"。全部用固定
@@ -643,12 +1020,14 @@ def run_cost_layer() -> int:
     s = structural_sizes()
     # 预算史:20 工具期 12000;策略生命周期五件套(feature_risk/adversary_watch/
     # rule_draft_test/appeal_review/appeal_resolve)加入后 26 工具,上调至 14500
-    # (人均 ~550 chars 未松动)。再超说明该合并工具而不是再抬预算。
+    # (人均 ~550 chars 未松动);名单三色 + 灰名单巡检等并入后 31 工具,上调至
+    # 15600(人均 ~500,schema 瘦身让人均反降)。再超说明该合并工具而不是再抬预算。
+    # system prompt 同理:三色名单纪律 + 漂移/申诉纪律并集后上调至 3300。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 14500 chars(现 %d,%d 个工具)"
-         % (s["schemas_chars"], s["tool_count"]), s["schemas_chars"] <= 14500),
-        ("system prompt <= 3000 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 3000),
+        ("工具 schema 总量 <= 15600 chars(现 %d,%d 个工具)"
+         % (s["schemas_chars"], s["tool_count"]), s["schemas_chars"] <= 15600),
+        ("system prompt <= 3300 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 3300),
     ])
 
 
@@ -759,6 +1138,8 @@ def main() -> int:
     failures += run_scan_layer()
     failures += run_graph_layer()
     failures += run_actions_layer()
+    failures += run_whitelist_layer()
+    failures += run_graylist_layer()
     failures += run_policy_layer()
     failures += run_governance_layer()
     failures += run_shadow_layer()
@@ -771,6 +1152,7 @@ def main() -> int:
     failures += run_depth_layer()
     failures += run_strategy_layer()
     failures += run_privacy_layer()
+    failures += run_regression_layer()
     failures += run_cost_layer()
     failures += run_chart_smoke()
     if args.offline:
