@@ -118,22 +118,25 @@ def _draw_profile_header(ax, uid, feats, mon, verdict):
     if acct:
         reg_hit = any(blacklist_query(d, v)["hit"] for d, v in
                       (("ip", acct.get("register_ip")), ("device_id", acct.get("register_device"))) if v)
-        lines.append((_t("注册 %s · 账龄 %d 天 · 渠道 %s · %s · %s · KYC%d · 换绑 %d 次%s" % (
+        kyc_names = {0: "未认证", 1: "手机实名", 2: "身份证实名"}
+        lines.append((_t("注册:%s(账龄 %d 天)· 渠道:%s · 注册方式:%s · 系统:%s · KYC:%s · 换绑:%d 次%s" % (
             pd.to_datetime(acct["registered_at"], unit="s").strftime("%Y-%m-%d"),
             (clock - acct["registered_at"]) // 86400, acct["register_channel"],
             acct["register_method"], acct.get("register_os", "?"),
-            acct["kyc_level"], acct.get("phone_rebind_count", 0),
+            kyc_names.get(acct["kyc_level"], acct["kyc_level"]),
+            acct.get("phone_rebind_count", 0),
             " · [!]注册环境命中名单" if reg_hit else ""),
             "registered %s" % acct["registered_at"]), "#333"))
         ltv = acct.get("ltv", 0.0)
         tier = "high" if ltv >= 1000 else ("medium" if ltv >= 100 else "low")
         tier_note = {"high": "误伤代价高", "medium": "误伤代价中", "low": "误伤代价低"}[tier]
-        lines.append((_t("价值 LTV %.0f(%s,%s)" % (ltv, tier, tier_note), "LTV %.0f" % ltv), "#333"))
+        lines.append((_t("价值:LTV %.0f · 档位:%s(%s)" % (ltv, tier, tier_note),
+                         "LTV %.0f" % ltv), "#333"))
     else:
         lines.append((_t("无账号主档(注册信息缺失)", "no account record"), "#999"))
     reports_v = sum(1 for r in load_reports()
                     if r.get("reported_uid") == uid and r.get("status") == "verified")
-    lines.append((_t("活跃:事件 %d · 跨度 %.1f 天 · IP %d(%s)· 设备 %d · 属实举报 %d" % (
+    lines.append((_t("事件:%d · 活跃跨度:%.1f 天 · IP:%d(%s)· 设备:%d · 属实举报:%d" % (
         feats["event_count"], feats["span_seconds"] / 86400, feats["distinct_ip"],
         "/".join("%s×%d" % kv for kv in ip_type_summary(feats["ips"]).items()),
         feats["distinct_device"], reports_v),
