@@ -202,6 +202,13 @@ def run_gen_layer() -> int:
             # 阈值扫描在带边界样本的大样本上必须有敏感度(慢速 bot / 重度用户
             # 制造的张力),平线说明生成器的阈值张力设计坏了
             sw = chart_threshold_sweep("r002_max_gap_seconds")
+            # 关联分量必须与团伙一一对应:曾因随机 IP 撞号 + 弱边并组,把
+            # 互不相干的 bot 和两个团伙画成一组(idc/proxy IP 不作并组依据)
+            gr = graph_relations()
+            comps_pure = all(
+                len({u.rsplit("_", 1)[0] for u in c["accounts"]}) == 1
+                and c["accounts"][0].startswith("g_ring_")
+                for c in gr["components"])
             # token 成本预算:在同一份大样本上量每个工具的典型返回,超限即红。
             # 教训:rule_backtest 的 per_account 曾单次 18k+ chars,② 的 dict
             # 限幅与工具面瘦身都是这里钉住的。
@@ -237,6 +244,8 @@ def run_gen_layer() -> int:
                 ("阈值扫描有敏感度且归因到误伤增长",
                  sw.get("aggregate_insensitive") is False
                  and sw["rows"][-1]["rule_hits_normal"] > sw["rows"][0]["rule_hits_normal"]),
+                ("关联分量 = 团伙数且无误并组(3 团各自独立)",
+                 gr["component_count"] == 3 and comps_pure),
                 ("单工具结果 <= 5000 chars(最大: %s %d)" % biggest, biggest[1] <= 5000),
                 ("rule_backtest 已瘦身 <= 1500 chars(现 %d)" % sizes["rule_backtest"],
                  sizes["rule_backtest"] <= 1500),
