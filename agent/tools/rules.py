@@ -12,6 +12,17 @@ from .features import feature_stats
 ACTION_ORDER = {"pass": 0, "review": 1, "reject": 2}
 RULE_COUNT = 3  # 当前规则集条数,便于 agent 感知覆盖范围
 
+# R002 阈值:样本里机器人 gap=3s/20 次,正常用户最快 gap=300s/6 次,中间带很宽,
+# 阈值取在带内偏严一侧,改动时用 eval/run_eval.py 第 1 层回归。
+R002_MAX_GAP_SECONDS = 30  # 人手连点很难稳定低于 30s 间隔,留了极端活跃用户余量
+R002_MIN_EVENTS = 10       # 次数下限:偶发快速操作(连领两三张券)不触发
+R002_REJECT_MIN_IPS = 3    # 高频之上再叠加多 IP 轮换,基本可排除人类,升级 reject
+
+# R003 阈值
+R003_HIGH_AMOUNT = 1000.0       # 大额订单:金额越大,盗号销赃收益越高
+R003_CASHOUT_MAX_AMOUNT = 20.0  # 小额套现:金额本身无害,必须叠加领券行为信号
+R003_CASHOUT_MIN_COUPONS = 3
+
 
 def _blacklist_hit(dimension: str, value: str) -> bool:
     """名单联动取数:该维度值是否在黑/灰名单中。"""
@@ -69,65 +80,47 @@ def rule_eval(event: Dict[str, Any]):
     feats = _uid_features(uid)
 
     # ------------------------------------------------------------------
-    # R001 名单硬拦截
-    #
-    # 样本线索:
-    #   u_1009 + ip 203.0.113.66 → 黑名单, reason 含「代理池/盗号」
-    #   dev_emu_9f3a → 灰名单(模拟器)
-    #
-    # 你要决定:
-    #   - 只拦 black,还是 gray 也要管?
-    #   - black 给 reject,gray 给 review 还是也 reject?
-    #   - 查哪些维度:uid / ip / device_id 全查还是只查部分?
+    # R001 名单硬拦截:uid / ip / device_id 三个维度带值的全查。
+    # black 是人工确认过的(盗号工单、代理池),直接 reject;
+    # gray 只是设备指纹嫌疑(模拟器上也有正常用户),给 review 留人工兜底
+    # —— 误伤代价是真实模拟器用户多走一道审核,可接受。
     # ------------------------------------------------------------------
-    # TODO: 实现 R001
-    #
-    # 提示写法(按需删改):
-    # for dim, val in [("uid", uid), ("ip", ip), ("device_id", device_id)]:
-    #     if not val:
-    #         continue
-    #     for rec in _blacklist_records(dim, val):
-    #         action = "reject" if rec["list"] == "black" else "review"
-    #         _hit(hits, "R001", "%s=%s 命中%s名单: %s" % (dim, val, rec["list"], rec["reason"]), action)
+    for dim, val in (("uid", uid), ("ip", ip), ("device_id", device_id)):
+        if not val:
+            continue
+        for rec in _blacklist_records(dim, val):
+            action = "reject" if rec["list"] == "black" else "review"
+            _hit(hits, "R001", "%s=%s 命中%s名单: %s" % (dim, val, rec["list"], rec["reason"]), action)
 
     # ------------------------------------------------------------------
-    # R002 机器行为 / 频率异常
-    #
-    # 样本线索:
-    #   u_1002 → event_count=20, min_gap_seconds=3, distinct_ip=5, 全是 coupon_claim
-    #   u_1001 → event_count=5,  min_gap_seconds=300, 正常用户对照组
-    #
-    # 你要决定:
-    #   - min_gap_seconds 阈值设多少?(3 秒很极端,300 秒就宽松很多)
-    #   - 要不要叠加 event_count 下限,避免偶发快速操作误伤?
-    #   - 是否限定 event_type == "coupon_claim"?
-    #   - 命中给 review 还是 reject?
+    # R002 机器行为 / 频率异常:目前只对 coupon_claim 生效(样本攻击面在
+    # 刷券;扩到 login/order 需按事件类型分别定阈值,不能共用)。
+    # 间隔 + 次数双条件防误伤:单独手快或偶发连点都不触发。
+    # 高频之上再叠加多 IP 轮换时升级 reject —— 单纯高频最多 review,
+    # 因为极端活跃的真人无法完全排除,而"高频 + 换 IP"基本只能是脚本。
     # ------------------------------------------------------------------
-    # TODO: 实现 R002
-    #
-    # 提示写法(按需删改):
-    # if feats and event_type == "coupon_claim":
-    #     gap = feats.get("min_gap_seconds")
-    #     if gap is not None and gap <= ??? and feats["event_count"] >= ???:
-    #         _hit(hits, "R002", "领券间隔 %ds,累计 %d 次" % (gap, feats["event_count"]), "review")
+    if feats and event_type == "coupon_claim":
+        gap = feats.get("min_gap_seconds")
+        if gap is not None and gap <= R002_MAX_GAP_SECONDS and feats["event_count"] >= R002_MIN_EVENTS:
+            action = "reject" if feats["distinct_ip"] >= R002_REJECT_MIN_IPS else "review"
+            _hit(hits, "R002", "领券最短间隔 %ds,累计 %d 次,涉及 %d 个 IP" % (
+                gap, feats["event_count"], feats["distinct_ip"]), action)
 
     # ------------------------------------------------------------------
-    # R003 金额异常
-    #
-    # 样本线索:
-    #   u_1009 order amount=4999 → 盗号销赃场景
-    #   u_1003~u_1005 order amount=9.9 → 灰产小额套现,金额不大但模式可疑
-    #
-    # 你要决定:
-    #   - 只看 amount 绝对值,还是结合名单/设备灰度?
-    #   - 阈值设多少?(4999 明显,9.9 需要和其他信号组合)
-    #   - 未带 amount 的非 order 事件要不要跳过?
+    # R003 金额异常,两个互斥分支:
+    # 大额(>= 1000):销赃收益高,但正常大单也存在,单金额只到 review;
+    #   要不要 reject 交给名单/行为规则叠加决定(u_1009 即由 R001 升到 reject)。
+    # 小额套现(<= 20):9.9 本身无害,必须叠加"此前领券 >= 3 次"的行为
+    #   信号才 review,否则会扫到海量正常小额订单。
+    # 非 order 或未带 amount 的事件不评估。
     # ------------------------------------------------------------------
-    # TODO: 实现 R003
-    #
-    # 提示写法(按需删改):
-    # if event_type == "order" and amount is not None and amount >= ???:
-    #     _hit(hits, "R003", "订单金额 %.2f 超阈值" % amount, "review")
+    if event_type == "order" and amount is not None:
+        if amount >= R003_HIGH_AMOUNT:
+            _hit(hits, "R003", "订单金额 %.2f 达到大额阈值 %.0f" % (amount, R003_HIGH_AMOUNT), "review")
+        elif amount <= R003_CASHOUT_MAX_AMOUNT and feats:
+            coupons = feats["event_types"].get("coupon_claim", 0)
+            if coupons >= R003_CASHOUT_MIN_COUPONS:
+                _hit(hits, "R003", "小额订单 %.2f 且此前领券 %d 次,疑似领券套现" % (amount, coupons), "review")
 
     action = "pass"
     for h in hits:
