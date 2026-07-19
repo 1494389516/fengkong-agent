@@ -123,7 +123,7 @@ def _draw_profile_header(ax, uid, feats, mon, verdict):
             (clock - acct["registered_at"]) // 86400, acct["register_channel"],
             acct["register_method"], acct.get("register_os", "?"),
             acct["kyc_level"], acct.get("phone_rebind_count", 0),
-            " · ⚠注册环境命中名单" if reg_hit else ""),
+            " · [!]注册环境命中名单" if reg_hit else ""),
             "registered %s" % acct["registered_at"]), "#333"))
         ltv = acct.get("ltv", 0.0)
         tier = "high" if ltv >= 1000 else ("medium" if ltv >= 100 else "low")
