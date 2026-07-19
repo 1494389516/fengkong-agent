@@ -22,7 +22,7 @@ from . import tool  # noqa: E402
 from .backtest import backtest  # noqa: E402
 from .datasource import load_events, load_labels  # noqa: E402
 from .featurelib import batch_features  # noqa: E402
-from .monitor import MONITOR_BURST_MIN  # noqa: E402
+from .policy import active_policy  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 OUT = ROOT / "out" / "charts"
@@ -130,12 +130,13 @@ def chart_account_timeline(uid: str):
     ax1.legend(title="IP", loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8)
     ax1.set_title(_t("账号 %s 事件时间线" % uid, "Account %s event timeline" % uid))
 
-    # 下图窗口大小与 account_monitor 默认窗口(300s)对齐,阈值线也来自 monitor,
-    # 让"图上看到的"和"监控报的"是同一个口径。
+    # 下图窗口大小与 account_monitor 默认窗口(300s)对齐;burst 阈值线在
+    # 画图时从 policy 现取(不能 import 时冻结,否则版本更新后图线和监控口径分叉)。
+    burst_min = active_policy()["monitor_burst_min"]
     win = df.set_index("dt").resample("300s").size()
     ax2.bar(win.index, win.values, width=300 / 86400, color="#4e79a7", alpha=0.8)
-    ax2.axhline(MONITOR_BURST_MIN, ls="--", lw=1, color="#e15759",
-                label=_t("burst 阈值 %d" % MONITOR_BURST_MIN, "burst threshold %d" % MONITOR_BURST_MIN))
+    ax2.axhline(burst_min, ls="--", lw=1, color="#e15759",
+                label=_t("burst 阈值 %d" % burst_min, "burst threshold %d" % burst_min))
     ax2.set_ylabel(_t("5 分钟事件数", "events / 5min"))
     ax2.legend(fontsize=8)
     ax2.grid(axis="y", color="#eee")

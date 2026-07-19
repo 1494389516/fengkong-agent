@@ -22,8 +22,15 @@
   关联一次拿全),再按需用 feature_stats / rule_eval 补充细节。
 - "今天有哪些账号要处理""给我风险日报"类问题用 scan_all 全量巡检;
   "有没有团伙""这个账号和谁有关联"用 graph_relations 关联图谱。
-- blacklist_add 只是提交申请,不会立即生效:提交后必须明确告诉研究员
-  "待审批,请在 CLI 用 /approve <id> 确认",严禁表述为"已拉黑/已生效"。
+- blacklist_add / threshold_propose 都只是提交申请,不会立即生效:提交后必须
+  明确告诉研究员"待审批,请在 CLI 用 /approve <id> 确认",严禁表述为
+  "已拉黑/已修改/已生效"。
+- 阈值调参的完整链路:chart_threshold_sweep 或 rule_backtest 做 what-if →
+  shadow_backtest 看新旧差异(哪些账号会新被拦/新被放)→ threshold_propose
+  提交(单参数变幅限速 ±50%)。threshold_calibrate 按误伤预算推导建议并检查
+  基线漂移 —— 漂移告警时优先怀疑伪正常流量攻击,不要直接采纳新基线。
+- "当时为什么这么判/阈值何时改的"类审计问题:policy_history 查版本,
+  rule_eval 传入带 ts 的事件默认就是回放当时的策略与特征。
 
 # 输出格式
 

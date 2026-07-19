@@ -191,6 +191,8 @@ def run_gen_layer() -> int:
             r = backtest()
             wide = r["operating_points"]["flag=review+reject"]
             strict = r["operating_points"]["flag=reject_only"]
+            cal = registry.dispatch("threshold_calibrate", {"fpr_budget": 0.01})
+            realized = cal.get("realized_fpr_normal_wide")
             failures = _report("数据生成 + 大样本回测(离线)", [
                 ("生成器退出码 0", proc.returncode == 0),
                 ("账号数 = 60", r["accounts_evaluated"] == 60),
@@ -198,12 +200,134 @@ def run_gen_layer() -> int:
                 ("宽口径 precision >= 0.8", wide["precision"] >= 0.8),
                 ("宽口径 f1 >= 0.85", wide["f1"] >= 0.85),
                 ("严口径 precision >= 0.7", strict["precision"] >= 0.7),
+                ("校准产出建议阈值", bool(cal.get("suggestions"))),
+                ("建议阈值实测误伤率 <= 5%", realized is not None and realized <= 0.05),
+                ("无参照快照时不误报漂移", cal.get("drift_alarm") is False),
             ])
             print("  宽口径 %s" % wide)
             print("  严口径 %s" % strict)
+            print("  校准建议 %s(实测误伤率 %s)" % (cal.get("suggestions"), realized))
             return failures
         finally:
             os.environ.pop("FK_DATA_DIR", None)
+
+
+def run_policy_layer() -> int:
+    """离线:策略版本化 —— 同一账号的事件,结论随'当时生效的版本'切换;
+    use_current_policy 则让历史事件吃到最新版(评估口径)。"""
+    with tempfile.TemporaryDirectory() as td:
+        for f in ("events_sample.json", "blacklist.json", "labels.json"):
+            shutil.copy(ROOT / "data" / f, Path(td) / f)
+        (Path(td) / "thresholds.json").write_text(json.dumps([
+            {"version": 1, "effective_from": 0, "approved_by": "eval",
+             "note": "基线", "values": {}},
+            {"version": 2, "effective_from": 1784109631, "approved_by": "eval",
+             "note": "大幅放宽 min_events", "values": {"r002_min_events": 99}},
+        ]), encoding="utf-8")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            early = {"uid": "u_1002", "ip": "203.0.113.10", "device_id": "dev_farm_x7",
+                     "type": "coupon_claim", "ts": 1784109630}  # v1 生效期(min_events=10)
+            late = dict(early, ts=1784109657)                   # v2 生效期(min_events=99)
+            r_early = rule_eval(early)
+            r_late = rule_eval(late)
+            r_cur = rule_eval(early, use_current_policy=True)
+            checks = [
+                ("回放 v1 期事件:模式已成立应拦截",
+                 r_early["action"] == "reject" and r_early["policy_version"] == 1),
+                ("回放 v2 期事件:放宽后应放行",
+                 r_late["action"] == "pass" and r_late["policy_version"] == 2),
+                ("同一事件改用当前策略(v2):结论翻转",
+                 r_cur["action"] == "pass" and r_cur["policy_version"] == 2),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("策略版本化(离线,临时目录)", checks)
+
+
+def run_governance_layer() -> int:
+    """离线:阈值提案 → 限速 → 审批落盘 → 漂移告警,全程临时目录。"""
+    with tempfile.TemporaryDirectory() as td:
+        for f in ("events_sample.json", "blacklist.json", "labels.json"):
+            shutil.copy(ROOT / "data" / f, Path(td) / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            r1 = registry.dispatch("threshold_propose",
+                                   {"values": {"r002_min_events": 12}, "reason": "eval:测试"})
+            r_limit = registry.dispatch("threshold_propose",
+                                        {"values": {"r002_max_gap_seconds": 300}, "reason": "eval:大改"})
+            actions.decide(r1.get("action_id", -1), approve=True)
+            from agent.tools.policy import active_policy
+            pol = active_policy()
+            hist = registry.dispatch("policy_history", {})
+            # 把已落盘版本的基线快照改成离谱值,漂移告警必须响
+            tpath = Path(td) / "thresholds.json"
+            versions = json.loads(tpath.read_text(encoding="utf-8"))
+            versions[-1]["baseline_snapshot"] = {"event_count": {"p99": 1}}
+            tpath.write_text(json.dumps(versions), encoding="utf-8")
+            cal = registry.dispatch("threshold_calibrate", {})
+            checks = [
+                ("提案进入待审批", r1.get("status") == "pending_confirmation"),
+                ("超幅提案被限速拒绝", r_limit.get("status") == "rejected_rate_limit"),
+                ("批准后新版本生效", pol["r002_min_events"] == 12 and pol["_version"] == 1),
+                ("版本历史可审计", len(hist.get("versions", [])) == 1),
+                ("基线漂移触发告警", cal.get("drift_alarm") is True),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("策略治理(离线,临时目录)", checks)
+
+
+def run_shadow_layer() -> int:
+    """离线:影子回测 + 覆盖原子性(防部分应用泄漏的回归守卫)。"""
+    r = registry.dispatch("shadow_backtest", {"overrides": {"r002_min_events": 99}})
+    after_shadow = backtest()["operating_points"]["flag=review+reject"]
+    bad = registry.dispatch("rule_backtest", {"overrides": {"r002_min_events": 5, "bogus": 1}})
+    after_bad = backtest()["operating_points"]["flag=review+reject"]
+    return _report("影子回测与覆盖原子性(离线)", [
+        ("影子:u_1002 在候选阈值下会被放过", "u_1002" in r.get("newly_passed", [])),
+        ("影子:宽口径 F1 增量为负", r.get("delta", {}).get("wide_f1", 0) < 0),
+        ("影子跑完当前策略无残留(F1 复原)", after_shadow["f1"] == 1.0),
+        ("含非法键的覆盖整体拒绝(原子)", "error" in bad),
+        ("拒绝后阈值无泄漏(F1 复原)", after_bad["f1"] == 1.0),
+    ])
+
+
+def run_baseline_layer() -> int:
+    """离线:人群基线/百分位 + 自身基线信号 + 配置与 DEFAULTS 一致性。"""
+    from agent.tools.featurelib import percentile_rank, population_baseline
+    from agent.tools.policy import DEFAULTS
+    base = population_baseline()
+    pr_gap = percentile_rank("min_gap_seconds", 3)
+    pr_cnt = percentile_rank("event_count", 20)
+    # 自身基线:临时数据集造一个"老账号突换设备 + 金额突增"的盗号形态
+    with tempfile.TemporaryDirectory() as td:
+        t0 = 1784000000
+        evs = [{"uid": "t_1", "ip": "10.0.0.1", "device_id": "dev_A",
+                "type": "order" if i % 2 else "login", "ts": t0 + i * 40000,
+                **({"amount": 50.0} if i % 2 else {})} for i in range(6)]
+        evs += [
+            {"uid": "t_1", "ip": "10.0.0.2", "device_id": "dev_B", "type": "login",
+             "ts": t0 + 300000},
+            {"uid": "t_1", "ip": "10.0.0.2", "device_id": "dev_B", "type": "order",
+             "ts": t0 + 300600, "amount": 900.0},
+        ]
+        (Path(td) / "events_sample.json").write_text(json.dumps(evs), encoding="utf-8")
+        (Path(td) / "blacklist.json").write_text("[]", encoding="utf-8")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            m = account_monitor("t_1")
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    v1 = json.loads((ROOT / "data" / "thresholds.json").read_text(encoding="utf-8"))[0]["values"]
+    return _report("基线与百分位(离线)", [
+        ("人群基线覆盖关键特征", "min_gap_seconds" in base and base["event_count"]["n"] == 6),
+        ("u_1002 间隔百分位极低(比几乎所有人快)", pr_gap is not None and pr_gap <= 0.2),
+        ("u_1002 事件数百分位最高", pr_cnt == 1.0),
+        ("自身基线:突换设备信号", "self_new_device" in m.get("signal_types", [])),
+        ("自身基线:金额突增信号", "self_amount_spike" in m.get("signal_types", [])),
+        ("thresholds.json v1 与 policy.DEFAULTS 一致", v1 == dict(DEFAULTS)),
+    ])
 
 
 def run_chart_smoke() -> int:
@@ -292,6 +416,10 @@ def main() -> int:
     failures += run_scan_layer()
     failures += run_graph_layer()
     failures += run_actions_layer()
+    failures += run_policy_layer()
+    failures += run_governance_layer()
+    failures += run_shadow_layer()
+    failures += run_baseline_layer()
     failures += run_gen_layer()
     failures += run_chart_smoke()
     if args.offline:

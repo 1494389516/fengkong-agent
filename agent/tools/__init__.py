@@ -60,6 +60,8 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
         return {"error": "%s: %s" % (type(e).__name__, e)}
 
 
-# 导入即注册(注意顺序:rules 依赖 blacklist/features;backtest 依赖 rules;
-# charts 依赖 backtest;monitor 依赖 blacklist;scan 依赖 backtest;graph 依赖 charts)
-from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions  # noqa: E402,F401
+# 导入即注册(注意顺序:rules 依赖 blacklist/featurelib/policy;backtest 依赖
+# rules/policy;charts 依赖 backtest/featurelib/policy;monitor 依赖 blacklist/policy;
+# scan 依赖 backtest;graph 依赖 charts;actions 依赖 policy;calibrate 依赖
+# backtest/featurelib/policy,放最后)
+from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, calibrate  # noqa: E402,F401

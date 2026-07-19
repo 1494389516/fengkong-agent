@@ -56,8 +56,12 @@ def main():
             if not items:
                 print("  [待审批] 队列为空。")
             for a in items:
-                print("  [待审批] #%d %s=%s -> %s名单 | %s" % (
-                    a["action_id"], a["dimension"], a["value"], a["list"], a["reason"]))
+                if a.get("kind", "blacklist_add") == "threshold_change":
+                    print("  [待审批] #%d 阈值变更 %s(现值 %s)| %s" % (
+                        a["action_id"], a["values"], a.get("current", {}), a["reason"]))
+                else:
+                    print("  [待审批] #%d %s=%s -> %s名单 | %s" % (
+                        a["action_id"], a["dimension"], a["value"], a["list"], a["reason"]))
             continue
         if low.startswith("/approve") or low.startswith("/deny"):
             approve = low.startswith("/approve")
@@ -68,6 +72,10 @@ def main():
             a = actions.decide(int(parts[1]), approve=approve)
             if a is None:
                 print("  查无此申请,/pending 查看当前队列。")
+            elif a.get("kind", "blacklist_add") == "threshold_change":
+                print("  [%s] #%d 阈值变更 %s(已记审计日志)" % (
+                    "已批准,新策略版本生效" if approve else "已驳回",
+                    a["action_id"], a["values"]))
             else:
                 print("  [%s] #%d %s=%s -> %s名单(已记审计日志)" % (
                     "已批准并写入" if approve else "已驳回",

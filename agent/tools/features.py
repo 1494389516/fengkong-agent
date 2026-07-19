@@ -7,15 +7,16 @@
 from typing import Optional
 
 from . import tool
-from .featurelib import account_features, accounts_per
+from .featurelib import account_features, accounts_per, percentile_rank
 
 
 @tool(
     name="feature_stats",
     description=(
         "计算某个 uid 的行为特征:事件数、去重 IP/设备、事件类型分布、最短间隔、"
-        "订单统计(次数/最大/累计金额),以及反向基数(该账号的设备/IP 最多被"
-        "几个账号共用,>=3 是团伙信号)。"
+        "订单统计(次数/最大/累计金额)、反向基数(该账号的设备/IP 最多被几个账号"
+        "共用,>=3 是团伙信号),以及人群百分位 population_percentile(证据链引用它:"
+        "min_gap_seconds 百分位低 = 比几乎所有账号都快)。"
         "as_of_ts 取证时点(只统计该时刻之前的事件,评估历史事件时必传,防止"
         "偷看未来);window_seconds 时间窗(只统计最近 N 秒,行为模式类判断用)。"
         "两者都不传 = 全历史。"
@@ -38,4 +39,11 @@ def feature_stats(uid: str, as_of_ts: Optional[float] = None,
             (accounts_per("device_id", d, as_of_ts)["count"] for d in r["devices"]), default=0)
         r["accounts_per_ip_max"] = max(
             (accounts_per("ip", ip, as_of_ts)["count"] for ip in r["ips"]), default=0)
+        # 人群百分位:<= 该值的账号占比。min_gap_seconds 百分位低 = 比几乎所有人都快。
+        r["population_percentile"] = {
+            f: percentile_rank(f, r[f])
+            for f in ("event_count", "distinct_ip", "coupon_claims",
+                      "min_gap_seconds", "order_amount_max")
+            if r.get(f) is not None
+        }
     return r

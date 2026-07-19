@@ -55,6 +55,10 @@ def blacklist_path() -> Path:
     return data_dir() / "blacklist.json"
 
 
+def thresholds_path() -> Path:
+    return data_dir() / "thresholds.json"
+
+
 def pending_actions_path() -> Path:
     return data_dir() / "pending_actions.json"
 

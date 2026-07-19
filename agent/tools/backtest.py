@@ -15,20 +15,14 @@
 from typing import Dict, Iterable, List, Optional
 
 from . import tool
+from . import policy
 from . import rules
 from .datasource import load_events, load_labels
 from .rules import rule_eval
 
-# 可被 what-if 覆盖的阈值:参数名 -> rules 模块里的常量名
-OVERRIDABLE = {
-    "r002_max_gap_seconds": "R002_MAX_GAP_SECONDS",
-    "r002_min_events": "R002_MIN_EVENTS",
-    "r002_reject_min_ips": "R002_REJECT_MIN_IPS",
-    "r003_high_amount": "R003_HIGH_AMOUNT",
-    "r003_cashout_max_amount": "R003_CASHOUT_MAX_AMOUNT",
-    "r003_cashout_min_coupons": "R003_CASHOUT_MIN_COUPONS",
-    "r003_cashout_window_seconds": "R003_CASHOUT_WINDOW_SECONDS",
-}
+# 可被 what-if 覆盖的阈值键(规则组;monitor 组不在列,回测不跑监控)。
+# 覆盖经 policy.set_overrides 生效:先全量校验后原子应用,finally 恢复旧快照。
+OVERRIDABLE = policy.RULE_KEYS
 
 
 def account_verdicts(uids: Iterable[str], events: List[Dict]) -> Dict[str, Dict]:
@@ -40,7 +34,9 @@ def account_verdicts(uids: Iterable[str], events: List[Dict]) -> Dict[str, Dict]
         hit_rules: set = set()
         reasons: List[str] = []
         for e in (e for e in events if e["uid"] == uid):
-            r = rule_eval(e)
+            # 用当前策略评估历史数据(评估口径);逐事件回放当时策略是审计口径,
+            # 那个走 rule_eval 默认行为
+            r = rule_eval(e, use_current_policy=True)
             if rules.ACTION_ORDER[r["action"]] > rules.ACTION_ORDER[worst]:
                 worst = r["action"]
             for h in r["hits"]:
@@ -59,16 +55,16 @@ def _prf(tp: int, fp: int, fn: int) -> Dict[str, float]:
 
 
 def backtest(overrides: Optional[Dict] = None):
-    """核心逻辑,同时供工具调用、chart_threshold_sweep 与离线 eval 复用。"""
+    """核心逻辑,同时供工具调用、chart_threshold_sweep、shadow_compare 与离线 eval 复用。
+
+    覆盖必须整体校验后才应用(原子):部分应用会把错误值泄漏给进程内
+    后续所有调用。finally 恢复旧快照而非清空,嵌套/连续调用互不污染。"""
     overrides = overrides or {}
-    applied, saved = {}, {}
-    for k, v in overrides.items():
-        if k not in OVERRIDABLE:
-            return {"error": "不支持的阈值参数: %s(可用: %s)" % (k, ", ".join(OVERRIDABLE))}
-        const = OVERRIDABLE[k]
-        saved[const] = getattr(rules, const)
-        setattr(rules, const, v)  # rule_eval 读的是 rules 模块全局,这里改了立即生效
-        applied[k] = v
+    bad = [k for k in overrides if k not in OVERRIDABLE]
+    if bad:
+        return {"error": "不支持的阈值参数: %s(可用: %s)" % (", ".join(bad), ", ".join(OVERRIDABLE))}
+    applied = dict(overrides)
+    prev = policy.set_overrides(overrides)
     try:
         labels = load_labels()
         events = load_events()
@@ -108,16 +104,65 @@ def backtest(overrides: Optional[Dict] = None):
             "misclassified_at_review_point": misclassified,
         }
     finally:
-        for const, v in saved.items():
-            setattr(rules, const, v)
+        policy.restore_overrides(prev)
+
+
+def shadow_compare(overrides: Dict):
+    """影子对比:当前策略 vs 候选阈值,对同一批标注账号各跑一次回测。
+    切换阈值前的必经步骤 —— 不看差异直接切换,就是拿反馈回路赌运气。"""
+    base = backtest()
+    cand = backtest(overrides)
+    if "error" in cand:
+        return cand
+    flagged = lambda r, uid: r["per_account"][uid]["predicted"] != "pass"  # noqa: E731
+    newly_flagged = sorted(u for u in base["per_account"]
+                           if not flagged(base, u) and flagged(cand, u))
+    newly_passed = sorted(u for u in base["per_account"]
+                          if flagged(base, u) and not flagged(cand, u))
+    wb = base["operating_points"]["flag=review+reject"]
+    wc = cand["operating_points"]["flag=review+reject"]
+    return {
+        "overrides": overrides,
+        "active": base["operating_points"],
+        "candidate": cand["operating_points"],
+        "delta": {"wide_%s" % k: round(wc[k] - wb[k], 4)
+                  for k in ("precision", "recall", "f1")},
+        "newly_flagged": newly_flagged,
+        "newly_passed": newly_passed,
+        "changed_accounts": len(newly_flagged) + len(newly_passed),
+    }
+
+
+@tool(
+    name="shadow_backtest",
+    description=(
+        "影子回测:当前生效策略 vs 候选阈值,对同一批标注账号的差异对比 —— "
+        "双方指标、指标增量、以及哪些账号会'新被拦下'(newly_flagged)/"
+        "'新被放过'(newly_passed)。提议或批准任何阈值变更前必须先看这个。"
+        "overrides 键同 rule_backtest。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "overrides": {
+                "type": "object",
+                "description": "候选阈值,如 {\"r002_max_gap_seconds\": 15}",
+            },
+        },
+        "required": ["overrides"],
+    },
+)
+def shadow_backtest(overrides: Dict):
+    return shadow_compare(overrides or {})
 
 
 @tool(
     name="rule_backtest",
     description=(
-        "对全量标注账号回测当前规则集,返回两个口径(flag=review+reject / flag=reject_only)"
-        "的混淆矩阵与 precision/recall/F1、逐账号预测、误判清单。"
-        "overrides 可临时覆盖阈值做 what-if(不修改配置),如 {\"r002_max_gap_seconds\": 60}。"
+        "对全量标注账号回测当前生效策略(评估口径:当前阈值 × 历史数据),返回两个"
+        "口径(flag=review+reject / flag=reject_only)的混淆矩阵与 precision/recall/F1、"
+        "逐账号预测、误判清单。overrides 可临时覆盖阈值做 what-if(不修改配置),"
+        "如 {\"r002_max_gap_seconds\": 60};可用键:" + ", ".join(OVERRIDABLE) + "。"
         "凡涉及规则效果/指标的问题必须用本工具取数,不要自行推算。"
     ),
     parameters={
