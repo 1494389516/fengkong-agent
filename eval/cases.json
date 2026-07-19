@@ -48,6 +48,18 @@
       "event": {"uid": "u_1002", "ip": "203.0.113.14", "device_id": "dev_farm_x7", "type": "coupon_claim", "ts": 1784109657},
       "expect_action": "reject",
       "expect_rules": ["R002"]
+    },
+    {
+      "name": "新号大额应转人工(R004 账龄错配)",
+      "event": {"uid": "u_1002", "ip": "203.0.113.10", "device_id": "dev_farm_x7", "type": "order", "amount": 500, "ts": 1784110000},
+      "expect_action": "review",
+      "expect_rules": ["R004"]
+    },
+    {
+      "name": "老客同等金额不触发新号规则(误伤守卫)",
+      "event": {"uid": "u_1001", "ip": "112.96.100.23", "device_id": "dev_iphone_a1", "type": "order", "amount": 500, "ts": 1784100000},
+      "expect_action": "pass",
+      "expect_rules": []
     }
   ],
   "backtest_checks": {

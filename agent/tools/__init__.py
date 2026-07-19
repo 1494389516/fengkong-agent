@@ -64,4 +64,4 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
 # rules/policy;charts 依赖 backtest/featurelib/policy;monitor 依赖 blacklist/policy;
 # scan 依赖 backtest;graph 依赖 charts;actions 依赖 policy;calibrate 依赖
 # backtest/featurelib/policy,放最后)
-from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, calibrate  # noqa: E402,F401
+from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, calibrate, profile  # noqa: E402,F401

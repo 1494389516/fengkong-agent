@@ -51,6 +51,16 @@ def load_labels() -> Dict[str, Dict]:
             if not k.startswith("_")}
 
 
+def load_accounts() -> Dict[str, Dict]:
+    """账号主档(注册上下文 + 价值信息)。文件缺失返回空:临时数据集/
+    旧数据集没有主档时,依赖它的规则(R004)与档案字段自动降级。"""
+    try:
+        return {k: v for k, v in _load_json(data_dir() / "accounts.json").items()
+                if not k.startswith("_")}
+    except FileNotFoundError:
+        return {}
+
+
 def blacklist_path() -> Path:
     return data_dir() / "blacklist.json"
 

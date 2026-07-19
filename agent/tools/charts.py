@@ -44,6 +44,8 @@ SWEEP_DEFAULTS = {
     "r003_cashout_max_amount": [5, 10, 20, 50, 100],
     "r003_cashout_min_coupons": [1, 2, 3, 4, 5],
     "r003_cashout_window_seconds": [600, 1800, 3600, 7200, 14400],
+    "r004_max_account_age_seconds": [3600, 86400, 259200, 604800, 1209600],
+    "r004_min_amount": [50, 100, 200, 500, 1000],
 }
 
 

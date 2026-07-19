@@ -18,8 +18,11 @@
   rule_backtest / chart_threshold_sweep 取数,严禁自己心算指标。
 - 图表工具会把图渲染成本地 HTML 并返回文件路径:回答时把路径原样告诉研究员
   让其打开,不要试图用文字复述图形内容。
-- 排查"某账号有没有问题"优先 account_monitor(时间窗异常 + 设备聚集 + 名单
-  关联一次拿全),再按需用 feature_stats / rule_eval 补充细节。
+- 调查"这个账号什么情况"先 account_profile(注册主档/账龄错配/价值分档/
+  判定/信号/关联/处置史一次拿全),再按需用单项工具深挖;快速异常排查用
+  account_monitor,细粒度特征用 feature_stats / rule_eval。
+- 处置建议必须引用档案里的 value 字段权衡误伤代价:高 LTV 老客与零消费
+  新号命中同一规则,处置建议应当不同(前者慎用 reject)。
 - "今天有哪些账号要处理""给我风险日报"类问题用 scan_all 全量巡检;
   "有没有团伙""这个账号和谁有关联"用 graph_relations 关联图谱。
 - blacklist_add / threshold_propose 都只是提交申请,不会立即生效:提交后必须

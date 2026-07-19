@@ -330,6 +330,29 @@ def run_baseline_layer() -> int:
     ])
 
 
+def run_profile_layer() -> int:
+    """离线:账号档案 —— 主档/账龄错配/价值分档/注册环境联查/关联汇总。"""
+    from agent.tools.profile import account_profile
+    p9 = account_profile("u_1009")   # 老号高价值被盗形态
+    p2 = account_profile("u_1002")   # 新号刷券形态
+    p3 = account_profile("u_1003")   # 灰名单设备批量注册形态
+    px = account_profile("u_9999")   # 无主档无事件,须优雅降级
+    return _report("账号档案(离线)", [
+        ("u_1009:老号高价值,误伤代价 high",
+         p9["found_account"] and p9["age_days"] > 300 and p9["value"]["tier"] == "high"),
+        ("u_1009:识别出案发设备非注册设备",
+         any("非注册设备" in f for f in p9.get("registration_flags", []))),
+        ("u_1002:新号(账龄 < 1 天)且判定 reject",
+         p2["age_days"] < 1 and p2["current_verdict"]["predicted"] == "reject"),
+        ("u_1003:注册设备命中灰名单",
+         any("gray" in f for f in p3.get("registration_flags", []))),
+        ("u_1003:关联分量含团伙三账号",
+         (p3.get("relations") or {}).get("accounts") == ["u_1003", "u_1004", "u_1005"]),
+        ("无主档账号优雅降级",
+         px["found_account"] is False and px["found_events"] is False),
+    ])
+
+
 def run_chart_smoke() -> int:
     """离线:图表冒烟 —— 两类图各渲染一次,文件真实落盘即过。"""
     print("\n== 图表冒烟(离线)==")
@@ -420,6 +443,7 @@ def main() -> int:
     failures += run_governance_layer()
     failures += run_shadow_layer()
     failures += run_baseline_layer()
+    failures += run_profile_layer()
     failures += run_gen_layer()
     failures += run_chart_smoke()
     if args.offline:

@@ -36,6 +36,9 @@ DEFAULTS: Dict[str, float] = {
     "r003_cashout_max_amount": 20.0,  # 小额套现:金额本身无害,须叠加领券信号
     "r003_cashout_min_coupons": 3,
     "r003_cashout_window_seconds": 3600,  # 会话口径:领券->下单 1 小时内才算套现模式
+    # R004 账龄错配:新号做老号的事。信任要靠时间积累,攻击者最缺的就是时间
+    "r004_max_account_age_seconds": 604800,  # 注册 7 天内算新号
+    "r004_min_amount": 200.0,                # 新号订单金额下限,低于此不值得看
     # 监控窗口信号(与 R002 分开:监控偏灵敏、规则偏保守)
     "monitor_burst_min": 8,
     "monitor_ip_churn_min": 3,
@@ -53,7 +56,8 @@ DEFAULTS: Dict[str, float] = {
 # monitor_*/self_* 不在此列:回测不跑监控,覆盖它们只会误导。
 RULE_KEYS = ("r002_max_gap_seconds", "r002_min_events", "r002_reject_min_ips",
              "r003_high_amount", "r003_cashout_max_amount",
-             "r003_cashout_min_coupons", "r003_cashout_window_seconds")
+             "r003_cashout_min_coupons", "r003_cashout_window_seconds",
+             "r004_max_account_age_seconds", "r004_min_amount")
 
 MAX_CHANGE_RATIO = 0.5  # 提案限速:单参数变幅超 ±50% 拒绝,防一次校准被极端数据带飞
 

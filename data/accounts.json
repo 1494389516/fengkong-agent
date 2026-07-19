@@ -1,0 +1,63 @@
+{
+  "_comment": "账号主档:注册上下文(账号的'出生证明',事后行为可伪装、出生环境洗不掉)+ 价值信息(LTV 用于评估误伤代价)。ts 均为 unix 秒;kyc_level: 0=无 1=手机实名 2=身份证。",
+  "u_1001": {
+    "registered_at": 1750003200,
+    "register_channel": "appstore_organic",
+    "register_method": "phone",
+    "register_ip": "112.96.100.23",
+    "register_device": "dev_iphone_a1",
+    "kyc_level": 2,
+    "ltv": 3450.0,
+    "phone_rebind_count": 0
+  },
+  "u_1002": {
+    "registered_at": 1784100000,
+    "register_channel": "web_promo_x",
+    "register_method": "email",
+    "register_ip": "203.0.113.10",
+    "register_device": "dev_farm_x7",
+    "kyc_level": 0,
+    "ltv": 0.0,
+    "phone_rebind_count": 0
+  },
+  "u_1003": {
+    "registered_at": 1784100000,
+    "register_channel": "invite",
+    "register_method": "phone",
+    "register_ip": "198.51.100.20",
+    "register_device": "dev_emu_9f3a",
+    "kyc_level": 0,
+    "ltv": 9.9,
+    "phone_rebind_count": 0
+  },
+  "u_1004": {
+    "registered_at": 1784100120,
+    "register_channel": "invite",
+    "register_method": "phone",
+    "register_ip": "198.51.100.21",
+    "register_device": "dev_emu_9f3a",
+    "kyc_level": 0,
+    "ltv": 9.9,
+    "phone_rebind_count": 0
+  },
+  "u_1005": {
+    "registered_at": 1784100240,
+    "register_channel": "invite",
+    "register_method": "phone",
+    "register_ip": "198.51.100.22",
+    "register_device": "dev_emu_9f3a",
+    "kyc_level": 0,
+    "ltv": 9.9,
+    "phone_rebind_count": 0
+  },
+  "u_1009": {
+    "registered_at": 1755043200,
+    "register_channel": "appstore_organic",
+    "register_method": "phone",
+    "register_ip": "116.25.40.18",
+    "register_device": "dev_iphone_b7",
+    "kyc_level": 2,
+    "ltv": 8200.0,
+    "phone_rebind_count": 1
+  }
+}

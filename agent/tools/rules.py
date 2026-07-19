@@ -7,11 +7,12 @@ from typing import Any, Dict, List, Optional
 
 from . import tool
 from .blacklist import blacklist_query
+from .datasource import load_accounts
 from .featurelib import account_features
 from .policy import active_policy
 
 ACTION_ORDER = {"pass": 0, "review": 1, "reject": 2}
-RULE_COUNT = 3  # 当前规则集条数,便于 agent 感知覆盖范围
+RULE_COUNT = 4  # 当前规则集条数,便于 agent 感知覆盖范围
 
 # 阈值不再是本文件常量:全部经 policy.active_policy() 解析(版本化 + what-if
 # 覆盖),定阈依据见 policy.DEFAULTS 的注释,数值回归见 eval 第 1 层。
@@ -133,6 +134,21 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
             if coupons >= p["r003_cashout_min_coupons"]:
                 _hit(hits, "R003", "下单前 %d 分钟内领券 %d 次后下小额订单 %.2f,疑似领券套现"
                      % (int(p["r003_cashout_window_seconds"]) // 60, coupons, amount), "review")
+
+    # ------------------------------------------------------------------
+    # R004 新号大额:账龄错配 —— 新号做老号的事。正常用户的消费信任靠时间
+    # 积累,注册没几天就下大额单不是典型生命周期,而时间恰是攻击者最缺的。
+    # 只在事件带 ts 且有账号主档时评估(账龄 = 事件 ts - 注册时间;无 ts 的
+    # 假设性咨询没有时点,无主档则数据缺失 —— 生产上主档缺失本身应告警)。
+    # review 而非 reject:也可能是真实新客首单,误伤代价高,留人工兜底。
+    # ------------------------------------------------------------------
+    if event_type == "order" and amount is not None and as_of is not None:
+        acct = load_accounts().get(uid)
+        if acct and amount >= p["r004_min_amount"]:
+            age = as_of - acct["registered_at"]
+            if 0 <= age <= p["r004_max_account_age_seconds"]:
+                _hit(hits, "R004", "注册仅 %.1f 小时即下单 %.2f(新号大额)"
+                     % (age / 3600, amount), "review")
 
     action = "pass"
     for h in hits:

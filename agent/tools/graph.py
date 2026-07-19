@@ -44,6 +44,18 @@ def _component_info(nodes, blacklisted: dict, labels: dict) -> dict:
     }
 
 
+def component_summary(uid: str):
+    """某账号所在关联分量的结构化描述(不渲染图)。account_profile 复用;
+    找不到该账号返回 None。"""
+    g = _build_graph()
+    node = ("uid", uid)
+    if node not in g:
+        return None
+    blacklisted = {(r["dimension"], r["value"]): r["list"] for r in load_blacklist()}
+    labels = {k: v["label"] for k, v in load_labels().items()}
+    return _component_info(nx.node_connected_component(g, node), blacklisted, labels)
+
+
 @tool(
     name="graph_relations",
     description=(
