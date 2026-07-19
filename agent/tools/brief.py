@@ -34,15 +34,25 @@ def daily_brief():
     alerts: Dict[str, object] = {}
     quiet: List[str] = []
 
-    def _collect(name: str, report: Dict, key: str = "alert_text"):
-        text = report.get(key)
+    # 告警按确认状态分流(ops.filter_acked):已确认的只计数,恶化的重浮
+    from .ops import filter_acked, watched_status
+
+    def _collect(name: str, report: Dict, raw_alarms: List[str] = None):
+        raw = raw_alarms if raw_alarms is not None else (report.get("alarms") or [])
         if report.get("found") is False:
             quiet.append("%s(数据不足以分桶)" % name)
-        elif text:
-            alerts[name] = text
+            return
+        flt = filter_acked(raw)
+        if report.get("tail_bucket_partial") and flt["active"]:
+            flt["active"].append("(末桶可能未采集完整,告警需复核)")
+        if flt["active"]:
+            alerts[name] = flt["active"]
         else:
-            quiet.append(name)
+            quiet.append(name + ("(已确认 %d 条)" % flt["acked_count"]
+                                 if flt["acked_count"] else ""))
+        acked_total[0] += flt["acked_count"]
 
+    acked_total = [0]
     sc = scan_all()
     rd = rule_drift()
     _collect("feature_drift", feature_drift())
@@ -50,10 +60,7 @@ def daily_brief():
     _collect("adversary_watch", adversary_watch())
     fr = feature_risk(time_grain="day")
     decay = (fr.get("risk_trend") or {}).get("decay_alarms") or []
-    if decay:
-        alerts["feature_decay"] = decay
-    else:
-        quiet.append("feature_decay")
+    _collect("feature_decay", {"found": True}, decay)
 
     appeals_pending = sum(1 for a in load_appeals() if a.get("status") == "pending")
     pm = postmortems_path()
@@ -67,11 +74,14 @@ def daily_brief():
         },
         "alerts": alerts,
         "alert_count": len(alerts),
+        "acked_alarms": acked_total[0],
         "quiet": quiet,
+        **({"watched": ws} if (ws := watched_status()) else {}),
         "appeals_pending": appeals_pending,
         "postmortems_total": postmortems,
         "note": "深挖:命中理由 scan_all;漂移 feature_drift/rule_drift;对抗 "
-                "adversary_watch;衰减 feature_risk(time_grain);申诉 appeal_review",
+                "adversary_watch;衰减 feature_risk(time_grain);申诉 appeal_review;"
+                "告警确认/盯梢 duty_ops",
     }
     # 模拟失信标记跟着聚合走:rule_drift 是模拟类,它带了就必须转述
     sim = rd.get("sim_consistency")

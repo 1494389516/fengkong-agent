@@ -110,6 +110,14 @@ def appeals_path() -> Path:
     return data_dir() / "appeals.json"
 
 
+def watchlist_path() -> Path:
+    return data_dir() / "watchlist.json"
+
+
+def alert_acks_path() -> Path:
+    return data_dir() / "alert_acks.json"
+
+
 def postmortems_path() -> Path:
     return data_dir() / "postmortems.jsonl"
 
