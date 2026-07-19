@@ -4,6 +4,8 @@
 
 第 1 层 规则层(离线):对标注事件直接跑 rule_eval,比对期望处置与命中规则。
         零成本、确定性,改规则/阈值后必跑,防回归也防误伤(案例集里有守卫案例)。
+        同属离线的还有:指标回测基线、监控信号、全量巡检、关联图谱、
+        处置写流程(临时目录)、数据生成器 + 大样本回测下限、图表冒烟。
 第 2 层 轨迹层(需 DEEPSEEK_API_KEY):检查 agent 是否遵守"先取证再下结论"
         —— 每个案例必须调过期望工具之一,凭空下结论直接判负。
 第 3 层 回答层(需 DEEPSEEK_API_KEY):golden case 关键词断言 + 每案例
@@ -18,17 +20,40 @@
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# 评估必须跑在确定性的手工样本上,清掉可能残留的数据集切换
+os.environ.pop("FK_DATA_DIR", None)
+os.environ.pop("FK_DATASET", None)
+
+from agent import tools as registry  # noqa: E402
+from agent.tools import actions  # noqa: E402
 from agent.tools.backtest import backtest  # noqa: E402
+from agent.tools.blacklist import blacklist_query  # noqa: E402
 from agent.tools.charts import (chart_account_timeline, chart_cohort_features,  # noqa: E402
                                 chart_threshold_sweep)
+from agent.tools.graph import graph_relations  # noqa: E402
 from agent.tools.monitor import account_monitor  # noqa: E402
 from agent.tools.rules import rule_eval  # noqa: E402
+from agent.tools.scan import scan_all  # noqa: E402
+
+
+def _report(title: str, checks) -> int:
+    """打印一组 (名称, 是否通过) 检查,返回失败数。"""
+    print("\n== %s ==" % title)
+    failures = 0
+    for name, ok in checks:
+        if not ok:
+            failures += 1
+        print("  [%s] %s" % ("PASS" if ok else "FAIL", name))
+    return failures
 
 
 def load_cases():
@@ -96,6 +121,88 @@ def run_monitor_layer(cases) -> int:
         for p in problems:
             print("         问题:%s" % p)
     return failures
+
+
+def run_scan_layer() -> int:
+    """离线:全量巡检结果与规则层口径一致。"""
+    r = scan_all()
+    reject = {x["uid"] for x in r["reject"]}
+    review = {x["uid"] for x in r["review"]}
+    return _report("全量巡检(离线)", [
+        ("reject 组 = {u_1002, u_1009}", reject == {"u_1002", "u_1009"}),
+        ("review 组 = 套现团伙三账号", review == {"u_1003", "u_1004", "u_1005"}),
+        ("pass 计数 = 1(仅 u_1001)", r["pass_count"] == 1),
+    ])
+
+
+def run_graph_layer() -> int:
+    """离线:关联图谱应恰好找出样本里的一个设备共用团伙。"""
+    r = graph_relations()
+    comp = r["components"][0] if r["components"] else {}
+    return _report("关联图谱(离线)", [
+        ("样本恰有 1 个多账号分量", r["component_count"] == 1),
+        ("分量成员为套现团伙三账号", comp.get("accounts") == ["u_1003", "u_1004", "u_1005"]),
+        ("共用设备为灰名单模拟器", "dev_emu_9f3a" in comp.get("devices", [])
+         and any("gray" in h for h in comp.get("blacklist_hits", []))),
+        ("图谱 PNG 落盘", bool(r["chart_path"]) and (ROOT / r["chart_path"]).exists()),
+    ])
+
+
+def run_actions_layer() -> int:
+    """离线:处置写入的两阶段流程,在临时目录里走全程(不碰真实数据)。"""
+    with tempfile.TemporaryDirectory() as td:
+        shutil.copy(ROOT / "data" / "blacklist.json", Path(td) / "blacklist.json")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            req = {"dimension": "uid", "value": "u_evil", "list": "black",
+                   "reason": "eval:测试流程"}
+            r1 = registry.dispatch("blacklist_add", dict(req))
+            aid = r1.get("action_id", -1)
+            r_dup = registry.dispatch("blacklist_add", dict(req))
+            before = blacklist_query("uid", "u_evil")["hit"]
+            actions.decide(aid, approve=True)
+            after = blacklist_query("uid", "u_evil")["hit"]
+            r_again = registry.dispatch("blacklist_add", dict(req))
+            return _report("处置写流程(离线,临时目录)", [
+                ("提交进入待审批", r1.get("status") == "pending_confirmation"),
+                ("重复提交防重", r_dup.get("status") == "already_pending"),
+                ("批准前名单未生效", before is False),
+                ("批准后名单生效", after is True),
+                ("已在名单的重复申请被拒", r_again.get("status") == "already_listed"),
+                ("审计日志落盘", (Path(td) / "audit.jsonl").exists()),
+            ])
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+
+def run_gen_layer() -> int:
+    """离线:生成器产出小规模数据集,回测指标须过下限。
+    下限故意留了余量(生成含随机性,虽然种子固定,但规则阈值调整后指标会漂),
+    跌破下限说明规则对典型欺诈模式的覆盖坏了,而不只是数值抖动。"""
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "gen"
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "data" / "gen_sample.py"),
+             "--normal", "40", "--bots", "4", "--rings", "3", "--stolen", "3",
+             "--seed", "7", "--out", str(out)],
+            capture_output=True, text=True)
+        os.environ["FK_DATA_DIR"] = str(out)
+        try:
+            r = backtest()
+            wide = r["operating_points"]["flag=review+reject"]
+            strict = r["operating_points"]["flag=reject_only"]
+            failures = _report("数据生成 + 大样本回测(离线)", [
+                ("生成器退出码 0", proc.returncode == 0),
+                ("账号数 = 60", r["accounts_evaluated"] == 60),
+                ("宽口径 recall >= 0.9", wide["recall"] >= 0.9),
+                ("宽口径 f1 >= 0.75", wide["f1"] >= 0.75),
+                ("严口径 precision >= 0.7", strict["precision"] >= 0.7),
+            ])
+            print("  宽口径 %s" % wide)
+            print("  严口径 %s" % strict)
+            return failures
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
 
 
 def run_chart_smoke() -> int:
@@ -181,6 +288,10 @@ def main() -> int:
     failures = run_rule_layer(cases["rule_cases"])
     failures += run_backtest_layer(cases["backtest_checks"])
     failures += run_monitor_layer(cases["monitor_cases"])
+    failures += run_scan_layer()
+    failures += run_graph_layer()
+    failures += run_actions_layer()
+    failures += run_gen_layer()
     failures += run_chart_smoke()
     if args.offline:
         pass

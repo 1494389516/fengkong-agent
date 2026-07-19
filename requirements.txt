@@ -3,3 +3,4 @@ pyyaml>=6.0
 matplotlib>=3.8
 pandas>=2.0
 seaborn>=0.13
+networkx>=3.0

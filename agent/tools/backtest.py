@@ -12,15 +12,12 @@
 两者的差值就是"人工审核队列在扛多少召回",是评估 gray→review 这类
 柔性处置价值的直接证据。
 """
-import json
-from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Iterable, List, Optional
 
 from . import tool
 from . import rules
+from .datasource import load_events, load_labels
 from .rules import rule_eval
-
-DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 # 可被 what-if 覆盖的阈值:参数名 -> rules 模块里的常量名
 OVERRIDABLE = {
@@ -33,8 +30,24 @@ OVERRIDABLE = {
 }
 
 
-def _load(name: str):
-    return json.loads((DATA_DIR / name).read_text(encoding="utf-8"))
+def account_verdicts(uids: Iterable[str], events: List[Dict]) -> Dict[str, Dict]:
+    """逐账号跑规则集:账号内任一事件命中即记入,处置取最重。
+    scan_all(全量巡检)与 backtest(指标回测)共用这一份口径。"""
+    verdicts = {}
+    for uid in uids:
+        worst = "pass"
+        hit_rules: set = set()
+        reasons: List[str] = []
+        for e in (e for e in events if e["uid"] == uid):
+            r = rule_eval(e)
+            if rules.ACTION_ORDER[r["action"]] > rules.ACTION_ORDER[worst]:
+                worst = r["action"]
+            for h in r["hits"]:
+                if h["rule_id"] not in hit_rules:
+                    reasons.append("%s: %s" % (h["rule_id"], h["reason"]))
+                hit_rules.add(h["rule_id"])
+        verdicts[uid] = {"predicted": worst, "rules": sorted(hit_rules), "reasons": reasons[:3]}
+    return verdicts
 
 
 def _prf(tp: int, fp: int, fn: int) -> Dict[str, float]:
@@ -56,18 +69,13 @@ def backtest(overrides: Optional[Dict] = None):
         setattr(rules, const, v)  # rule_eval 读的是 rules 模块全局,这里改了立即生效
         applied[k] = v
     try:
-        labels = {k: v for k, v in _load("labels.json").items() if not k.startswith("_")}
-        events = _load("events_sample.json")
-        per_account = {}
-        for uid, meta in labels.items():
-            worst = "pass"
-            hit_rules = set()
-            for e in (e for e in events if e["uid"] == uid):
-                r = rule_eval(e)
-                if rules.ACTION_ORDER[r["action"]] > rules.ACTION_ORDER[worst]:
-                    worst = r["action"]
-                hit_rules |= {h["rule_id"] for h in r["hits"]}
-            per_account[uid] = {"label": meta["label"], "predicted": worst, "rules": sorted(hit_rules)}
+        labels = load_labels()
+        events = load_events()
+        verdicts = account_verdicts(labels.keys(), events)
+        per_account = {
+            uid: {"label": labels[uid]["label"], "predicted": v["predicted"], "rules": v["rules"]}
+            for uid, v in verdicts.items()
+        }
 
         points = {}
         for point, flagged_actions in (("flag=review+reject", ("review", "reject")),

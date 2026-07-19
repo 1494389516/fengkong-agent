@@ -8,7 +8,6 @@
 - 中文标题依赖 CJK 字体,启动时探测,探测不到回退英文标题 ——
   图内数据文本(uid/ip/事件类型/指标名)本来就是 ASCII,不受影响。
 """
-import json
 from pathlib import Path
 from typing import List, Optional
 
@@ -21,12 +20,11 @@ import seaborn as sns  # noqa: E402
 
 from . import tool  # noqa: E402
 from .backtest import backtest  # noqa: E402
+from .datasource import load_events, load_labels  # noqa: E402
 from .monitor import MONITOR_BURST_MIN  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 OUT = ROOT / "out" / "charts"
-DATA = ROOT / "data" / "events_sample.json"
-LABELS = ROOT / "data" / "labels.json"
 
 # chart_cohort_features 的特征列(与 heatmap/箱线图共用)
 FEATURE_COLS = ["event_count", "distinct_ip", "distinct_device",
@@ -80,7 +78,7 @@ def _save(fig, filename: str) -> str:
 
 
 def _events_df(uid: Optional[str] = None) -> pd.DataFrame:
-    df = pd.DataFrame(json.loads(DATA.read_text(encoding="utf-8")))
+    df = pd.DataFrame(load_events())
     if uid is not None:
         df = df[df["uid"] == uid]
     if df.empty:
@@ -204,8 +202,7 @@ def chart_threshold_sweep(param: str, values: Optional[List[float]] = None):
 
 
 def _labels() -> dict:
-    return {k: v["label"] for k, v in json.loads(LABELS.read_text(encoding="utf-8")).items()
-            if not k.startswith("_")}
+    return {k: v["label"] for k, v in load_labels().items()}
 
 
 def _account_features() -> pd.DataFrame:
@@ -227,6 +224,9 @@ def _account_features() -> pd.DataFrame:
     return feats.sort_values(["label", "uid"])
 
 
+MAX_COHORT_ROWS = 40  # 大数据集下热力图行数上限,超出取事件数 top-N,返回值里注明
+
+
 @tool(
     name="chart_cohort_features",
     description=(
@@ -239,6 +239,12 @@ def _account_features() -> pd.DataFrame:
 )
 def chart_cohort_features():
     feats = _account_features()
+    truncated = None
+    if len(feats) > MAX_COHORT_ROWS:
+        total = len(feats)
+        feats = feats.sort_values("event_count", ascending=False).head(MAX_COHORT_ROWS) \
+                     .sort_values(["label", "uid"])
+        truncated = "共 %d 账号,图中只画事件数 top %d" % (total, MAX_COHORT_ROWS)
     mat = feats[FEATURE_COLS]
     # 列内 min-max 归一化只管颜色,格内仍标原始值 —— 各列量纲差太多,不归一化热力图就废了
     rng = (mat.max() - mat.min()).replace(0, 1)
@@ -270,8 +276,11 @@ def chart_cohort_features():
 
     path = _save(fig, "cohort_features.png")
     records = feats.reset_index().astype(object).where(pd.notna(feats.reset_index()), None)
-    return {
+    result = {
         "chart_path": path,
         "accounts": len(feats),
         "features": records.to_dict("records"),
     }
+    if truncated:
+        result["note"] = truncated
+    return result

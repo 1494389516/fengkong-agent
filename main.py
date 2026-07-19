@@ -2,14 +2,20 @@
 """CLI 入口:python3 main.py 进入交互式对话。
 
 命令:
-  /reset       开一个干净案例(清空对话上下文,session token 计数保留)—— ③ 案例隔离
-  exit / quit  退出(Ctrl-D 亦可)
+  /reset        开一个干净案例(清空对话上下文,session token 计数保留)—— ③ 案例隔离
+  /pending      查看 agent 提交的待审批处置(名单写入申请)
+  /approve <id> 批准一条申请,写入名单库并记审计日志
+  /deny <id>    驳回一条申请(同样留审计记录)
+  exit / quit   退出(Ctrl-D 亦可)
 
 工具调用与每轮 token 用量会实时打印,便于观察 agent 的取证过程与上下文成本。
+审批命令是人类专用通道:agent 只能提交申请(blacklist_add),批准/驳回
+不是注册工具,模型无法触达。
 """
 import sys
 
 from agent.core import Agent
+from agent.tools import actions
 
 
 def _fmt_round_usage(u):
@@ -28,7 +34,8 @@ def _fmt_session_usage(agent):
 def main():
     agent = Agent()
     print("风控分析 agent(模型: %s)。" % agent.model)
-    print("命令:/reset 开新案例 · exit 退出。工具调用与 token 用量会实时打印。")
+    print("命令:/reset 开新案例 · /pending 待审批 · /approve|/deny <id> 审批 · exit 退出。")
+    print("工具调用与 token 用量会实时打印。")
     while True:
         try:
             user_input = input("\n> ").strip()
@@ -44,10 +51,33 @@ def main():
             agent.reset()
             print("  [已重置] 开一个干净案例上下文;session token 计数保留。")
             continue
+        if low == "/pending":
+            items = actions.list_pending()
+            if not items:
+                print("  [待审批] 队列为空。")
+            for a in items:
+                print("  [待审批] #%d %s=%s -> %s名单 | %s" % (
+                    a["action_id"], a["dimension"], a["value"], a["list"], a["reason"]))
+            continue
+        if low.startswith("/approve") or low.startswith("/deny"):
+            approve = low.startswith("/approve")
+            parts = user_input.split()
+            if len(parts) != 2 or not parts[1].isdigit():
+                print("  用法:/approve <id> 或 /deny <id>,id 见 /pending")
+                continue
+            a = actions.decide(int(parts[1]), approve=approve)
+            if a is None:
+                print("  查无此申请,/pending 查看当前队列。")
+            else:
+                print("  [%s] #%d %s=%s -> %s名单(已记审计日志)" % (
+                    "已批准并写入" if approve else "已驳回",
+                    a["action_id"], a["dimension"], a["value"], a["list"]))
+            continue
         answer = agent.ask(
             user_input,
             on_tool=lambda name, args: print("  [工具] %s(%s)" % (name, args)),
             on_usage=lambda u: print(_fmt_round_usage(u)),
+            on_notice=lambda msg: print("  [上下文] %s" % msg),
         )
         print("\n%s" % answer)
         print(_fmt_session_usage(agent))

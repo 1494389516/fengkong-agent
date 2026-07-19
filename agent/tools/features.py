@@ -4,13 +4,10 @@
 骨架阶段用本地 JSON 模拟事件表;后续可替换为真实数仓/日志查询,
 只要保持返回结构不变,上层 agent 无感知。
 """
-import json
 from collections import Counter
-from pathlib import Path
 
 from . import tool
-
-DATA = Path(__file__).resolve().parent.parent.parent / "data" / "events_sample.json"
+from .datasource import load_events
 
 
 @tool(
@@ -28,7 +25,7 @@ DATA = Path(__file__).resolve().parent.parent.parent / "data" / "events_sample.j
     },
 )
 def feature_stats(uid: str):
-    events = [e for e in json.loads(DATA.read_text(encoding="utf-8")) if e["uid"] == uid]
+    events = [e for e in load_events() if e["uid"] == uid]
     if not events:
         return {"uid": uid, "found": False}
     ts = sorted(e["ts"] for e in events)

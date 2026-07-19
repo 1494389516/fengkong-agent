@@ -61,5 +61,5 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
 
 
 # 导入即注册(注意顺序:rules 依赖 blacklist/features;backtest 依赖 rules;
-# charts 依赖 backtest;monitor 依赖 blacklist)
-from . import blacklist, features, rules, backtest, monitor, charts  # noqa: E402,F401
+# charts 依赖 backtest;monitor 依赖 blacklist;scan 依赖 backtest;graph 依赖 charts)
+from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions  # noqa: E402,F401

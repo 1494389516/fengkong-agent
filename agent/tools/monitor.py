@@ -12,14 +12,11 @@
   shared_device 本账号设备被多个账号共用(聚集性/团伙特征)
   blacklist     uid / ip / device 命中黑灰名单
 """
-import json
 from collections import defaultdict
-from pathlib import Path
 
 from . import tool
 from .blacklist import blacklist_query
-
-DATA = Path(__file__).resolve().parent.parent.parent / "data" / "events_sample.json"
+from .datasource import load_events
 
 # 窗口内阈值。样本参照:u_1002 一个 300s 窗口里 20 事件/5 IP/最短 3s,
 # u_1001 最密也只有 300s 间隔的 2 个事件,带宽很大,阈值取偏严一侧。
@@ -48,7 +45,7 @@ SHARED_DEVICE_MIN_ACCOUNTS = 3  # shared_device:设备关联账号数下限
     },
 )
 def account_monitor(uid: str, window_seconds: int = 300):
-    events = json.loads(DATA.read_text(encoding="utf-8"))
+    events = load_events()
     mine = sorted((e for e in events if e["uid"] == uid), key=lambda e: e["ts"])
     if not mine:
         return {"uid": uid, "found": False}
