@@ -1,18 +1,26 @@
 # -*- coding: utf-8 -*-
-"""图表工具:把数据画成自包含 HTML(内联 SVG)落盘到 out/charts/。
+"""图表工具:matplotlib + pandas 渲染 PNG,落盘到 out/charts/。
 
 设计约定(为什么这样设计):
 - 图是给人看的,模型看不了图 —— 返回给模型的只有"文件路径 + 数字摘要",
   序列原文与图形本体绝不进对话上下文(那是 token 爆炸的重灾区)。
-- 零依赖:手写 SVG,不引 matplotlib,骨架阶段 pip 依赖保持最少。
+- 无头环境用 Agg 后端(必须在 pyplot 导入前设置)。
+- 中文标题依赖 CJK 字体,启动时探测,探测不到回退英文标题 ——
+  图内数据文本(uid/ip/事件类型/指标名)本来就是 ASCII,不受影响。
 """
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from . import tool
-from .backtest import backtest
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+import pandas as pd  # noqa: E402
+
+from . import tool  # noqa: E402
+from .backtest import backtest  # noqa: E402
+from .monitor import MONITOR_BURST_MIN  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 OUT = ROOT / "out" / "charts"
@@ -32,27 +40,56 @@ SWEEP_DEFAULTS = {
 }
 
 
-def _fmt_ts(ts):
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%m-%d %H:%M:%S")
+def _setup_cjk() -> bool:
+    import logging
+    from matplotlib import font_manager
+    # WenQuanYi 等 CJK 字体只有 500 字重,matplotlib 每次 findfont 都会告警;
+    # 回退行为本身正确,压掉这条噪音日志。
+    logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
+    names = {f.name for f in font_manager.fontManager.ttflist}
+    for cand in ("Noto Sans CJK SC", "WenQuanYi Zen Hei", "WenQuanYi Micro Hei",
+                 "PingFang SC", "Microsoft YaHei", "SimHei"):
+        if cand in names:
+            plt.rcParams["font.sans-serif"] = [cand] + plt.rcParams["font.sans-serif"]
+            plt.rcParams["axes.unicode_minus"] = False
+            return True
+    return False
 
 
-def _write_html(filename: str, title: str, svg: str, note: str = "") -> str:
+_HAS_CJK = _setup_cjk()
+
+
+def _t(zh: str, en: str) -> str:
+    """标题文案:有 CJK 字体用中文,否则英文,避免渲染成方块。"""
+    return zh if _HAS_CJK else en
+
+
+def _save(fig, filename: str) -> str:
     OUT.mkdir(parents=True, exist_ok=True)
     path = OUT / filename
-    path.write_text(
-        '<!doctype html><meta charset="utf-8"><title>%s</title>'
-        '<body style="font-family:sans-serif;margin:24px">'
-        "<h3>%s</h3>%s<p style=\"color:#777;font-size:12px\">%s</p>" % (title, title, svg, note),
-        encoding="utf-8")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
     return str(path.relative_to(ROOT))
+
+
+def _events_df(uid: Optional[str] = None) -> pd.DataFrame:
+    df = pd.DataFrame(json.loads(DATA.read_text(encoding="utf-8")))
+    if uid is not None:
+        df = df[df["uid"] == uid]
+    if df.empty:
+        return df
+    df = df.sort_values("ts").reset_index(drop=True)
+    df["dt"] = pd.to_datetime(df["ts"], unit="s")
+    return df
 
 
 @tool(
     name="chart_account_timeline",
     description=(
-        "把某 uid 的事件流画成时间线图并写成本地 HTML 文件:按事件类型分道、"
-        "按 IP 着色、订单点标金额。返回文件路径与数字摘要。适合排查单账号行为"
-        "模式;回答时把路径告诉研究员即可,不要尝试用文字复述图形。"
+        "把某 uid 的事件流画成 PNG 图(上:时间线,按事件类型分道、按 IP 着色、"
+        "订单点标金额;下:5 分钟窗口事件数柱状图,叠加监控 burst 阈值线)。"
+        "返回文件路径与数字摘要。适合排查单账号行为模式;回答时把路径告诉研究员"
+        "即可,不要尝试用文字复述图形。"
     ),
     parameters={
         "type": "object",
@@ -61,52 +98,51 @@ def _write_html(filename: str, title: str, svg: str, note: str = "") -> str:
     },
 )
 def chart_account_timeline(uid: str):
-    events = sorted((e for e in json.loads(DATA.read_text(encoding="utf-8")) if e["uid"] == uid),
-                    key=lambda e: e["ts"])
-    if not events:
+    df = _events_df(uid)
+    if df.empty:
         return {"uid": uid, "found": False}
-    t0, t1 = events[0]["ts"], events[-1]["ts"]
-    span = max(t1 - t0, 1)
-    types = sorted({e["type"] for e in events})
-    ips = sorted({e["ip"] for e in events})
+    types = sorted(df["type"].unique())
+    ips = sorted(df["ip"].unique())
     color = {ip: PALETTE[i % len(PALETTE)] for i, ip in enumerate(ips)}
 
-    ml, plot_w, mt, lane_h, mb = 110, 480, 30, 46, 45
-    w = ml + plot_w + 210
-    h = mt + lane_h * len(types) + mb
-    p = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" '
-         'font-family="sans-serif" font-size="11">' % (w, h)]
-    for i, t in enumerate(types):
-        y = mt + lane_h * i + lane_h // 2
-        p.append('<text x="%d" y="%d" text-anchor="end" fill="#555">%s</text>' % (ml - 10, y + 4, t))
-        p.append('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="#eee"/>' % (ml, y, ml + plot_w, y))
-    for e in events:
-        x = ml + (e["ts"] - t0) / span * plot_w
-        y = mt + lane_h * types.index(e["type"]) + lane_h // 2
-        p.append('<circle cx="%.1f" cy="%d" r="5" fill="%s" fill-opacity="0.85">'
-                 "<title>%s ip=%s</title></circle>" % (x, y, color[e["ip"]], _fmt_ts(e["ts"]), e["ip"]))
-        if e.get("amount") is not None:
-            p.append('<text x="%.1f" y="%d" text-anchor="middle" fill="#333">%.1f</text>' % (x, y - 10, e["amount"]))
-    p.append('<text x="%d" y="%d" fill="#555">%s</text>' % (ml, h - 15, _fmt_ts(t0)))
-    p.append('<text x="%d" y="%d" text-anchor="end" fill="#555">%s</text>' % (ml + plot_w, h - 15, _fmt_ts(t1)))
-    for i, ip in enumerate(ips):  # 图例:IP -> 颜色
-        y = mt + 16 * i
-        p.append('<circle cx="%d" cy="%d" r="5" fill="%s"/>' % (ml + plot_w + 25, y, color[ip]))
-        p.append('<text x="%d" y="%d" fill="#333">%s</text>' % (ml + plot_w + 35, y + 4, ip))
-    p.append("</svg>")
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True,
+                                   height_ratios=[2, 1], constrained_layout=True)
+    for ip, g in df.groupby("ip"):
+        ax1.scatter(g["dt"], g["type"].map(types.index), s=45, color=color[ip],
+                    label=ip, alpha=0.85, edgecolors="none")
+    if "amount" in df.columns:
+        for _, row in df[df["amount"].notna()].iterrows():
+            ax1.annotate("%.1f" % row["amount"], (row["dt"], types.index(row["type"])),
+                         textcoords="offset points", xytext=(0, 9), ha="center", fontsize=8)
+    ax1.set_yticks(range(len(types)), types)
+    ax1.set_ylim(-0.6, len(types) - 0.4)
+    ax1.grid(axis="y", color="#eee")
+    ax1.legend(title="IP", loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8)
+    ax1.set_title(_t("账号 %s 事件时间线" % uid, "Account %s event timeline" % uid))
 
-    path = _write_html("timeline_%s.html" % uid, "账号 %s 事件时间线" % uid, "".join(p),
-                       "圆点按 IP 着色;订单点上方标金额;悬停看时间与 IP。")
+    # 下图窗口大小与 account_monitor 默认窗口(300s)对齐,阈值线也来自 monitor,
+    # 让"图上看到的"和"监控报的"是同一个口径。
+    win = df.set_index("dt").resample("300s").size()
+    ax2.bar(win.index, win.values, width=300 / 86400, color="#4e79a7", alpha=0.8)
+    ax2.axhline(MONITOR_BURST_MIN, ls="--", lw=1, color="#e15759",
+                label=_t("burst 阈值 %d" % MONITOR_BURST_MIN, "burst threshold %d" % MONITOR_BURST_MIN))
+    ax2.set_ylabel(_t("5 分钟事件数", "events / 5min"))
+    ax2.legend(fontsize=8)
+    ax2.grid(axis="y", color="#eee")
+    fig.autofmt_xdate()
+
+    path = _save(fig, "timeline_%s.png" % uid)
     return {
         "uid": uid,
         "found": True,
         "chart_path": path,
         "summary": {
-            "event_count": len(events),
-            "span_seconds": t1 - t0,
+            "event_count": len(df),
+            "span_seconds": int(df["ts"].max() - df["ts"].min()),
             "distinct_ip": len(ips),
-            "distinct_device": len({e["device_id"] for e in events}),
-            "types": types,
+            "distinct_device": int(df["device_id"].nunique()),
+            "types": {k: int(v) for k, v in df["type"].value_counts().items()},
+            "busiest_window_events": int(win.max()),
         },
     }
 
@@ -115,8 +151,8 @@ def chart_account_timeline(uid: str):
     name="chart_threshold_sweep",
     description=(
         "对单个规则阈值做扫描回测:逐个候选值跑 rule_backtest,画出 precision/"
-        "recall/F1 随阈值变化的曲线(本地 HTML),返回文件路径、逐点指标表与 F1 "
-        "最优值。规则调参前先用它看指标对该参数的敏感度。param 可选:"
+        "recall/F1 随阈值变化的曲线(PNG),返回文件路径、逐点指标表与 F1 最优值。"
+        "规则调参前先用它看指标对该参数的敏感度。param 可选:"
         + ", ".join(SWEEP_DEFAULTS)
     ),
     parameters={
@@ -136,36 +172,25 @@ def chart_threshold_sweep(param: str, values: Optional[List[float]] = None):
         r = backtest({param: v})
         m = r["operating_points"]["flag=review+reject"]
         rows.append({"value": v, "precision": m["precision"], "recall": m["recall"], "f1": m["f1"]})
+    df = pd.DataFrame(rows)
 
-    ml, plot_w, mt, plot_h = 60, 520, 30, 260
-    w, h = ml + plot_w + 130, mt + plot_h + 60
-    xs = [ml + i / max(len(values) - 1, 1) * plot_w for i in range(len(values))]
-
-    def y_of(v):
-        return mt + (1 - v) * plot_h
-
-    p = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" '
-         'font-family="sans-serif" font-size="11">' % (w, h)]
-    for g in (0.0, 0.25, 0.5, 0.75, 1.0):  # 横向网格 + y 刻度
-        y = y_of(g)
-        p.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" stroke="#eee"/>' % (ml, y, ml + plot_w, y))
-        p.append('<text x="%d" y="%.1f" text-anchor="end" fill="#555">%.2f</text>' % (ml - 8, y + 4, g))
-    for x, v in zip(xs, values):  # x 刻度:候选值等距摆放(类目轴,避免宽量程挤成一团)
-        p.append('<text x="%.1f" y="%d" text-anchor="middle" fill="#555">%g</text>' % (x, mt + plot_h + 18, v))
+    fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
+    # x 用等距类目位置而非数值:扫描序列常跨数量级(5~600),数值轴会挤成一团
+    x = range(len(df))
     for i, metric in enumerate(("precision", "recall", "f1")):
-        c = PALETTE[i]
-        pts = " ".join("%.1f,%.1f" % (x, y_of(row[metric])) for x, row in zip(xs, rows))
-        p.append('<polyline points="%s" fill="none" stroke="%s" stroke-width="2"/>' % (pts, c))
-        for x, row in zip(xs, rows):
-            p.append('<circle cx="%.1f" cy="%.1f" r="3" fill="%s"/>' % (x, y_of(row[metric]), c))
-        ly = mt + 18 * i
-        p.append('<rect x="%d" y="%d" width="12" height="3" fill="%s"/>' % (ml + plot_w + 20, ly, c))
-        p.append('<text x="%d" y="%d" fill="#333">%s</text>' % (ml + plot_w + 38, ly + 6, metric))
-    p.append('<text x="%d" y="%d" text-anchor="middle" fill="#555">%s</text>' % (ml + plot_w // 2, h - 8, param))
-    p.append("</svg>")
+        ax.plot(x, df[metric], marker="o", ms=4, lw=2, color=PALETTE[i], label=metric)
+    best_i = int(df["f1"].idxmax())
+    ax.annotate("best F1=%.3f" % df.loc[best_i, "f1"], (best_i, df.loc[best_i, "f1"]),
+                textcoords="offset points", xytext=(0, 12), ha="center", fontsize=9)
+    ax.set_xticks(list(x), ["%g" % v for v in df["value"]])
+    ax.set_xlabel(param)
+    ax.set_ylim(-0.05, 1.1)
+    ax.grid(axis="y", color="#eee")
+    ax.legend()
+    ax.set_title(_t("阈值扫描:%s(口径 flag=review+reject)" % param,
+                    "Threshold sweep: %s (flag=review+reject)" % param))
 
-    best = max(rows, key=lambda r: r["f1"])
-    path = _write_html("sweep_%s.html" % param, "阈值扫描:%s" % param, "".join(p),
-                       "口径 flag=review+reject;当前配置值见 agent/tools/rules.py。")
+    path = _save(fig, "sweep_%s.png" % param)
+    best = rows[best_i]
     return {"param": param, "chart_path": path, "rows": rows,
             "best_by_f1": {"value": best["value"], "f1": best["f1"]}}
