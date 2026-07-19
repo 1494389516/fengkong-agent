@@ -120,6 +120,12 @@ def restore_overrides(prev: Dict) -> None:
     _OVERRIDES.update(prev)
 
 
+def overrides_key():
+    """当前 what-if 覆盖的指纹(排序元组)。判定缓存的 key 组成部分:
+    覆盖生效期间的结果不能和无覆盖的混用。"""
+    return tuple(sorted(_OVERRIDES.items()))
+
+
 def latest_baseline_snapshot():
     """最近一个带基线快照的版本,漂移告警的参照。(版本号, 快照) 或 (None, None)。"""
     for v in reversed(_versions()):

@@ -31,19 +31,18 @@ OPS = {">=": lambda a, b: a >= b, "<=": lambda a, b: a <= b,
 @tool(
     name="rule_draft_test",
     description=(
-        "候选规则试跑(试衣间,不存储不生效):conditions 是特征条件列表(全部"
-        "满足才命中,特征可用 " + "/".join(DRAFT_FEATURES) + ",算子 >=/<=/>/</==),"
-        "window_seconds 可选时间窗。返回命中账号、已标注账号上的精确率、与现有"
-        "规则集的重叠,以及 net_new_catches(现有规则漏掉而草案能抓到的欺诈)——"
-        "这是加规则的唯一正当理由。方向验证用,精确指标等正式实现后由 "
-        "rule_backtest 出;转正式规则需研究员写码评审。"
+        "候选规则试跑(不存储不生效):conditions 为特征条件列表(全满足才命中,"
+        "特征见参数说明,算子 >=/<=/>/</==)。返回命中账号、精确率、与现有规则的"
+        "重叠及 net_new_catches(现有规则漏掉而草案能抓的欺诈 —— 加规则的唯一"
+        "正当理由)。方向验证用;转正式规则需研究员写码评审。"
     ),
     parameters={
         "type": "object",
         "properties": {
             "conditions": {
                 "type": "array",
-                "description": "条件列表,如 [{\"feature\": \"coupon_claims\", \"op\": \">=\", \"value\": 5}]",
+                "description": "条件列表,如 [{\"feature\": \"coupon_claims\", \"op\": \">=\", "
+                               "\"value\": 5}];特征可用 " + "/".join(DRAFT_FEATURES),
                 "items": {
                     "type": "object",
                     "properties": {

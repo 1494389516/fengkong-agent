@@ -68,6 +68,7 @@ def tool_result_sizes():
             {"feature": "coupon_claims", "op": ">=", "value": 3}]}),
         ("appeal_review", {}),
         ("daily_brief", {}),
+        ("chart_drift_dashboard", {}),
         ("chart_account_timeline", {"uid": uid_hot}),
         ("chart_cohort_features", {}),
         ("chart_threshold_sweep", {"param": "r002_min_events"}),

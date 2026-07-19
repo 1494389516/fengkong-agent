@@ -183,8 +183,20 @@ def psi_level(psi: Optional[float]) -> str:
 _GRAIN = {"hour": ("%Y-%m-%d %H:00", 3600), "day": ("%Y-%m-%d", 86400)}
 
 
+def _tz_offset_seconds() -> int:
+    """业务时区偏移(小时),默认 +8(中国电商)。用 UTC 切日等于在北京时间
+    早 8 点劈一天 —— 凌晨(欺诈高发时段)的攻击会被劈进两个桶互相稀释,
+    日报和日粒度漂移的"一天"必须对齐业务日。环境变量 FK_TZ_OFFSET_HOURS
+    覆盖(每次调用解析,与 datasource 的数据集切换同一习惯)。"""
+    import os
+    try:
+        return int(os.environ.get("FK_TZ_OFFSET_HOURS", "8")) * 3600
+    except ValueError:
+        return 8 * 3600
+
+
 def _bucket_label(ts: float, grain: str) -> str:
-    return time.strftime(_GRAIN[grain][0], time.gmtime(ts))
+    return time.strftime(_GRAIN[grain][0], time.gmtime(ts + _tz_offset_seconds()))
 
 
 def _bucket_events(time_grain: str) -> Dict[str, List[Dict]]:
@@ -199,6 +211,15 @@ def _tail_partial(buckets: Dict[str, List[Dict]], labels: List[str]) -> bool:
     其告警要打折看 —— 部分桶的分布天然偏轻,不是真漂移。"""
     med = statistics.median(len(buckets[lb]) for lb in labels[:-1])
     return len(buckets[labels[-1]]) < 0.5 * med
+
+
+def _head_partial(buckets: Dict[str, List[Dict]], labels: List[str]) -> bool:
+    """首桶截断判定(尾桶的镜像):采集从半天中间开始时,首桶只有小半天,
+    拿它当 PSI 基准会满屏假告警 —— 基准的质量比比较桶更要紧。"""
+    if len(labels) < 3:
+        return False
+    med = statistics.median(len(buckets[lb]) for lb in labels[1:])
+    return len(buckets[labels[0]]) < 0.5 * med
 
 
 def drift_alert_text(report: Dict) -> Optional[str]:
@@ -241,12 +262,10 @@ def _bucket_account_features(evs: List[Dict]) -> List[Dict]:
 @tool(
     name="feature_drift",
     description=(
-        "特征漂移画像:按时间粒度(day/hour)把事件流分桶,逐桶计算账号级特征的"
-        "质量(样本数/缺失率)与统计(均值/P50),并以最早的基准桶为参照计算各桶 "
-        "PSI(<0.1 稳定,0.1~0.25 关注,>0.25 告警),同时给出事件类型构成的类别 "
-        "PSI。适合回答'特征/流量分布最近有没有变、从哪天开始变'。缺失默认不进 "
-        "PSI(缺失率单独观察);业务缺失码(如 -999)用 missing_values 显式声明。"
-        "注意:漂移告警优先怀疑伪正常流量在养基线,先查流量再谈重校准。"
+        "特征漂移画像:按时间粒度分桶,逐桶算特征质量(缺失率)与统计(均值/P50),"
+        "以最早基准桶为参照算各桶 PSI(<0.1 稳,0.1~0.25 关注,>0.25 告警)及事件"
+        "类型构成的类别 PSI。答'分布最近有没有变、从哪天开始变'。缺失默认不进 "
+        "PSI,业务缺失码用 missing_values 声明。告警先查流量(防养基线)再谈重校准。"
     ),
     parameters={
         "type": "object",
@@ -348,12 +367,17 @@ def feature_drift(time_grain: str = "day",
         alarms.append("event_type_mix 在 %s PSI=%.3f(>%.2f)" % (worst_bucket, worst_psi, PSI_ALARM))
 
     tail_partial = _tail_partial(buckets, labels)
+    head_partial = _head_partial(buckets, labels)
     out = {
         "found": True,
         "time_grain": time_grain,
         "bucket_count": len(labels),
         "benchmark_buckets": bench_labels,
         "tail_bucket_partial": tail_partial,
+        **({"benchmark_note": "基准桶 %s 事件量不足后续中位桶一半,可能采集不完整,"
+                              "PSI/密度基准参考价值低,建议 benchmark_buckets>=2"
+                              % labels[0]}
+           if benchmark_buckets == 1 and head_partial else {}),
         **({"tail_note": "末桶 %s 事件量不足中位桶一半,可能未采集完整,"
                          "其 PSI 告警需人工复核" % labels[-1]} if tail_partial else {}),
         "buckets": [{"bucket": lb, "accounts": len(rows_by_label[lb]),
@@ -483,12 +507,17 @@ def rule_drift(time_grain: str = "day", benchmark_buckets: int = 1):
         rules_out[rid] = {"benchmark_rate": bench_rate, "trend": trend}
 
     tail_partial = _tail_partial(buckets, labels)
+    head_partial = _head_partial(buckets, labels)
     out = {
         "found": True,
         "time_grain": time_grain,
         "bucket_count": len(labels),
         "benchmark_buckets": bench_labels,
         "tail_bucket_partial": tail_partial,
+        **({"benchmark_note": "基准桶 %s 事件量不足后续中位桶一半,可能采集不完整,"
+                              "PSI/密度基准参考价值低,建议 benchmark_buckets>=2"
+                              % labels[0]}
+           if benchmark_buckets == 1 and head_partial else {}),
         **({"tail_note": "末桶 %s 事件量不足中位桶一半,可能未采集完整,"
                          "其告警需人工复核" % labels[-1]} if tail_partial else {}),
         "verdict_mix": {"worst_psi": worst_psi, "worst_bucket": worst_bucket,

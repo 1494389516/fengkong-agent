@@ -24,6 +24,23 @@ from .reports import report_query
 VALID_DECISIONS = ("accept", "reject")  # accept=误伤成立解除处置, reject=维持原判
 
 
+def _recent_postmortems(limit: int = 3) -> List[Dict]:
+    """最近的复盘记录(轻量读侧):处理新申诉前先看同类规则有没有误伤前科。
+    转成 eval 误伤守卫用例用 eval/postmortem_to_cases.py。"""
+    p = postmortems_path()
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines()[-limit:]:
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        out.append({"uid": rec.get("uid"), "kind": rec.get("kind"),
+                    "rules_involved": rec.get("rules_involved", [])})
+    return out
+
+
 @tool(
     name="appeal_review",
     description=(
@@ -39,6 +56,7 @@ def appeal_review():
     pending = [a for a in appeals if a.get("status") == "pending"]
     if not pending:
         return {"pending_count": 0, "total": len(appeals),
+                "recent_postmortems": _recent_postmortems(),
                 "note": "无待处理申诉" if appeals else "无申诉记录(appeals.json 缺失或为空)"}
     events = load_events()
     labels = load_labels()
@@ -70,6 +88,7 @@ def appeal_review():
     return {
         "pending_count": len(out),
         "queue": out,
+        "recent_postmortems": _recent_postmortems(),
         "note": "recommendation 只是排序建议;决议用 appeal_resolve 提交并写清证据,"
                 "accept 需说明为何现有证据不足以支撑原处置",
     }
