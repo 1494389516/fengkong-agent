@@ -23,7 +23,7 @@ from .backtest import account_verdicts, backtest  # noqa: E402
 from .blacklist import blacklist_query  # noqa: E402
 from .datasource import load_accounts, load_events, load_labels, load_reports  # noqa: E402
 from .featurelib import account_features, batch_features, behavior_paths, percentile_rank  # noqa: E402
-from .intel import ip_info, ip_type_summary  # noqa: E402
+from .intel import device_type_summary, ip_info, ip_type_summary  # noqa: E402
 from .monitor import account_monitor  # noqa: E402
 from .policy import active_policy  # noqa: E402
 
@@ -138,10 +138,12 @@ def _draw_profile_header(ax, uid, feats, mon, verdict):
         lines.append((_t("无账号主档(注册信息缺失)", "no account record"), "#999"))
     reports_v = sum(1 for r in load_reports()
                     if r.get("reported_uid") == uid and r.get("status") == "verified")
-    lines.append((_t("事件:%d · 活跃跨度:%.1f 天 · IP:%d(%s)· 设备:%d · 属实举报:%d" % (
+    lines.append((_t("事件:%d · 活跃跨度:%.1f 天 · IP:%d(%s)· 设备:%d(%s)· 属实举报:%d" % (
         feats["event_count"], feats["span_seconds"] / 86400, feats["distinct_ip"],
         "/".join("%s×%d" % kv for kv in ip_type_summary(feats["ips"]).items()),
-        feats["distinct_device"], reports_v),
+        feats["distinct_device"],
+        "/".join("%s×%d" % kv for kv in device_type_summary(feats["devices"]).items()),
+        reports_v),
         "activity"), "#333"))
     # 行为路径:会话级序列签名(套现/盗号/bot 各有语法),直奔下单的间隔单独点名
     bp = behavior_paths(uid)

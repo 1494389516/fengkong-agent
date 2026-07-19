@@ -14,6 +14,7 @@
   self_new_device   近窗出现历史未见设备(自身基线,盗号信号)
   self_amount_spike 近窗最大订单较自身历史突增(自身基线,销赃信号)
   geo_jump          相邻事件地理跳变(移动速度超过民航速度,物理不可能)
+  risky_device      设备指纹命中(模拟器 / root / hook 注入)
 
 自身基线带账龄门槛(policy.self_min_history_events):历史太浅的账号不启用
 —— 否则盗号者潜伏几天"养"出一条正常自身基线就能骗过它,新号也会误报。
@@ -24,7 +25,7 @@ from collections import defaultdict
 from . import tool
 from .blacklist import blacklist_query
 from .datasource import load_events
-from .intel import geo_jumps
+from .intel import device_risk_flags, geo_jumps
 from .policy import active_policy
 
 
@@ -116,6 +117,14 @@ def account_monitor(uid: str, window_seconds: int = 300):
     if jumps:
         signal_types.add("geo_jump")
 
+    # 2.8) 设备指纹:模拟器 / root / hook —— 设备层的"出生缺陷",指纹 SDK 采集
+    risky_devices = []
+    for dev in sorted({e["device_id"] for e in mine}):
+        flags = device_risk_flags(dev)
+        if flags:
+            signal_types.add("risky_device")
+            risky_devices.append("%s: %s" % (dev, "、".join(flags)))
+
     # 3) 黑灰名单关联(uid + 该账号用过的全部 ip/设备)
     blacklist_signals = []
     dims = [("uid", uid)]
@@ -136,6 +145,7 @@ def account_monitor(uid: str, window_seconds: int = 300):
         "blacklist_signals": blacklist_signals,
         "self_baseline_signals": self_signals,
         "geo_jumps": jumps,
+        "risky_devices": risky_devices,
         "signal_types": sorted(signal_types),
         "policy_version": p["_version"],
     }

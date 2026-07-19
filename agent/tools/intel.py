@@ -12,7 +12,7 @@ from math import asin, cos, radians, sin, sqrt
 from typing import Dict, List, Optional
 
 from . import tool
-from .datasource import load_ip_intel
+from .datasource import load_device_intel, load_ip_intel
 
 MIN_JUMP_KM = 50  # 同城基站切换不算跳变
 
@@ -65,6 +65,62 @@ def geo_jumps(events_sorted: List[Dict], speed_limit_kmh: float) -> List[Dict]:
                 })
         prev = (e, info)
     return jumps
+
+
+def device_info(device_id: str) -> Dict:
+    info = load_device_intel().get(device_id)
+    if not info:
+        return {"device_id": device_id, "known": False, "risk": "unknown"}
+    return {"device_id": device_id, "known": True, **info}
+
+
+def device_risk_flags(device_id: str) -> List[str]:
+    """设备的风险标记列表(空 = 干净或未知)。给监控信号与图表用。"""
+    info = device_info(device_id)
+    flags = []
+    if info.get("is_emulator"):
+        flags.append("模拟器" + ("(%s)" % info["emulator_brand"] if info.get("emulator_brand") else ""))
+    if info.get("is_rooted"):
+        flags.append("root")
+    if info.get("hook_detected"):
+        flags.append("hook")
+    return flags
+
+
+def device_type_summary(devices) -> Dict[str, int]:
+    """设备质量分布:模拟器 / root|hook / 正常 / 未知。和 IP 类型同款语义 ——
+    设备数是数量,指纹是物种。"""
+    out: Dict[str, int] = {}
+    for d in devices:
+        info = device_info(d)
+        if not info.get("known"):
+            key = "未知"
+        elif info.get("is_emulator"):
+            key = "模拟器"
+        elif info.get("is_rooted") or info.get("hook_detected"):
+            key = "root/hook"
+        else:
+            key = "正常"
+        out[key] = out.get(key, 0) + 1
+    return out
+
+
+@tool(
+    name="device_intel",
+    description=(
+        "查询设备指纹:是否模拟器(含品牌)、root/越狱、hook 注入框架"
+        "(Xposed/Frida)、原始采集信号(传感器无数据/电池恒 100%/x86 架构等)、"
+        "风险档。模拟器+老安卓版本+多账号共用是设备农场三件套;"
+        "root+hook 出现在交易设备上是改机/自动化的直接证据。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {"device_id": {"type": "string", "description": "设备 ID"}},
+        "required": ["device_id"],
+    },
+)
+def device_intel(device_id: str):
+    return device_info(device_id)
 
 
 @tool(

@@ -42,6 +42,7 @@ class Gen:
         self.blacklist = []
         self.accounts = {}
         self.ip_intel = {}
+        self.device_intel = {}
         self.reports = []
         self._report_seq = 0
 
@@ -62,6 +63,16 @@ class Gen:
         if note:
             entry["note"] = note
         self.ip_intel.setdefault(seg, entry)
+
+    def dev_intel(self, device, platform="安卓", emulator=False, brand=None,
+                  rooted=False, hook=False, signals=None):
+        """登记设备指纹(固定内容,不消耗随机数,保持 seed 序列稳定)。"""
+        entry = {"platform": platform, "is_emulator": emulator, "is_rooted": rooted,
+                 "hook_detected": hook, "signals": signals or [],
+                 "risk": "high" if (emulator or rooted or hook) else "low"}
+        if emulator and brand:
+            entry["emulator_brand"] = brand
+        self.device_intel.setdefault(device, entry)
 
     def report(self, uid, ts, category, text, status):
         self._report_seq += 1
@@ -147,6 +158,7 @@ class Gen:
         self.register(uid, T0 - r.randint(30, 400) * DAY, channel,
                       method, ips[0], device, r.choice([1, 2]),
                       spent + r.uniform(0, 2000), os_=os_, os_ver=os_ver)
+        self.dev_intel(device, platform=os_)  # 正常真机,指纹干净
         if r.random() < 0.01:  # 恶意/误举报噪音:正常用户偶被举报,核实后不属实
             self.report(uid, T0 + r.randint(0, days * DAY), "promo_abuse",
                         "怀疑抢券", "dismissed")
@@ -173,12 +185,16 @@ class Gen:
         self.register(uid, T0 - r.randint(0, 2 * DAY), r.choice(["积分墙", "抖音投放"]),
                       r.choice(["抖音号", "微信"]), ips[0], device, 0, 0.0,
                       os_="安卓", os_ver=r.choice(["7.1", "8.1", "9"]))  # 群控农场老镜像
+        self.dev_intel(device, rooted=True, hook=True,
+                       signals=["无障碍自动化框架运行中", "电池恒 100%"])
         self.labels[uid] = {"label": "fraud", "note": "生成:刷券脚本%s" % ("(慢速)" if slow else "")}
 
     # ---- 套现团伙:共用模拟器设备,领券 -> 小额单 ----
     def cashout_ring(self, i, days):
         r = self.rng
         device = "g_dev_emu%03d" % i
+        self.dev_intel(device, emulator=True, brand="雷电", rooted=True,
+                       signals=["传感器无数据", "电池恒 100%", "CPU x86 架构"])
         members = r.randint(3, 6)
         if r.random() < 0.5:  # 一半团伙设备在灰名单里
             self.blacklist.append({"dimension": "device_id", "value": device, "list": "gray",
@@ -233,10 +249,12 @@ class Gen:
                           home_ip, owner_device, 2, r.uniform(2000, 20000), rebind=1,
                           os_=os_, os_ver=r.choice(["16.6", "17.2"]) if os_ == "iOS"
                           else r.choice(["12", "13", "14"]))
+            self.dev_intel(owner_device, platform=os_)  # 机主真机干净
             self.emit(uid, home_ip, owner_device, "login", t - r.randint(900, 3600))
             self.report(uid, t + r.randint(3600, DAY), "unauthorized_charge",
                         "机主申诉:本人未操作,账号异地下单", "verified")
             note = "生成:老号盗用销赃"
+        self.dev_intel(device, rooted=True, hook=True, signals=["检测到 Frida 注入"])  # 作案设备改机
         if r.random() < 0.5:  # 一半坏 IP 已被名单收录
             self.blacklist.append({"dimension": "ip", "value": ip, "list": "black",
                                    "reason": "生成:代理池出口,批量盗号", "added_at": "2026-07-10"})
@@ -281,6 +299,8 @@ def main():
         json.dumps(g.accounts, ensure_ascii=False, indent=1), encoding="utf-8")
     (args.out / "ip_intel.json").write_text(
         json.dumps(g.ip_intel, ensure_ascii=False, indent=1), encoding="utf-8")
+    (args.out / "device_intel.json").write_text(
+        json.dumps(g.device_intel, ensure_ascii=False, indent=1), encoding="utf-8")
     (args.out / "reports.json").write_text(
         json.dumps(g.reports, ensure_ascii=False, indent=1), encoding="utf-8")
     fraud = sum(1 for v in g.labels.values() if v["label"] == "fraud")

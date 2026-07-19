@@ -348,9 +348,15 @@ def run_intel_layer() -> int:
     i2 = registry.dispatch("ip_intel", {"ip": "10.222.1.1"})
     r9 = registry.dispatch("report_query", {"uid": "u_1009"})
     r1 = registry.dispatch("report_query", {"uid": "u_1001"})
-    return _report("IP 情报与举报(离线)", [
+    d1 = registry.dispatch("device_intel", {"device_id": "dev_emu_9f3a"})
+    d2 = registry.dispatch("device_intel", {"device_id": "dev_unknown_x"})
+    return _report("IP/设备情报与举报(离线)", [
         ("机房段识别为 idc/high", i1.get("type") == "idc" and i1.get("risk") == "high"),
         ("未知段优雅降级", i2.get("type") == "unknown"),
+        ("模拟器指纹识别(雷电 + root)",
+         d1.get("is_emulator") is True and d1.get("is_rooted") is True
+         and d1.get("emulator_brand") == "雷电"),
+        ("未知设备优雅降级", d2.get("known") is False),
         ("u_1009 有属实举报", r9.get("verified_count") == 1),
         ("u_1001 仅不实举报(不作处置依据)",
          r1.get("count") == 1 and r1.get("verified_count") == 0),
@@ -390,6 +396,10 @@ def run_profile_layer() -> int:
          (p9.get("behavior_paths") or {}).get("login_to_order_min_seconds") == 480
          and any(p.get("path") == "login→order"
                  for p in (p9.get("behavior_paths") or {}).get("top_paths", []))),
+        ("设备指纹信号:团伙模拟器 / 盗号作案设备 root+hook 进档案",
+         "risky_device" in p3["monitor"]["signal_types"]
+         and any("模拟器" in d for d in p3["monitor"]["risky_devices"])
+         and any("root" in d and "hook" in d for d in p9["monitor"]["risky_devices"])),
         ("u_1003:关联分量含团伙三账号",
          (p3.get("relations") or {}).get("accounts") == ["u_1003", "u_1004", "u_1005"]),
         ("无主档账号优雅降级",

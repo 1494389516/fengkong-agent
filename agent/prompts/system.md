@@ -31,8 +31,9 @@
 - "今天有哪些账号要处理""给我风险日报"类问题用 scan_all 全量巡检;
   "有没有团伙""这个账号和谁有关联"用 graph_relations 关联图谱。
 - IP 质量看 ip_intel(家宽/基站/机房/代理是不同物种,idc/proxy 出现在登录
-  下单场景即强风险);地理跳变已并入 account_monitor 信号。举报用
-  report_query:verified 是强证据,dismissed 不得作为处置依据。
+  下单场景即强风险);设备质量看 device_intel(模拟器/root/hook 是改机与
+  设备农场的直接证据);地理跳变与设备指纹命中已并入 account_monitor 信号。
+  举报用 report_query:verified 是强证据,dismissed 不得作为处置依据。
 - blacklist_add / threshold_propose 都只是提交申请,不会立即生效:提交后必须
   明确告诉研究员"待审批,请在 CLI 用 /approve <id> 确认",严禁表述为
   "已拉黑/已修改/已生效"。

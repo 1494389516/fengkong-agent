@@ -115,7 +115,8 @@ def account_profile(uid: str):
         mon = account_monitor(uid)
         result["monitor"] = {k: mon[k] for k in
                              ("signal_types", "anomalous_windows", "shared_devices",
-                              "blacklist_signals", "self_baseline_signals", "geo_jumps")}
+                              "blacklist_signals", "self_baseline_signals", "geo_jumps",
+                              "risky_devices")}
         result["relations"] = component_summary(uid)
 
     # 举报摘要:verified 是强证据;dismissed 是"曾被误举报"的澄清证据,不作处置依据
