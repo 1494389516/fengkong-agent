@@ -71,6 +71,15 @@ def load_decisions():
     return obj.get("decisions") if isinstance(obj, dict) else obj
 
 
+def load_device_intel() -> Dict[str, Dict]:
+    """设备指纹库(模拟器/root/hook)。文件缺失返回空:未知设备按 unknown 处理。"""
+    try:
+        return {k: v for k, v in _load_json(data_dir() / "device_intel.json").items()
+                if not k.startswith("_")}
+    except FileNotFoundError:
+        return {}
+
+
 def load_ip_intel() -> Dict[str, Dict]:
     """IP 情报库(按 /24 网段)。文件缺失返回空:未知段按 unknown 处理。"""
     try:

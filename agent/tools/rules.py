@@ -9,10 +9,11 @@ from . import tool
 from .blacklist import blacklist_query
 from .datasource import load_accounts
 from .featurelib import account_features
+from .intel import device_info
 from .policy import active_policy
 
 ACTION_ORDER = {"pass": 0, "review": 1, "reject": 2}
-RULE_COUNT = 4  # 当前规则集条数,便于 agent 感知覆盖范围
+RULE_COUNT = 6  # 当前规则集条数,便于 agent 感知覆盖范围
 
 # 阈值不再是本文件常量:全部经 policy.active_policy() 解析(版本化 + what-if
 # 覆盖),定阈依据见 policy.DEFAULTS 的注释,数值回归见 eval 第 1 层。
@@ -103,6 +104,28 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
             _hit(hits, "R001", "%s=%s 命中%s名单: %s" % (dim, val, rec["list"], rec["reason"]), action)
 
     # ------------------------------------------------------------------
+    # R006 设备指纹硬拦截:模拟器 / root / hook 一律 reject(业务拍板的强硬
+    # 策略)。指纹是设备指纹 SDK 实时采集的物理事实,不依赖行为历史 ——
+    # 与名单的区别:名单要人工添加,指纹到即拦。三个开关独立进 policy
+    # (1=强拒 0=关闭),降级为 review 走提案审批改开关即可。
+    # 已知误伤面(留档):root 真机有极客真实用户、模拟器有 PC 端真实玩家,
+    # 强拒是拦截收益 > 误伤代价的业务取舍,误伤走申诉通道;
+    # 关掉某开关的影响用 shadow_backtest 覆盖 r006_reject_rooted=0 量化。
+    # ------------------------------------------------------------------
+    if device_id:
+        dinfo = device_info(device_id)
+        fp_hits = []
+        if p["r006_reject_emulator"] and dinfo.get("is_emulator"):
+            fp_hits.append("模拟器" + ("(%s)" % dinfo["emulator_brand"]
+                                       if dinfo.get("emulator_brand") else ""))
+        if p["r006_reject_rooted"] and dinfo.get("is_rooted"):
+            fp_hits.append("root")
+        if p["r006_reject_hook"] and dinfo.get("hook_detected"):
+            fp_hits.append("hook 注入")
+        if fp_hits:
+            _hit(hits, "R006", "设备 %s 指纹命中: %s" % (device_id, "、".join(fp_hits)), "reject")
+
+    # ------------------------------------------------------------------
     # R002 机器行为 / 频率异常:目前只对 coupon_claim 生效(样本攻击面在
     # 刷券;扩到 login/order 需按事件类型分别定阈值,不能共用)。
     # 间隔 + 次数双条件防误伤:单独手快或偶发连点都不触发。
@@ -136,19 +159,27 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
                      % (int(p["r003_cashout_window_seconds"]) // 60, coupons, amount), "review")
 
     # ------------------------------------------------------------------
-    # R004 新号大额:账龄错配 —— 新号做老号的事。正常用户的消费信任靠时间
-    # 积累,注册没几天就下大额单不是典型生命周期,而时间恰是攻击者最缺的。
-    # 只在事件带 ts 且有账号主档时评估(账龄 = 事件 ts - 注册时间;无 ts 的
-    # 假设性咨询没有时点,无主档则数据缺失 —— 生产上主档缺失本身应告警)。
-    # review 而非 reject:也可能是真实新客首单,误伤代价高,留人工兜底。
+    # R004 新号大额 / R005 高危注册 × 新号交易 —— 两条"出生证明"规则。
+    # 共同前提:order 事件 + 带 ts(账龄=事件 ts-注册时间,无时点不评估)+
+    # 有主档(缺失在生产上应告警,骨架从简跳过)。都给 review:可能是真实
+    # 新客首单,误伤代价高,留人工兜底。
+    # R004 看行为错配(注册没几天就下大额单,信任要靠时间积累);
+    # R005 消费注册风险分 —— 分数是生产注册风控在注册时刻打的历史事实,
+    #   agent 只读不重算(唯一事实源,口径核验在 reconcile 的主档对账);
+    #   高分不拦零成本动作(领券留给行为规则),只在有资损的下单环节加闸。
     # ------------------------------------------------------------------
     if event_type == "order" and amount is not None and as_of is not None:
         acct = load_accounts().get(uid)
-        if acct and amount >= p["r004_min_amount"]:
+        if acct:
             age = as_of - acct["registered_at"]
-            if 0 <= age <= p["r004_max_account_age_seconds"]:
+            if amount >= p["r004_min_amount"] and 0 <= age <= p["r004_max_account_age_seconds"]:
                 _hit(hits, "R004", "注册仅 %.1f 小时即下单 %.2f(新号大额)"
                      % (age / 3600, amount), "review")
+            score = acct.get("register_risk_score")
+            if (score is not None and score >= p["r005_min_register_score"]
+                    and 0 <= age <= p["r005_max_account_age_seconds"]):
+                _hit(hits, "R005", "注册风险分 %d(阈值 %d)的新号下单 %.2f,账龄 %.1f 小时"
+                     % (score, p["r005_min_register_score"], amount, age / 3600), "review")
 
     action = "pass"
     for h in hits:

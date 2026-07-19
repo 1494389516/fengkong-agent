@@ -1,0 +1,8 @@
+{
+  "_comment": "设备指纹库(真实系统由设备指纹 SDK 运行时采集上报):is_emulator 模拟器 / is_rooted root 或越狱 / hook_detected 注入框架(Xposed/Frida 等)。signals 为原始采集信号,risk 为汇总档。模拟器+老安卓版本+多账号共用 = 设备农场三件套。",
+  "dev_iphone_a1": {"platform": "iOS", "is_emulator": false, "is_rooted": false, "hook_detected": false, "signals": [], "risk": "low"},
+  "dev_iphone_b7": {"platform": "iOS", "is_emulator": false, "is_rooted": false, "hook_detected": false, "signals": [], "risk": "low"},
+  "dev_pixel_z9": {"platform": "安卓", "is_emulator": false, "is_rooted": true, "hook_detected": true, "signals": ["检测到 Frida 注入", "系统分区可写", "开发者选项+USB 调试开启"], "risk": "high"},
+  "dev_farm_x7": {"platform": "安卓", "is_emulator": false, "is_rooted": true, "hook_detected": true, "signals": ["无障碍自动化框架运行中", "电池恒 100%", "同 WiFi 下大量同型号设备"], "risk": "high"},
+  "dev_emu_9f3a": {"platform": "安卓", "is_emulator": true, "emulator_brand": "雷电", "is_rooted": true, "hook_detected": false, "signals": ["传感器无数据", "电池恒 100%", "CPU x86 架构"], "risk": "high"}
+}

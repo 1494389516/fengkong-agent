@@ -14,6 +14,7 @@
                   的正常行为算进来造成误伤 —— R003 曾在生成大样本上实锤过。
 """
 import statistics
+from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 from .datasource import data_dir, load_events
@@ -56,6 +57,54 @@ def account_features(uid: str, as_of_ts: Optional[float] = None,
         "span_seconds": ts[-1] - ts[0],
         "ips": sorted({e["ip"] for e in evs}),
         "devices": sorted({e["device_id"] for e in evs}),
+    }
+
+
+def behavior_paths(uid: str, as_of_ts: Optional[float] = None,
+                   session_gap_seconds: int = 1800) -> Dict:
+    """行为路径(序列特征):事件流按会话切分(相邻间隔超过 session_gap 断开),
+    每个会话压缩成路径串(连续同类型折叠为 类型×N)。路径是行为的"语法",
+    各类欺诈有签名:
+      正常购物   多会话分散,login→order / login→coupon_claim 混合
+      套现       login→coupon_claim×N→order(领券后立即小额下单)
+      盗号       login→order 直奔下单,无任何铺垫(login_to_order 间隔极短)
+      刷券 bot   无 login 的纯 coupon_claim×N 流
+    """
+    evs = sorted(_account_events(uid, as_of_ts), key=lambda e: e["ts"])
+    if not evs:
+        return {"uid": uid, "found": False}
+    sessions: List[List[Dict]] = [[evs[0]]]
+    for prev, e in zip(evs, evs[1:]):
+        if e["ts"] - prev["ts"] > session_gap_seconds:
+            sessions.append([])
+        sessions[-1].append(e)
+
+    def compress(sess: List[Dict]) -> str:
+        parts: List[List] = []
+        for e in sess:
+            if parts and parts[-1][0] == e["type"]:
+                parts[-1][1] += 1
+            else:
+                parts.append([e["type"], 1])
+        return "→".join(t if n == 1 else "%s×%d" % (t, n) for t, n in parts)
+
+    path_counts = Counter(compress(s) for s in sessions)
+    # login→order 最短间隔:盗号"直奔下单"的量化(登录多久后就下单)
+    l2o = None
+    last_login = None
+    for e in evs:
+        if e["type"] == "login":
+            last_login = e["ts"]
+        elif e["type"] == "order" and last_login is not None:
+            gap = e["ts"] - last_login
+            l2o = gap if l2o is None else min(l2o, gap)
+    return {
+        "uid": uid,
+        "found": True,
+        "sessions": len(sessions),
+        "session_gap_seconds": session_gap_seconds,
+        "top_paths": [{"path": p, "count": c} for p, c in path_counts.most_common(5)],
+        "login_to_order_min_seconds": l2o,
     }
 
 

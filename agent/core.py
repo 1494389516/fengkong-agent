@@ -10,6 +10,8 @@ MAX_TOOL_ROUNDS 防止模型陷入无限调工具的循环。
   ④ 工具裁剪    —— TOOL_KEEP_TURNS 之前的 tool 结果替换成占位符(结论已被 assistant 吸收)。
   ⑤ checkpoint  —— CHECKPOINT_EVERY 轮把旧历史压成一条摘要(代价最高,默认关)。
   ⑥ 硬预算兜底  —— 发送前粗估上下文,超 CONTEXT_EST_TOKEN_BUDGET 强制压缩(保险丝)。
+  ⑦ 脱敏层      —— FK_PRIVACY=1 时,uid/IP/设备号在 LLM 边界双向替换(privacy.py),
+                    敏感标识符不出程序,公有云 API 部署的合规前提。
 (② 工具限幅在 tools/dispatch 单点做;③ 案例隔离用 reset(),由 CLI /reset 触发。)
 """
 import json
@@ -18,6 +20,7 @@ from typing import Callable, Dict, List, Optional
 
 from . import tools
 from .llm import load_config, make_client
+from .privacy import Tokenizer, privacy_enabled
 
 MAX_TOOL_ROUNDS = 8
 
@@ -78,6 +81,9 @@ class Agent:
             "cache_hit": 0, "cache_miss": 0, "api_calls": 0,
         }
         self._asks_since_ckpt = 0
+        # ⑦ 脱敏:token 映射跨轮复用(同值同 token,LLM 才能跨轮关联同一账号)
+        self._privacy = privacy_enabled()
+        self._tok = Tokenizer() if self._privacy else None
 
     # ③ 案例隔离:清空对话历史只留 system,让下一个案例在干净上下文里跑。
     #   session_usage 故意不清零 —— 度量要覆盖整场,不因换案例而丢失。
@@ -162,7 +168,9 @@ class Agent:
         on_usage(usage_dict) —— ① 每次 API 响应后实时回调本轮 token 用量。
         on_notice(text)      —— ⑥ 兜底等内部动作的提示,CLI 可打印告知用户。
         """
-        self.messages.append({"role": "user", "content": user_input})
+        # ⑦ 用户输入里的真实 uid/IP/设备号在进 LLM 前替换成 token
+        self.messages.append({"role": "user", "content":
+                              self._tok.tokenize(user_input) if self._privacy else user_input})
         compacted_this_ask = False  # ⑥ 每轮 ask 最多强制压缩一次,防压缩循环
         for _ in range(MAX_TOOL_ROUNDS):
             self._trim_tool_messages()  # ④ 发送前裁剪
@@ -184,9 +192,11 @@ class Agent:
                 on_usage(usage)
             msg = resp.choices[0].message
             if not msg.tool_calls:
+                # ⑦ 历史里保持 token 形态(一致性),展示给人时反解
                 self.messages.append({"role": "assistant", "content": msg.content})
                 self._maybe_checkpoint()  # ⑤
-                return msg.content or ""
+                answer = msg.content or ""
+                return self._tok.detokenize(answer) if self._privacy else answer
             # assistant 消息(含 tool_calls)必须原样入历史,否则下一轮 API 会拒绝 tool 消息
             self.messages.append({
                 "role": "assistant",
@@ -195,16 +205,22 @@ class Agent:
             })
             for tc in msg.tool_calls:
                 name = tc.function.name
+                args_str = tc.function.arguments or "{}"
+                if self._privacy:  # ⑦ LLM 传来的 token 参数反解成真值再执行
+                    args_str = self._tok.detokenize(args_str)
                 try:
-                    args = json.loads(tc.function.arguments or "{}")
+                    args = json.loads(args_str)
                 except json.JSONDecodeError:
                     args = {}
                 if on_tool:
                     on_tool(name, args)
                 result = tools.dispatch(name, args)  # ② 限幅在 dispatch 内统一做
+                content = json.dumps(result, ensure_ascii=False, default=str)
+                if self._privacy:  # ⑦ 工具结果回填历史前替换成 token
+                    content = self._tok.tokenize(content)
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                    "content": content,
                 })
         return "[单轮工具调用已达上限 %d 次,强制停止]" % MAX_TOOL_ROUNDS
