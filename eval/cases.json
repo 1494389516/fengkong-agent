@@ -38,6 +38,28 @@
       "expect_rules": []
     }
   ],
+  "backtest_checks": {
+    "_comment": "基线指标断言:宽口径应全对;严口径 recall=0.4 是已知状态(套现团伙靠 review 兜底),数值变了说明规则行为变了。",
+    "flag=review+reject": {"precision": 1.0, "recall": 1.0, "f1": 1.0},
+    "flag=reject_only": {"precision": 1.0, "recall": 0.4}
+  },
+  "monitor_cases": [
+    {
+      "name": "刷券脚本应报高频 + IP 轮换",
+      "uid": "u_1002",
+      "expect_signal_any": ["burst", "ip_churn"]
+    },
+    {
+      "name": "正常账号无任何异常信号(误伤守卫)",
+      "uid": "u_1001",
+      "expect_signal_count": 0
+    },
+    {
+      "name": "套现团伙应报设备聚集",
+      "uid": "u_1003",
+      "expect_signal_any": ["shared_device"]
+    }
+  ],
   "agent_cases": [
     {
       "name": "刷券账号研判",

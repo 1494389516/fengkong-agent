@@ -24,6 +24,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from agent.tools.backtest import backtest  # noqa: E402
+from agent.tools.charts import chart_account_timeline, chart_threshold_sweep  # noqa: E402
+from agent.tools.monitor import account_monitor  # noqa: E402
 from agent.tools.rules import rule_eval  # noqa: E402
 
 
@@ -49,6 +52,64 @@ def run_rule_layer(cases) -> int:
                 ",".join(got_rules) or "-", ",".join(sorted(c["expect_rules"])) or "-"))
             for h in r["hits"]:
                 print("         命中 %s[%s]: %s" % (h["rule_id"], h["action"], h["reason"]))
+    return failures
+
+
+def run_backtest_layer(checks) -> int:
+    """离线:基线指标断言。数值漂了说明规则行为变了,即使方向是'变好'也要显式确认。"""
+    print("\n== 指标回测(离线)==")
+    failures = 0
+    r = backtest()
+    for point, expects in checks.items():
+        if point.startswith("_"):
+            continue
+        got = r["operating_points"][point]
+        for metric, want in expects.items():
+            ok = abs(got[metric] - want) < 1e-6
+            if not ok:
+                failures += 1
+            print("  [%s] %s %s=%.4f(期望 %.4f)" % (
+                "PASS" if ok else "FAIL", point, metric, got[metric], want))
+    if r["misclassified_at_review_point"]:
+        print("  宽口径误判账号:%s" % r["misclassified_at_review_point"])
+    return failures
+
+
+def run_monitor_layer(cases) -> int:
+    """离线:监控信号断言,含误伤守卫(正常账号必须零信号)。"""
+    print("\n== 监控信号(离线,%d 个案例)==" % len(cases))
+    failures = 0
+    for c in cases:
+        r = account_monitor(c["uid"])
+        got = r.get("signal_types", [])
+        problems = []
+        want_any = c.get("expect_signal_any", [])
+        if want_any and not set(want_any) & set(got):
+            problems.append("缺少期望信号(任一):%s,实际 %s" % (want_any, got or "无"))
+        if "expect_signal_count" in c and len(got) != c["expect_signal_count"]:
+            problems.append("信号数 %d != 期望 %d,实际信号 %s" % (len(got), c["expect_signal_count"], got))
+        if problems:
+            failures += 1
+        print("  [%s] %s(信号:%s)" % ("PASS" if not problems else "FAIL",
+                                         c["name"], ",".join(got) or "无"))
+        for p in problems:
+            print("         问题:%s" % p)
+    return failures
+
+
+def run_chart_smoke() -> int:
+    """离线:图表冒烟 —— 两类图各渲染一次,文件真实落盘即过。"""
+    print("\n== 图表冒烟(离线)==")
+    failures = 0
+    for name, result in (
+        ("账号时间线 u_1002", chart_account_timeline("u_1002")),
+        ("阈值扫描 r002_min_events", chart_threshold_sweep("r002_min_events")),
+    ):
+        path = result.get("chart_path", "")
+        ok = bool(path) and (ROOT / path).exists()
+        if not ok:
+            failures += 1
+        print("  [%s] %s -> %s" % ("PASS" if ok else "FAIL", name, path or result))
     return failures
 
 
@@ -116,6 +177,9 @@ def main() -> int:
     args = ap.parse_args()
     cases = load_cases()
     failures = run_rule_layer(cases["rule_cases"])
+    failures += run_backtest_layer(cases["backtest_checks"])
+    failures += run_monitor_layer(cases["monitor_cases"])
+    failures += run_chart_smoke()
     if args.offline:
         pass
     elif not os.environ.get("DEEPSEEK_API_KEY"):
