@@ -479,6 +479,12 @@ def run_policy_layer() -> int:
             r_early = rule_eval(early)
             r_late = rule_eval(late)
             r_cur = rule_eval(early, use_current_policy=True)
+            # rule_drift 双口径:同一版本表下,当前口径与当时口径的命中率差异
+            # 必须与 policy_shift_note 的有无一致(有差必有注记,无差必无)——
+            # 监控层对"自己批的阈值"不再失明
+            rd = registry.dispatch("rule_drift", {})
+            has_diff = any("flag_rate_asof" in e for e in rd["verdict_mix"]["trend"]) \
+                if rd.get("found") else False
             checks = [
                 ("回放 v1 期事件:模式已成立应拦截",
                  r_early["action"] == "reject" and r_early["policy_version"] == 1),
@@ -486,6 +492,8 @@ def run_policy_layer() -> int:
                  r_late["action"] == "pass" and r_late["policy_version"] == 2),
                 ("同一事件改用当前策略(v2):结论翻转",
                  r_cur["action"] == "pass" and r_cur["policy_version"] == 2),
+                ("rule_drift 双口径:as-of 差异与 policy_shift_note 一致",
+                 has_diff == bool(rd.get("policy_shift_note"))),
             ]
         finally:
             os.environ.pop("FK_DATA_DIR", None)
@@ -902,6 +910,17 @@ def run_stats_layer() -> int:
         ("小样本守卫:任一侧不足即 None",
          numeric_psi([1.0] * 5, [2.0] * 100) is None
          and psi_against_edges(edges, same, expected_n=5) is None),
+        # 尖峰三连:①去重路径尖峰自比=0;②带重复切点的 rank 还原路径,尖峰在
+        # 最大值时需 p999 提示折尾箱(否则空尾箱推高自比,历史实测 0.70);
+        # ③反例钉死"去重统一"是错修法(去重后 rank 还原把尖峰质量摊薄)
+        ("尖峰分布:两条 PSI 路径自比都≈0(顶部尖峰经 p999 折尾)",
+         (lambda spike, dec: numeric_psi(spike, list(spike)) == 0.0
+          and psi_against_edges(dec, spike, expected_p999=240.0) < 0.02
+          and psi_against_edges(dec, spike) > 0.25
+          and psi_against_edges(sorted(set(dec)), spike, expected_p999=240.0) > 0.25)(
+             [240.0] * 800 + [float(i) for i in range(200)],
+             [round(q, 4) for q in statistics.quantiles(
+                 [240.0] * 800 + [float(i) for i in range(200)], n=10, method="inclusive")])),
         ("AUC:完全可分=1,全同值=0.5,同分布≈0.5",
          _auc([10 + i for i in range(50)], [i * 0.1 for i in range(50)]) == 1.0
          and _auc([1.0] * 30, [1.0] * 30) == 0.5

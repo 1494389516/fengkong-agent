@@ -138,14 +138,19 @@ def categorical_psi(expected: Counter, actual: Counter,
 
 
 def psi_against_edges(edges: Sequence[float], actual_vals: Sequence[float],
-                      expected_n: Optional[int] = None) -> Optional[float]:
+                      expected_n: Optional[int] = None,
+                      expected_p999: Optional[float] = None) -> Optional[float]:
     """当前分布 vs 历史快照切点的 PSI。切点来自快照期的等频分箱,expected
     占比由切点重数还原(重复切点 = 快照大量取值恰在该点,其占比要归并到
     以该点为上界的箱)—— 快照只需存 9 个数,不必存原始样本。calibrate 的
     漂移检查用它替代单点 P99 比对:P99 只看尾部一个点,中段的整体位移
     (温水煮青蛙式养基线)只有分布级比较才看得见。
     expected_n 传快照期样本量:任一侧样本不足 MIN_PSI_SAMPLES 返回 None
-    (调用方回退到 P99 单点口径 —— 小样本上分位切点本身就没统计意义)。"""
+    (调用方回退到 P99 单点口径 —— 小样本上分位切点本身就没统计意义)。
+    expected_p999 传快照期 P999:修"尖峰在最大值"的等频假设破绽 —— 大量
+    取值恰为分布最大值时,末切点=最大值,等频还原却认为其上还有一箱质量,
+    自比 PSI 会被这个永远空着的尾箱推过告警线(实测 80% 顶部尖峰自比 0.70)。
+    P999 不超过末切点即说明尾部无实质质量,把尾箱期望并回末箱。"""
     edges = sorted(edges)
     if not edges or not actual_vals:
         return None
@@ -155,15 +160,30 @@ def psi_against_edges(edges: Sequence[float], actual_vals: Sequence[float],
         return None
     n = len(edges) + 1  # 原始等频箱数,每箱 1/n 质量
     uniq = sorted(set(edges))
-    # rank(u) = 快照中 <= u 的质量份额;unique 箱占比 = 相邻 rank 之差
+    # rank(u) = 快照中 <= u 的质量份额;unique 箱占比 = 相邻 rank 之差。
+    # 注意:edges 刻意不去重(population_baseline 同样刻意保留重复)——
+    # 重复切点的重数就是质量信息,先去重再假设等频会把尖峰质量摊薄
+    # (实测去重后尖峰自比 PSI 2.87,统计核心 eval 层钉着这一点)
     rank = {u: (len(edges) - list(reversed(edges)).index(u)) / n for u in uniq}
     ef, prev = [], 0.0
     for u in uniq:
         ef.append(rank[u] - prev)
         prev = rank[u]
-    ef.append(1.0 - prev)
+    tail = 1.0 - prev
+    if expected_p999 is not None and expected_p999 <= uniq[-1]:
+        ef[-1] += tail  # 尾部无实质质量:期望并回末箱,不留永远空着的尾箱
+        tail = 0.0
+    ef.append(tail)
     af = _bin_fracs(actual_vals, uniq)
     return _psi(ef, af)
+
+
+def _sustained(psis: List[Optional[float]]) -> bool:
+    """多重比较纪律:6 特征 × N 桶就是几十次比较,孤桶偶然超线的概率不低,
+    在源头造告警再让 ops 层去压疲劳是自相矛盾。过线告警须满足其一:
+    ①至少 2 个桶超告警线(持续性);②单桶超过 2 倍告警线(幅度大到不像噪声)。"""
+    over = [p for p in psis if p is not None and p > PSI_ALARM]
+    return len(over) >= 2 or any(p > 2 * PSI_ALARM for p in over)
 
 
 def psi_level(psi: Optional[float]) -> str:
@@ -290,6 +310,7 @@ def _grouped_profile(feats: List[str], group_col: str, psi_bins: int,
             if psi is not None and (worst_psi is None or psi > worst_psi):
                 worst_psi, worst_group = psi, g
         level = psi_level(worst_psi)
+        # 分群是横截面不是时序,"孤组超线"本身就是结论,持续性纪律不适用
         if level == "alarm":
             alarms.append("%s 在分组 %s=%s PSI=%.3f(>%.2f),该群体行为分布异于大盘" % (
                 feat, group_col, worst_group, worst_psi, PSI_ALARM))
@@ -399,7 +420,7 @@ def feature_drift(time_grain: str = "day",
             misses.append(round(miss / n, 4) if n else None)
             psis.append(psi)
         level = psi_level(worst_psi)
-        if level == "alarm":
+        if level == "alarm" and _sustained(psis):
             alarms.append("%s 在 %s PSI=%.3f(>%.2f)" % (feat, worst_bucket, worst_psi, PSI_ALARM))
         feature_out[feat] = {
             "worst_psi": worst_psi, "worst_bucket": worst_bucket, "level": level,
@@ -418,7 +439,7 @@ def feature_drift(time_grain: str = "day",
             worst_psi, worst_bucket = psi, lb
         type_trend.append({"bucket": lb, "psi": psi})
     level = psi_level(worst_psi)
-    if level == "alarm":
+    if level == "alarm" and _sustained([t["psi"] for t in type_trend]):
         alarms.append("event_type_mix 在 %s PSI=%.3f(>%.2f)" % (worst_bucket, worst_psi, PSI_ALARM))
 
     tail_partial = _tail_partial(buckets, labels)
@@ -475,7 +496,8 @@ def _hit_rate_alarm(bench_rate: float, rate: float) -> bool:
     name="rule_drift",
     description=(
         "规则输出漂移(后端监控):按时间分桶输出处置分布趋势与其相对基准的类别 "
-        "PSI、逐规则命中率趋势(翻倍/腰斩且超 5pp 报警)。不依赖标签,比回测灵敏。"
+        "PSI、逐规则命中率趋势(翻倍/腰斩且超 5pp 报警)。双口径重放(当前策略/"
+        "当时策略)分离调参与流量的影响(见 policy_shift_note)。不依赖标签。"
         "与 feature_drift 搭配:入参稳而输出动 = 查规则,一起动 = 流量变了。"
     ),
     parameters={
@@ -501,12 +523,19 @@ def rule_drift(time_grain: str = "day", benchmark_buckets: int = 1):
     benchmark_buckets = max(1, min(benchmark_buckets, len(labels) - 1))
     bench_labels = labels[:benchmark_buckets]
 
-    # 逐桶用当前策略评估(监控是"现在看",与 account_monitor 同口径);
-    # 账号在桶内的处置 = 桶内事件的最重动作,与 scan/backtest 共用实现
+    # 双口径逐桶评估(与 scan/backtest 共用实现,账号处置 = 桶内事件最重动作):
+    # current —— 全部桶用当前策略重放:策略被固定,趋势里剩下的只有流量变化;
+    # as-of  —— 每桶按事件当时生效的策略版本重放:这才是"当时实际的输出"。
+    # 只看 current 的监控对"输出漂移最常见的人为原因(自己批的阈值)"结构性
+    # 失明:第 4 天批了新阈值,current 重放会把跳变抹平。两口径的差 = 策略
+    # 变更的影响,当前稳而 as-of 动 = 调参在起效;两个都动 = 流量真变了。
     per_bucket: Dict[str, Dict] = {}
+    per_bucket_asof: Dict[str, Dict] = {}
     for lb in labels:
         evs = buckets[lb]
-        per_bucket[lb] = account_verdicts(sorted({e["uid"] for e in evs}), evs)
+        uids = sorted({e["uid"] for e in evs})
+        per_bucket[lb] = account_verdicts(uids, evs)
+        per_bucket_asof[lb] = account_verdicts(uids, evs, use_current_policy=False)
 
     def _mix(lbs: List[str]) -> Counter:
         return Counter(v["predicted"] for lb in lbs for v in per_bucket[lb].values())
@@ -515,24 +544,41 @@ def rule_drift(time_grain: str = "day", benchmark_buckets: int = 1):
     bench_n = sum(bench_mix.values())
     alarms: List[str] = []
 
-    # 处置分布趋势 + 类别 PSI
-    verdict_trend, worst_psi, worst_bucket = [], None, None
+    # 处置分布趋势 + 类别 PSI;flag_rate_asof 只在与当前口径有差时出现
+    verdict_trend, psis = [], []
+    worst_psi, worst_bucket = None, None
+    policy_effects = []
     for lb in labels:
         mix = _mix([lb])
         n = sum(mix.values())
         psi = None if lb in bench_labels else categorical_psi(bench_mix, mix)
+        psis.append(psi)
         if psi is not None and (worst_psi is None or psi > worst_psi):
             worst_psi, worst_bucket = psi, lb
-        verdict_trend.append({
+        flag = round((mix["reject"] + mix["review"]) / n, 4) if n else None
+        asof_mix = Counter(v["predicted"] for v in per_bucket_asof[lb].values())
+        asof_flag = round((asof_mix["reject"] + asof_mix["review"]) / n, 4) if n else None
+        entry = {
             "bucket": lb, "accounts": n,
             "reject_rate": round(mix["reject"] / n, 4) if n else None,
             "review_rate": round(mix["review"] / n, 4) if n else None,
-            "flag_rate": round((mix["reject"] + mix["review"]) / n, 4) if n else None,
+            "flag_rate": flag,
             **({"psi": psi} if lb not in bench_labels else {"benchmark": True}),
-        })
+        }
+        if flag is not None and asof_flag is not None and abs(flag - asof_flag) >= 0.01:
+            entry["flag_rate_asof"] = asof_flag
+            policy_effects.append((lb, flag, asof_flag))
+        verdict_trend.append(entry)
     level = psi_level(worst_psi)
-    if level == "alarm":
+    if level == "alarm" and _sustained(psis):
         alarms.append("处置分布在 %s PSI=%.3f(>%.2f)" % (worst_bucket, worst_psi, PSI_ALARM))
+    policy_shift_note = None
+    if policy_effects:
+        lb, flag, asof = max(policy_effects, key=lambda x: abs(x[1] - x[2]))
+        policy_shift_note = ("当前口径与当时口径的命中率在 %d 个桶有差(最大 %s:%.1f%% vs "
+                             "%.1f%%)= 策略变更的影响;当时口径的跳变若当前口径看不到,"
+                             "是调参造成的,不是流量" % (
+                                 len(policy_effects), lb, 100 * flag, 100 * asof))
 
     # 逐规则命中率:桶内命中该规则的账号占比。小样本桶不参与报警
     # (与 PSI 同一纪律:n 太小的占比波动是噪声,宁可只展示不报警)
@@ -575,6 +621,7 @@ def rule_drift(time_grain: str = "day", benchmark_buckets: int = 1):
                          "其告警需人工复核" % labels[-1]} if tail_partial else {}),
         "verdict_mix": {"worst_psi": worst_psi, "worst_bucket": worst_bucket,
                         "level": level, "trend": verdict_trend},
+        **({"policy_shift_note": policy_shift_note} if policy_shift_note else {}),
         "rules": rules_out,
         "alarm": bool(alarms),
         "alarms": alarms,

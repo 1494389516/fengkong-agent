@@ -4,14 +4,14 @@
 漂移监控(drift.py)看的是"分布变没变";本工具看的是对抗特有的两个信号,
 它们在整体分布上可能毫无动静:
 - 阈值试探:对手摸到阈值后会贴边飞行 —— R002 阈值 30 秒,一批账号的间隔
-  集中出现在 31~45 秒;R003 大额线 1000,订单批量出现在 800~999。监控
+  集中出现在 31~45 秒;R003 大额线 1000,订单批量出现在 900~999。监控
   "刚好没命中"的账号密度,涨起来就是对手在适应,这时候整体 PSI 往往还稳。
 - 团伙演化:图谱(graph_relations)是静态快照,团伙是活的 —— 一台设备上的
   账号数一周从 3 涨到 15,增速本身就是最强信号,不用等任何规则命中。
 
-近阈带按规则方向取:上触发规则(金额 >=)看阈值下方,下触发规则(间隔 <=)
-看阈值上方,带宽 NEAR_BAND 倍。报警沿用 drift 的双条件纪律(翻倍且绝对
-变幅超 5pp,小样本桶不报警)—— 贴边密度天然波动,单条件必然误报。
+近阈带按规则方向取且带宽不对称(NEAR_BAND_ABOVE/BELOW,取值依据见常量
+注释)。报警沿用 drift 的双条件纪律(翻倍且绝对变幅超 5pp,小样本桶不
+报警)—— 贴边密度天然波动,单条件必然误报。
 """
 from collections import defaultdict
 from typing import Dict, List, Optional
@@ -21,7 +21,12 @@ from .drift import (MIN_PSI_SAMPLES, _bucket_account_features, _bucket_events,
                     _head_partial, _hit_rate_alarm, _tail_partial, drift_alert_text)
 from .policy import active_policy
 
-NEAR_BAND = 1.5     # 近阈带宽:阈值的 1/1.5 ~ 1.5 倍
+# 近阈带宽按方向分开:above(下触发规则的规避者,如把间隔拉到 30s 线上方)
+# 行为上有安全余量诉求,带取 1~1.5 倍;below(上触发规则的规避者,如大额线
+# 下压单)会贴得很紧 —— 998 元的单不会退到 700,带太宽会把大量合法大额单
+# 算进"贴边密度",信号被稀释。below 带取 0.9 倍:[0.9*thr, thr)。
+NEAR_BAND_ABOVE = 1.5
+NEAR_BAND_BELOW = 0.9
 GANG_NEW_MIN = 3    # 单资源在最近一桶新增账号数达到此值即报增速告警
 
 
@@ -40,8 +45,8 @@ def _near_watches(p: Dict) -> List[Dict]:
 
 def _in_band(v: float, thr: float, side: str) -> bool:
     if side == "above":
-        return thr < v <= thr * NEAR_BAND
-    return thr / NEAR_BAND <= v < thr
+        return thr < v <= thr * NEAR_BAND_ABOVE
+    return thr * NEAR_BAND_BELOW <= v < thr
 
 
 @tool(
@@ -106,7 +111,10 @@ def adversary_watch(time_grain: str = "day", benchmark_buckets: int = 1):
                           "共 %d 桶超线,疑似阈值试探" % (
                               w["rule"], feat, side, 100 * bench_rate,
                               100 * worst_rate, worst_lb, len(alarmed)))
-        watches.append({**w, "band_ratio": NEAR_BAND,
+        watches.append({**w,
+                        "band": ("(%g, %g]" % (thr, thr * NEAR_BAND_ABOVE)
+                                 if side == "above" else
+                                 "[%g, %g)" % (thr * NEAR_BAND_BELOW, thr)),
                         "benchmark_rate": bench_rate, "trend": trend})
 
     # ② 团伙演化:共享资源(设备/IP)上账号的逐桶累计数,盯增速不盯存量

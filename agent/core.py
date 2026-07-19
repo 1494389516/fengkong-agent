@@ -117,10 +117,17 @@ class Agent:
             if m["role"] == "tool" and m["content"] != TRIM_PLACEHOLDER:
                 m["content"] = TRIM_PLACEHOLDER
 
-    # ⑥ 上下文粗估:len(json)/2。不追求准,追求便宜和方向正确(宁可高估)。
+    # ⑥ 上下文粗估,按字符类分档:CJK ~0.7 token/字,其余 ~0.25 token/字。
+    #   旧口径 chars/2 是 ASCII 假设,对中文重的证据链低估 25-30%,兜底会
+    #   比预期晚触发 —— 保险丝晚炸不是保守是失效。仍是粗估:追求便宜和
+    #   方向正确(宁可高估),精确对齐分词器不值得。
     def _estimate_context_tokens(self) -> int:
-        return sum(len(json.dumps(m, ensure_ascii=False, default=str))
-                   for m in self.messages) // 2
+        total = 0.0
+        for m in self.messages:
+            s = json.dumps(m, ensure_ascii=False, default=str)
+            cjk = sum(1 for ch in s if "\u4e00" <= ch <= "\u9fff")
+            total += cjk * 0.7 + (len(s) - cjk) * 0.25
+        return int(total)
 
     # ⑤/⑥ 共用:把 system 之后、最后一个用户轮次之前的历史压成一条摘要。
     #   保留最后一个用户轮次的完整尾巴 —— 兜底可能在工具循环中途触发,
