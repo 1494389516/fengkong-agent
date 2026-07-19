@@ -202,7 +202,7 @@ def run_gen_layer() -> int:
             biggest = max(sizes.items(), key=lambda kv: kv[1])
             failures = _report("数据生成 + 大样本回测(离线)", [
                 ("生成器退出码 0", proc.returncode == 0),
-                ("账号数 = 60(seed 7 确定性)", r["accounts_evaluated"] == 60),
+                ("账号数 = 63(seed 7 确定性)", r["accounts_evaluated"] == 63),
                 ("宽口径 recall >= 0.9", wide["recall"] >= 0.9),
                 ("宽口径 precision >= 0.8", wide["precision"] >= 0.8),
                 ("宽口径 f1 >= 0.85", wide["f1"] >= 0.85),
@@ -378,7 +378,9 @@ def run_profile_layer() -> int:
         ("注册风险分随主档进入档案(u_1002 高分 / u_1009 注册时干净)",
          p2["account"].get("register_risk_score", 0) >= 70
          and p9["account"].get("register_risk_score", 99) <= 20
-         and p2["account"].get("register_os") == "安卓"),
+         and p2["account"].get("register_os") == "安卓"
+         and p2["account"].get("register_os_version") == "9"
+         and p3["account"].get("register_os_version") == "7.1"),
         ("行为路径签名:bot 纯券流",
          (p2.get("behavior_paths") or {}).get("top_paths", [{}])[0].get("path") == "coupon_claim×20"),
         ("行为路径签名:套现 login→券×3→单",

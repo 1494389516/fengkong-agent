@@ -119,10 +119,12 @@ def _draw_profile_header(ax, uid, feats, mon, verdict):
         reg_hit = any(blacklist_query(d, v)["hit"] for d, v in
                       (("ip", acct.get("register_ip")), ("device_id", acct.get("register_device"))) if v)
         kyc_names = {0: "未认证", 1: "手机实名", 2: "身份证实名"}
+        os_txt = ("%s %s" % (acct.get("register_os", "?"),
+                             acct.get("register_os_version", ""))).strip()
         lines.append((_t("注册:%s(账龄 %d 天)· 渠道:%s · 注册方式:%s · 系统:%s · KYC:%s · 换绑:%d 次%s" % (
             pd.to_datetime(acct["registered_at"], unit="s").strftime("%Y-%m-%d"),
             (clock - acct["registered_at"]) // 86400, acct["register_channel"],
-            acct["register_method"], acct.get("register_os", "?"),
+            acct["register_method"], os_txt,
             kyc_names.get(acct["kyc_level"], acct["kyc_level"]),
             acct.get("phone_rebind_count", 0),
             " · [!]注册环境命中名单" if reg_hit else ""),
