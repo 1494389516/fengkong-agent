@@ -41,12 +41,18 @@ from .policy import active_policy
         "type": "object",
         "properties": {
             "uid": {"type": "string", "description": "要监控的用户 ID"},
-            "window_seconds": {"type": "integer", "description": "时间窗大小(秒),默认 300"},
+            "window_seconds": {"type": "integer", "minimum": 1,
+                               "description": "时间窗大小(秒),默认 300"},
         },
         "required": ["uid"],
     },
 )
 def account_monitor(uid: str, window_seconds: int = 300):
+    # 0/负值窗口会在翻滚窗分桶时除零;回落默认窗口而非报错 —— 否则连与窗口
+    # 无关的名单/设备指纹/地理跳变信号也会随异常一起丢失(schema minimum
+    # 不被模型可靠遵守,运行时兜底才是真防线)
+    if not window_seconds or window_seconds <= 0:
+        window_seconds = 300
     p = active_policy()  # 入口取一次快照,整个函数同一份口径
     events = load_events()
     mine = sorted((e for e in events if e["uid"] == uid), key=lambda e: e["ts"])

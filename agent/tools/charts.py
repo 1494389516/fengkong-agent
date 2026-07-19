@@ -112,8 +112,9 @@ PCT_FEATURES = [
 VERDICT_COLOR = {"reject": "#b00020", "review": "#e07b00", "pass": "#2a7d4f"}
 
 
-def _draw_profile_header(ax, uid, feats, mon, verdict):
+def _draw_profile_header(ax, uid, feats, verdict):
     """档案栏:注册上下文 / 价值与判定 / 活跃与信号 —— 回答'这个账号是谁'。"""
+    from .profile import _value_tier  # 惰性导入避开 charts<->graph<->profile 环
     ax.axis("off")
     acct = load_accounts().get(uid)
     clock = max((e["ts"] for e in load_events()), default=0)
@@ -132,11 +133,11 @@ def _draw_profile_header(ax, uid, feats, mon, verdict):
             acct.get("phone_rebind_count", 0),
             " · [!]注册环境命中名单" if reg_hit else ""),
             "registered %s" % acct["registered_at"]), "#333"))
-        ltv = acct.get("ltv", 0.0)
-        tier = "high" if ltv >= 1000 else ("medium" if ltv >= 100 else "low")
-        tier_note = {"high": "误伤代价高", "medium": "误伤代价中", "low": "误伤代价低"}[tier]
-        lines.append((_t("价值:LTV %.0f · 档位:%s(%s)" % (ltv, tier, tier_note),
-                         "LTV %.0f" % ltv), "#333"))
+        # 价值分档走 profile 的单一实现,阈值(1000/100)不在这里重钉一份
+        vt = _value_tier(acct.get("ltv", 0.0))
+        tier_note = {"high": "误伤代价高", "medium": "误伤代价中", "low": "误伤代价低"}[vt["tier"]]
+        lines.append((_t("价值:LTV %.0f · 档位:%s(%s)" % (vt["ltv"], vt["tier"], tier_note),
+                         "LTV %.0f" % vt["ltv"]), "#333"))
     else:
         lines.append((_t("无账号主档(注册信息缺失)", "no account record"), "#999"))
     reports_v = sum(1 for r in load_reports()
@@ -240,7 +241,7 @@ def chart_account_timeline(uid: str):
     ax_pct = fig.add_subplot(gs[1:, 3:])
     ax2 = fig.add_subplot(gs[2, :3], sharex=ax1)
 
-    _draw_profile_header(ax_info, uid, feats, mon, verdict)
+    _draw_profile_header(ax_info, uid, feats, verdict)
     _draw_baseline_panel(ax_pct, feats)
     # 每个 IP 一条微偏移的水平条带:bot 轮换 IP 时点会精确重叠,不偏移就只剩最后画的颜色
     off_step = min(0.09, 0.5 / max(len(ips), 1))
@@ -302,12 +303,14 @@ def chart_account_timeline(uid: str):
         "found": True,
         "chart_path": path,
         "signals": signals,
+        # 数字摘要复用 featurelib 的 feats(单一事实源),不从 df 另算一份 ——
+        # 避免"图上的数"和"特征层的数"两处口径漂移;窗口峰值是图独有的才留 df
         "summary": {
-            "event_count": len(df),
-            "span_seconds": int(df["ts"].max() - df["ts"].min()),
-            "distinct_ip": len(ips),
-            "distinct_device": int(df["device_id"].nunique()),
-            "types": {k: int(v) for k, v in df["type"].value_counts().items()},
+            "event_count": feats["event_count"],
+            "span_seconds": int(feats["span_seconds"]),
+            "distinct_ip": feats["distinct_ip"],
+            "distinct_device": feats["distinct_device"],
+            "types": feats["event_types"],
             "busiest_window_events": int(win.max()),
         },
     }

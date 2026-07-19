@@ -39,6 +39,28 @@ def _save_pending(items: List[Dict]) -> None:
         json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def _limit_violations(values: Dict, current: Dict) -> List[str]:
+    """逐参数校验变更幅度,返回违规说明列表(空=全部通过)。
+    - 开关键:取值只允许 0/1,其余(含 0.5 这类)一律拒。
+    - 数值键:按 ±MAX_CHANGE_RATIO 限速;现值为 0 时比例无意义,任何非零变更
+      都是无穷变幅,一律拒(需先小步离开 0)—— 之前 `and current[k]` 会在
+      现值 0 时短路跳过整个检查,让被某版本置 0 的参数(如 r006_reject_rooted=0)
+      可无限幅提案。"""
+    bad = []
+    for k, v in values.items():
+        if k in policy.SWITCH_KEYS:
+            if v not in (0, 1):
+                bad.append("%s: 开关键只接受 0/1,收到 %s" % (k, v))
+            continue
+        cur = current[k]
+        if cur == 0:
+            if v != 0:
+                bad.append("%s: %s -> %s(现值 0,任何非零变更均超限速,请分步)" % (k, cur, v))
+        elif abs(v - cur) / abs(cur) > policy.MAX_CHANGE_RATIO:
+            bad.append("%s: %s -> %s" % (k, cur, v))
+    return bad
+
+
 @tool(
     name="blacklist_add",
     description=(
@@ -116,14 +138,12 @@ def threshold_propose(values: Dict, reason: str):
     if bad:
         return {"error": "未知阈值参数: %s" % ", ".join(bad)}
     current = policy.active_policy()
-    # 开关型参数(0/1)不适用比例限速:1->0 的变幅是 100%,按比例永远提不了案
-    too_big = ["%s: %s -> %s" % (k, current[k], v) for k, v in values.items()
-               if not {current[k], v} <= {0, 1}
-               and current[k] and abs(v - current[k]) / abs(current[k]) > policy.MAX_CHANGE_RATIO]
-    if too_big:
+    bad = _limit_violations(values, current)
+    if bad:
         return {"status": "rejected_rate_limit",
-                "detail": too_big,
-                "note": "单次变幅限速 ±%d%%(防被极端数据/被养过的基线一次带飞);"
+                "detail": bad,
+                "note": "开关键只接受 0/1;数值键单次变幅限速 ±%d%%(防被极端数据/"
+                        "被养过的基线一次带飞),现值为 0 的键任何非零变更都超限,"
                         "确需大改请分步提案并逐步验证" % int(policy.MAX_CHANGE_RATIO * 100)}
     pending = _load_pending()
     dup = [a for a in pending if a.get("kind") == "threshold_change"
@@ -161,13 +181,16 @@ def decide(action_id: int, approve: bool) -> Optional[Dict]:
         return None
     action = matched[0]
     kind = action.get("kind", "blacklist_add")
-    _save_pending([a for a in pending if a["action_id"] != action_id])
     applied_version = None
+    # 先落盘、后出队:apply 抛异常(磁盘满/权限/文件损坏)时申请留在队列可重试,
+    # 不会静默丢失一次审批。之前"先出队再 apply"在写失败时会永久吞掉批准。
     if approve:
         if kind == "threshold_change":
             applied_version = policy.apply_change(action)["version"]
         else:
-            records = load_blacklist()
+            # load_blacklist() 返回 datasource 的缓存对象,直接 append 会就地污染
+            # 进程内缓存(写盘失败也留下幻影名单),必须先拷贝
+            records = list(load_blacklist())
             records.append({
                 "dimension": action["dimension"],
                 "value": action["value"],
@@ -178,6 +201,7 @@ def decide(action_id: int, approve: bool) -> Optional[Dict]:
             })
             blacklist_path().write_text(
                 json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
+    _save_pending([a for a in pending if a["action_id"] != action_id])
     with open(audit_log_path(), "a", encoding="utf-8") as f:
         f.write(json.dumps({
             "ts": _now_iso(),

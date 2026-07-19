@@ -75,11 +75,22 @@ def threshold_calibrate(fpr_budget: float = 0.01):
     if ref:
         for feat, cur in baseline.items():
             old_p99 = (ref.get(feat) or {}).get("p99")
-            if old_p99:
-                ratio = abs(cur["p99"] - old_p99) / abs(old_p99)
-                if ratio > DRIFT_ALARM_RATIO:
-                    drift_alarms.append("%s P99 漂移 %.0f%%(%.4g -> %.4g)" % (
-                        feat, 100 * ratio, old_p99, cur["p99"]))
+            if old_p99 is None:  # 快照没记这个特征才是"缺失";0 是合法基线值
+                continue
+            new_p99 = cur["p99"]
+            if old_p99 == 0:
+                # 上版基线为 0(当时人群该特征几乎不出现),现在被抬起来 =
+                # 从无到有的漂移,恰恰是最可疑的养基线信号。比例无从计算
+                # (除零),只要新值离 0 就告警 —— 之前 `if old_p99:` 把 0 当
+                # 缺失直接跳过,让零基线特征的养基线漂移永不告警。
+                if new_p99 != 0:
+                    drift_alarms.append("%s P99 从 0 抬升到 %.4g(从无到有,养基线嫌疑)"
+                                        % (feat, new_p99))
+                continue
+            ratio = abs(new_p99 - old_p99) / abs(old_p99)
+            if ratio > DRIFT_ALARM_RATIO:
+                drift_alarms.append("%s P99 漂移 %.0f%%(%.4g -> %.4g)" % (
+                    feat, 100 * ratio, old_p99, new_p99))
 
     suggestions = _derive(fpr_budget)
     changed = {k: v for k, v in suggestions.items() if v != pol[k]}

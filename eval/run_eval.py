@@ -205,9 +205,22 @@ def run_gen_layer() -> int:
             from measure_costs import tool_result_sizes
             sizes = dict(tool_result_sizes())
             biggest = max(sizes.items(), key=lambda kv: kv[1])
+            # 账号结构断言不钉死总数:normal/bots/stolen 由循环次数决定(与 RNG 流
+            # 无关),团伙成员数是每团 randint(3,6) 才随机。之前钉 "==62" 每加一处
+            # random() 调用就位移 RNG 流、逼着改这个数;改成"确定部分精确 + 团伙部分
+            # 范围"后,断言只在账号结构真的坏了时才红。
+            per = r["per_account"]
+            n_norm = sum(1 for u in per if u.startswith("g_norm_"))
+            n_bot = sum(1 for u in per if u.startswith("g_bot_"))
+            n_ring = sum(1 for u in per if u.startswith("g_ring_"))
+            n_stl = sum(1 for u in per if u.startswith("g_stl_"))
             failures = _report("数据生成 + 大样本回测(离线)", [
                 ("生成器退出码 0", proc.returncode == 0),
-                ("账号数 = 62(seed 7 确定性)", r["accounts_evaluated"] == 62),
+                ("normal 账号 = 40(循环次数,与随机流无关)", n_norm == 40),
+                ("bot 账号 = 4", n_bot == 4),
+                ("stolen 账号 = 3", n_stl == 3),
+                ("团伙账号在 3 团 ×[3,6] 成员区间 = [9,18]", 9 <= n_ring <= 18),
+                ("回测账号数 = 各类之和", r["accounts_evaluated"] == n_norm + n_bot + n_ring + n_stl),
                 ("宽口径 recall >= 0.9", wide["recall"] >= 0.9),
                 ("宽口径 precision >= 0.8", wide["precision"] >= 0.8),
                 ("宽口径 f1 >= 0.85", wide["f1"] >= 0.85),

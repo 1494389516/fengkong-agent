@@ -24,8 +24,12 @@ from .rules import rule_eval
 
 _cache: Dict = {}
 
+# 缓存失效键必须覆盖 rule_eval 的全部数据输入,漏一个就会返回陈旧对账结果:
+# events(特征)、blacklist(R001)、thresholds(策略版本)、accounts(R004/R005
+# 注册分)、device_intel(R006 设备指纹硬拦截)。device_intel 曾遗漏 —— 改了
+# 设备指纹但对账仍吐旧的一致率,失信标记全部失真。
 _STATE_FILES = ("events_sample.json", "decisions_log.json", "thresholds.json",
-                "blacklist.json", "accounts.json")
+                "blacklist.json", "accounts.json", "device_intel.json")
 
 
 def _state_key():

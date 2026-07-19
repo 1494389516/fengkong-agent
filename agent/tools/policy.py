@@ -74,6 +74,12 @@ RULE_KEYS = ("r002_max_gap_seconds", "r002_min_events", "r002_reject_min_ips",
              "r005_min_register_score", "r005_max_account_age_seconds",
              "r006_reject_emulator", "r006_reject_rooted", "r006_reject_hook")
 
+# 开关型参数(取值只允许 0/1):强拒开/关。显式声明而非按值域猜"是不是开关"
+# —— 按 {现值,新值}⊆{0,1} 推断会把恰好取 0/1 的数值参数误判成开关而豁免限速,
+# 也会放过 0.5 这种"既非开也非关"的非法值。限速对开关无意义(1->0 变幅 100%),
+# 但要卡死取值域只能 0/1。
+SWITCH_KEYS = ("r006_reject_emulator", "r006_reject_rooted", "r006_reject_hook")
+
 MAX_CHANGE_RATIO = 0.5  # 提案限速:单参数变幅超 ±50% 拒绝,防一次校准被极端数据带飞
 
 _OVERRIDES: Dict[str, float] = {}

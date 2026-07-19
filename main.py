@@ -52,7 +52,11 @@ def main():
             print("  [已重置] 开一个干净案例上下文;session token 计数保留。")
             continue
         if low == "/pending":
-            items = actions.list_pending()
+            try:
+                items = actions.list_pending()
+            except Exception as e:  # noqa: BLE001  队列文件损坏不该掀翻整个 CLI
+                print("  [错误] 读取待审批队列失败:%s" % e)
+                continue
             if not items:
                 print("  [待审批] 队列为空。")
             for a in items:
@@ -69,7 +73,11 @@ def main():
             if len(parts) != 2 or not parts[1].isdigit():
                 print("  用法:/approve <id> 或 /deny <id>,id 见 /pending")
                 continue
-            a = actions.decide(int(parts[1]), approve=approve)
+            try:
+                a = actions.decide(int(parts[1]), approve=approve)
+            except Exception as e:  # noqa: BLE001  落盘失败时申请仍留在队列,可重试
+                print("  [错误] 审批未完成(申请仍在队列,可重试):%s" % e)
+                continue
             if a is None:
                 print("  查无此申请,/pending 查看当前队列。")
             elif a.get("kind", "blacklist_add") == "threshold_change":

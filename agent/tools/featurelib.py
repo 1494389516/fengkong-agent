@@ -20,9 +20,30 @@ from typing import Dict, List, Optional, Tuple
 from .datasource import data_dir, load_events
 
 
+_uid_index_cache: Dict[str, tuple] = {}
+
+
+def _events_by_uid() -> Dict[str, List[Dict]]:
+    """按 uid 分组的事件索引,按数据集 (路径, mtime) 缓存(_dataset_key 见下)。
+    回测/巡检要对每个账号取事件:没有索引时每次都全量扫 events,N 账号 × E 事件
+    退化成 O(N·E)(大样本上量到过 6000+ 次全表扫描);建一次索引后账号取数只碰
+    自己那一撮。索引条目从不外泄(返回都是新列表),不会被调用方就地改写。"""
+    key = _dataset_key()
+    hit = _uid_index_cache.get("idx")
+    if hit and hit[0] == key:
+        return hit[1]
+    idx: Dict[str, List[Dict]] = {}
+    for e in load_events():
+        idx.setdefault(e["uid"], []).append(e)
+    _uid_index_cache["idx"] = (key, idx)
+    return idx
+
+
 def _account_events(uid: str, as_of_ts: Optional[float] = None) -> List[Dict]:
-    return [e for e in load_events()
-            if e["uid"] == uid and (as_of_ts is None or e["ts"] < as_of_ts)]
+    evs = _events_by_uid().get(uid, ())
+    if as_of_ts is None:
+        return list(evs)
+    return [e for e in evs if e["ts"] < as_of_ts]
 
 
 def account_features(uid: str, as_of_ts: Optional[float] = None,
