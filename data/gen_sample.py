@@ -111,9 +111,11 @@ class Gen:
                         self.emit(uid, ip, device, "coupon_claim", t)
         # 老账号(注册远早于观察窗),LTV = 观察窗内消费 + 历史存量
         spent = sum(e.get("amount", 0) for e in self.events if e["uid"] == uid)
+        # 注册方式分布贴近真实:手机号为主,微信/抖音三方登录为辅
+        method = r.choices(["手机号", "微信", "抖音号"], weights=[6, 3, 1])[0]
         self.register(uid, T0 - r.randint(30, 400) * DAY,
                       r.choice(["appstore_organic", "android_store", "web_organic"]),
-                      "phone", ips[0], device, r.choice([1, 2]),
+                      method, ips[0], device, r.choice([1, 2]),
                       spent + r.uniform(0, 2000))
         if r.random() < 0.01:  # 恶意/误举报噪音:正常用户偶被举报,核实后不属实
             self.report(uid, T0 + r.randint(0, days * DAY), "promo_abuse",
@@ -136,9 +138,9 @@ class Gen:
         if r.random() < 0.4:  # 名单不完整:只有部分 bot 设备被收录
             self.blacklist.append({"dimension": "device_id", "value": device, "list": "gray",
                                    "reason": "生成:批量行为设备指纹", "added_at": "2026-07-15"})
-        # 新注册 + 渠道包 + 无 KYC 零消费:bot 的典型出生证明
-        self.register(uid, T0 - r.randint(0, 2 * DAY), "web_promo", "email",
-                      ips[0], device, 0, 0.0)
+        # 新注册 + 渠道包 + 三方号池(抖音/微信批量号)+ 无 KYC 零消费:bot 的典型出生证明
+        self.register(uid, T0 - r.randint(0, 2 * DAY), "web_promo",
+                      r.choice(["抖音号", "微信"]), ips[0], device, 0, 0.0)
         self.labels[uid] = {"label": "fraud", "note": "生成:刷券脚本%s" % ("(慢速)" if slow else "")}
 
     # ---- 套现团伙:共用模拟器设备,领券 -> 小额单 ----
@@ -154,8 +156,8 @@ class Gen:
             ip = "198.51.100.%d" % r.randint(1, 250)
             self.seg_intel(ip, "idc", ("上海", 31.23, 121.47), "medium", "云主机段")
             t = T0 + r.randint(0, days - 1) * DAY + m * r.randint(1800, 5400)
-            # 批量注册:开工前几分钟到两小时,邀请渠道,同一台设备
-            self.register(uid, t - r.randint(600, 7200), "invite", "phone",
+            # 批量注册:开工前几分钟到两小时,邀请渠道 + 接码平台手机号,同一台设备
+            self.register(uid, t - r.randint(600, 7200), "invite", "手机号",
                           ip, device, 0, 0.0)
             self.emit(uid, ip, device, "login", t)
             for _ in range(r.randint(3, 5)):
@@ -181,8 +183,8 @@ class Gen:
             # 新号盗卡:秒拨段(地理不可信,不参与跳变计算 —— 这正是秒拨的意义)
             ip = "192.0.2.%d" % r.randint(1, 250)
             self.seg_intel(ip, "proxy", None, "high", "秒拨池,地理位置漂移不可信")
-            self.register(uid, t - r.randint(600, 43200), "web_promo", "email",
-                          ip, device, 0, 0.0)
+            self.register(uid, t - r.randint(600, 43200), "web_promo",
+                          r.choice(["抖音号", "微信"]), ip, device, 0, 0.0)
             note = "生成:新号盗卡"
         else:
             # 老号盗用:机主刚在常驻城市下线,盗号者 15~60 分钟后从境外机房上线
@@ -193,7 +195,7 @@ class Gen:
             home = r.choice(CITIES)
             self.seg_intel(home_ip, "residential", home, "low")
             owner_device = "g_dev_owner%03d" % i
-            self.register(uid, T0 - r.randint(200, 700) * DAY, "appstore_organic", "phone",
+            self.register(uid, T0 - r.randint(200, 700) * DAY, "appstore_organic", "手机号",
                           home_ip, owner_device, 2, r.uniform(2000, 20000), rebind=1)
             self.emit(uid, home_ip, owner_device, "login", t - r.randint(900, 3600))
             self.report(uid, t + r.randint(3600, DAY), "unauthorized_charge",
