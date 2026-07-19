@@ -112,8 +112,11 @@ def chart_account_timeline(uid: str):
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True,
                                    height_ratios=[2, 1], constrained_layout=True)
+    # 每个 IP 一条微偏移的水平条带:bot 轮换 IP 时点会精确重叠,不偏移就只剩最后画的颜色
+    off_step = min(0.09, 0.5 / max(len(ips), 1))
+    ip_off = {ip: (i - (len(ips) - 1) / 2) * off_step for i, ip in enumerate(ips)}
     for ip, g in df.groupby("ip"):
-        ax1.scatter(g["dt"], g["type"].map(types.index), s=45, color=color[ip],
+        ax1.scatter(g["dt"], g["type"].map(types.index) + ip_off[ip], s=45, color=color[ip],
                     label=ip, alpha=0.85, edgecolors="none")
     if "amount" in df.columns:
         for _, row in df[df["amount"].notna()].iterrows():
@@ -251,12 +254,15 @@ def chart_cohort_features():
     norm = (mat - mat.min()) / rng
     annot = mat.map(lambda v: "-" if pd.isna(v) else "%g" % v)
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8.5), constrained_layout=True,
-                                   height_ratios=[1.2, 1])
+    # 行数决定画布高度:固定高度下 40 行的行标签必然互相压字
+    n_rows = len(feats)
+    heat_h = max(2.5, 0.24 * n_rows)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, heat_h + 4.5),
+                                   constrained_layout=True, height_ratios=[heat_h, 4])
     sns.heatmap(norm, annot=annot, fmt="", cmap="YlOrRd", cbar=False, linewidths=0.5,
                 yticklabels=["%s·%s" % (u, l) for u, l in zip(mat.index, feats["label"])], ax=ax1)
     ax1.set_ylabel("")
-    ax1.tick_params(axis="y", rotation=0)
+    ax1.tick_params(axis="y", rotation=0, labelsize=7 if n_rows > 25 else 9)
     ax1.set_title(_t("账号×特征热力图(颜色=列内归一化;min_gap 越小越可疑)",
                      "Account x feature heatmap (color = per-column normalized)"))
 
@@ -271,6 +277,9 @@ def chart_cohort_features():
                   alpha=0.6, ax=ax2, legend=False)
     ax2.set_yscale("log")
     ax2.set_xlabel("")
+    # 账号多时横轴标签竖排小字,否则互相压字
+    ax2.tick_params(axis="x", rotation=90 if len(order) > 12 else 0,
+                    labelsize=6.5 if len(order) > 20 else 9)
     ax2.set_ylabel(_t("事件间隔(秒,对数轴)", "event gap (s, log)"))
     ax2.set_title(_t("各账号事件间隔分布", "Per-account event gap distribution"))
 
