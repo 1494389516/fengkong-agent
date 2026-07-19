@@ -45,6 +45,7 @@ class Gen:
         self.device_intel = {}
         self.reports = []
         self._report_seq = 0
+        self._rooted_normal_planted = False
 
     def emit(self, uid, ip, device, etype, ts, amount=None):
         e = {"uid": uid, "ip": ip, "device_id": device, "type": etype, "ts": int(ts)}
@@ -158,7 +159,16 @@ class Gen:
         self.register(uid, T0 - r.randint(30, 400) * DAY, channel,
                       method, ips[0], device, r.choice([1, 2]),
                       spent + r.uniform(0, 2000), os_=os_, os_ver=os_ver)
-        self.dev_intel(device, platform=os_)  # 正常真机,指纹干净
+        # ~3% 安卓极客用户用 root 真机 —— R006 强拒策略的真实误伤面,
+        # 故意让它出现在标注数据里:强拒的代价必须被指标计量,不能只活在注释里。
+        # 首个安卓正常用户保底 root(小样本下概率抽样可能为 0,计量断言会空转)
+        geek = r.random() < 0.03
+        if os_ == "安卓" and (geek or not self._rooted_normal_planted):
+            self._rooted_normal_planted = True
+            self.dev_intel(device, platform=os_, rooted=True,
+                           signals=["Magisk root(极客用户,无 hook/自动化痕迹)"])
+        else:
+            self.dev_intel(device, platform=os_)  # 正常真机,指纹干净
         if r.random() < 0.01:  # 恶意/误举报噪音:正常用户偶被举报,核实后不属实
             self.report(uid, T0 + r.randint(0, days * DAY), "promo_abuse",
                         "怀疑抢券", "dismissed")

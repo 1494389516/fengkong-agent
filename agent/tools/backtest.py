@@ -186,6 +186,10 @@ def rule_backtest(overrides: Optional[Dict] = None):
     slim = {k: v for k, v in r.items() if k != "per_account"}
     slim["per_account_note"] = ("逐账号明细未随返回(共 %d 账号,防上下文爆炸);"
                                 "查单账号用 account_profile / rule_eval" % r["accounts_evaluated"])
+    mis = slim.get("misclassified_at_review_point", [])
+    if len(mis) > 10:  # 误判清单同理只给样例,总数在混淆矩阵里
+        slim["misclassified_at_review_point"] = mis[:10]
+        slim["misclassified_note"] = "误判共 %d 个,仅列前 10;总数见 operating_points" % len(mis)
     return _attach_sim_trust(slim)
 
 

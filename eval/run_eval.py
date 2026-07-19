@@ -193,6 +193,10 @@ def run_gen_layer() -> int:
             r = backtest()
             wide = r["operating_points"]["flag=review+reject"]
             strict = r["operating_points"]["flag=reject_only"]
+            # R006 强拒的误伤必须被计量:root 真机正常用户被拒的数量是策略成本,
+            # 不能只活在规则注释里
+            r006_fp = [u for u, a in r["per_account"].items()
+                       if a["label"] == "normal" and "R006" in a["rules"]]
             cal = registry.dispatch("threshold_calibrate", {"fpr_budget": 0.01})
             realized = cal.get("realized_fpr_normal_wide")
             # token 成本预算:在同一份大样本上量每个工具的典型返回,超限即红。
@@ -203,13 +207,14 @@ def run_gen_layer() -> int:
             biggest = max(sizes.items(), key=lambda kv: kv[1])
             failures = _report("数据生成 + 大样本回测(离线)", [
                 ("生成器退出码 0", proc.returncode == 0),
-                ("账号数 = 63(seed 7 确定性)", r["accounts_evaluated"] == 63),
+                ("账号数 = 62(seed 7 确定性)", r["accounts_evaluated"] == 62),
                 ("宽口径 recall >= 0.9", wide["recall"] >= 0.9),
                 ("宽口径 precision >= 0.8", wide["precision"] >= 0.8),
                 ("宽口径 f1 >= 0.85", wide["f1"] >= 0.85),
                 ("严口径 precision >= 0.7", strict["precision"] >= 0.7),
                 ("无生产日志时对账优雅降级",
                  registry.dispatch("consistency_check", {}).get("available") is False),
+                ("R006 强拒误伤被计量(root 真机正常用户 >= 1)", len(r006_fp) >= 1),
                 ("校准产出建议阈值", bool(cal.get("suggestions"))),
                 ("建议阈值实测误伤率 <= 5%", realized is not None and realized <= 0.05),
                 ("无参照快照时不误报漂移", cal.get("drift_alarm") is False),
