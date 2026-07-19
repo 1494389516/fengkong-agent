@@ -161,9 +161,13 @@ def decide(action_id: int, approve: bool) -> Optional[Dict]:
     kind = action.get("kind", "blacklist_add")
     _save_pending([a for a in pending if a["action_id"] != action_id])
     applied_version = None
+    applied_detail = None
     if approve:
         if kind == "threshold_change":
             applied_version = policy.apply_change(action)["version"]
+        elif kind == "appeal_resolve":
+            from .feedback import apply_appeal_decision  # 惰性:防导入环
+            applied_detail = apply_appeal_decision(action)
         else:
             records = load_blacklist()
             records.append({
@@ -182,6 +186,7 @@ def decide(action_id: int, approve: bool) -> Optional[Dict]:
             "decision": "approve" if approve else "deny",
             "kind": kind,
             "applied_policy_version": applied_version,
+            **({"applied_detail": applied_detail} if applied_detail else {}),
             "action": action,
         }, ensure_ascii=False) + "\n")
     return action

@@ -1,0 +1,18 @@
+[
+ {
+  "appeal_id": 1,
+  "uid": "u_1003",
+  "ts": 1784120000,
+  "channel": "app_ticket",
+  "claim": "我和室友合用一台平板购物,不是什么团伙,下单一直要人工审核,要求解除限制",
+  "status": "pending"
+ },
+ {
+  "appeal_id": 2,
+  "uid": "u_1001",
+  "ts": 1784121000,
+  "channel": "cs_call",
+  "claim": "上周抢券被人举报了,担心账号被限制,来电确认",
+  "status": "pending"
+ }
+]

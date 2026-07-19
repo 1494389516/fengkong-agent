@@ -60,6 +60,13 @@ def tool_result_sizes():
         ("rule_backtest", {}),
         ("shadow_backtest", {"overrides": {"r002_min_events": 99}}),
         ("threshold_calibrate", {}),
+        ("feature_drift", {}),
+        ("rule_drift", {}),
+        ("feature_risk", {}),
+        ("adversary_watch", {}),
+        ("rule_draft_test", {"conditions": [
+            {"feature": "coupon_claims", "op": ">=", "value": 3}]}),
+        ("appeal_review", {}),
         ("chart_account_timeline", {"uid": uid_hot}),
         ("chart_cohort_features", {}),
         ("chart_threshold_sweep", {"param": "r002_min_events"}),

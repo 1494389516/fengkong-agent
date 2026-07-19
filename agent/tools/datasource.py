@@ -88,6 +88,27 @@ def load_reports() -> list:
         return []
 
 
+def load_appeals() -> list:
+    """误伤申诉记录(被处置用户喊冤的方向,与 reports 的举报方向相反)。
+    文件缺失返回空列表。"""
+    try:
+        return _load_json(data_dir() / "appeals.json")
+    except FileNotFoundError:
+        return []
+
+
+def appeals_path() -> Path:
+    return data_dir() / "appeals.json"
+
+
+def postmortems_path() -> Path:
+    return data_dir() / "postmortems.jsonl"
+
+
+def labels_path() -> Path:
+    return data_dir() / "labels.json"
+
+
 def blacklist_path() -> Path:
     return data_dir() / "blacklist.json"
 
