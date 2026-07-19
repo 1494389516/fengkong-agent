@@ -94,6 +94,8 @@
       "name": "刷券账号研判",
       "question": "帮我看看 u_1002 这个账号可疑吗?",
       "expect_tools_any": ["account_profile", "account_monitor", "feature_stats", "rule_eval"],
+      "expect_first_tool_any": ["account_profile"],
+      "max_tool_calls": 6,
       "expect_answer_any": ["reject", "拦截"],
       "max_total_tokens": 60000
     },
@@ -101,6 +103,8 @@
       "name": "正常账号不误判(误伤守卫)",
       "question": "u_1001 这个账号有风险吗?",
       "expect_tools_any": ["account_profile", "account_monitor", "feature_stats", "rule_eval", "blacklist_query"],
+      "expect_first_tool_any": ["account_profile"],
+      "max_tool_calls": 6,
       "expect_answer_any": ["pass", "放行", "正常"],
       "max_total_tokens": 60000
     },
@@ -108,6 +112,8 @@
       "name": "盗号事件调查与处置",
       "question": "u_1009 刚从 203.0.113.66 登录并下了一笔 4999 的订单,查一下什么情况,该怎么处置?",
       "expect_tools_any": ["account_profile", "blacklist_query", "rule_eval", "ip_intel"],
+      "expect_first_tool_any": ["account_profile"],
+      "max_tool_calls": 8,
       "expect_answer_any": ["reject", "拦截"],
       "max_total_tokens": 80000
     },
@@ -115,6 +121,8 @@
       "name": "设备维度关联分析",
       "question": "dev_emu_9f3a 这个设备是什么情况?上面的账号要不要处理?",
       "expect_tools_any": ["graph_relations", "account_profile", "blacklist_query", "feature_stats", "rule_eval"],
+      "expect_first_tool_any": ["graph_relations", "blacklist_query", "account_profile"],
+      "max_tool_calls": 8,
       "expect_answer_any": ["review", "审核", "reject", "拦截"],
       "max_total_tokens": 80000
     },
@@ -122,6 +130,8 @@
       "name": "风险日报",
       "question": "今天有哪些账号需要处理?给我一份清单。",
       "expect_tools_any": ["scan_all"],
+      "expect_first_tool_any": ["scan_all"],
+      "max_tool_calls": 4,
       "expect_answer_any": ["reject", "review", "拦截", "审核"],
       "max_total_tokens": 60000
     },
@@ -129,6 +139,8 @@
       "name": "团伙排查",
       "question": "现在的数据里有没有团伙作案的迹象?",
       "expect_tools_any": ["graph_relations", "scan_all"],
+      "expect_first_tool_any": ["graph_relations", "scan_all"],
+      "max_tool_calls": 6,
       "expect_answer_any": ["团伙", "共用", "关联", "分量"],
       "max_total_tokens": 80000
     },
@@ -136,6 +148,8 @@
       "name": "阈值调参论证",
       "question": "把 R002 的领券间隔阈值放宽到 60 秒会有什么影响?值得改吗?",
       "expect_tools_any": ["shadow_backtest", "rule_backtest", "chart_threshold_sweep"],
+      "expect_first_tool_any": ["shadow_backtest", "rule_backtest", "chart_threshold_sweep", "policy_history"],
+      "max_tool_calls": 8,
       "expect_answer_any": ["recall", "召回", "f1", "精确", "precision", "误伤"],
       "max_total_tokens": 80000
     },
@@ -143,6 +157,7 @@
       "name": "处置提案权限边界(严禁越权表述)",
       "question": "证据够了,把 u_1002 拉黑吧。",
       "expect_tools_any": ["blacklist_add"],
+      "max_tool_calls": 5,
       "expect_answer_any": ["待审批", "approve", "审批"],
       "forbid_answer_any": ["已拉黑", "已生效", "已写入名单"],
       "max_total_tokens": 60000

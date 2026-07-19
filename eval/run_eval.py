@@ -411,12 +411,26 @@ def run_chart_smoke() -> int:
 
 
 def _check_agent_case(c, answer, tool_calls, used):
-    """第 2+3 层的断言,返回问题列表(空 = 通过)。"""
+    """第 2+3 层的断言,返回问题列表(空 = 通过)。
+    tool_calls 是 [(name, args_json)],除了'调没调对工具',还查'调得省不省':
+    入口工具(聚合入口 vs 拆成多次单项)、调用次数上限、完全重复的调用。"""
     problems = []
+    names = [n for n, _ in tool_calls]
     # 轨迹:先取证再下结论 —— 必须调过期望工具之一
     want = c.get("expect_tools_any", [])
-    if want and not set(want) & set(tool_calls):
-        problems.append("未调用任何取证工具(期望之一 %s,实际 %s)" % (want, tool_calls or "无"))
+    if want and not set(want) & set(names):
+        problems.append("未调用任何取证工具(期望之一 %s,实际 %s)" % (want, names or "无"))
+    # 轨迹效率:入口工具应是聚合入口(该一次 account_profile 的事拆成
+    # 五次单项调用,答案对但成本翻倍 —— 18 工具时代的新失败模式)
+    first = c.get("expect_first_tool_any", [])
+    if first and names and names[0] not in first:
+        problems.append("入口工具不经济:首调 %s(期望之一 %s)" % (names[0], first))
+    cap = c.get("max_tool_calls")
+    if cap and len(tool_calls) > cap:
+        problems.append("工具调用 %d 次超上限 %d(疑似低效轨迹)" % (len(tool_calls), cap))
+    dup = len(tool_calls) - len(set(tool_calls))
+    if dup:
+        problems.append("存在 %d 次完全重复的工具调用(同名同参,纯浪费)" % dup)
     # 回答:处置结论关键词
     ans = answer.lower()
     any_kw = c.get("expect_answer_any", [])
@@ -449,7 +463,9 @@ def run_agent_layers(cases) -> int:
         before = dict(agent.session_usage)
         tool_calls = []
         try:
-            answer = agent.ask(c["question"], on_tool=lambda n, a: tool_calls.append(n))
+            answer = agent.ask(
+                c["question"],
+                on_tool=lambda n, a: tool_calls.append((n, json.dumps(a, sort_keys=True, ensure_ascii=False))))
         except Exception as e:  # noqa: BLE001 API 异常算该案例失败,不中断整场评估
             failures += 1
             print("  [FAIL] %s\n         调用异常:%s: %s" % (c["name"], type(e).__name__, e))
@@ -461,8 +477,9 @@ def run_agent_layers(cases) -> int:
         if problems:
             failures += 1
         print("  [%s] %s" % ("PASS" if not problems else "FAIL", c["name"]))
-        print("         工具:%s | API %d 次 | token 总 %d(prompt %d / completion %d)| 缓存命中率 %.0f%%" % (
-            ",".join(tool_calls) or "无", used["api_calls"], used["total"],
+        print("         工具 %d 次:%s | API %d 次 | token 总 %d(prompt %d / completion %d)| 缓存命中率 %.0f%%" % (
+            len(tool_calls), ",".join(n for n, _ in tool_calls) or "无",
+            used["api_calls"], used["total"],
             used["prompt"], used["completion"], 100.0 * hit_rate))
         for p in problems:
             print("         问题:%s" % p)
