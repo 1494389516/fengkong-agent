@@ -17,7 +17,7 @@ import math
 from typing import Dict, List, Optional
 
 from . import tool
-from .backtest import backtest, shadow_compare
+from .backtest import CHURN_RISK, shadow_compare
 from .datasource import load_labels
 from .drift import PSI_ALARM, psi_against_edges
 from .featurelib import feature_values, population_baseline
@@ -94,14 +94,28 @@ def threshold_calibrate(fpr_budget: float = 0.01):
     suggestions = _derive(fpr_budget)
     changed = {k: v for k, v in suggestions.items() if v != pol[k]}
 
-    # 有标签时:建议阈值在 normal 账号上的实测账号级误伤率(FPR 一致性检查)
+    # 有标签时:建议阈值的实测误伤率(FPR 一致性检查)+ 期望损失对比。
+    # FPR 预算答"愿意误伤多少个",期望损失答"这样换划不划算"(漏放金额 +
+    # 流失系数 × 误伤 LTV)—— 两个口径一起看,预算防拍脑袋,损失防捡了
+    # 芝麻丢西瓜。影子回测只跑一次,两处复用。
     realized_fpr = None
-    if changed and load_labels():
-        r = backtest(changed)
-        if "error" not in r:
-            wide = r["operating_points"]["flag=review+reject"]
-            denom = wide["fp"] + wide["tn"]
-            realized_fpr = round(wide["fp"] / denom, 4) if denom else None
+    cost_comparison = None
+    shadow = shadow_compare(changed) if changed and load_labels() else None
+    if shadow and "error" not in shadow:
+        wide = shadow["candidate"]["flag=review+reject"]
+        denom = wide["fp"] + wide["tn"]
+        realized_fpr = round(wide["fp"] / denom, 4) if denom else None
+        cur_cost = shadow["active"]["flag=review+reject"].get("cost")
+        cand_cost = wide.get("cost")
+        if cur_cost and cand_cost:
+            cost_comparison = {
+                "current": cur_cost,
+                "candidate": cand_cost,
+                "expected_loss_delta": round(
+                    cand_cost["expected_loss"] - cur_cost["expected_loss"], 2),
+                "note": "delta<0 = 候选期望损失更低;期望损失 = 漏放欺诈金额 + "
+                        "%.0f%% × 误伤账号 LTV,只用于排序不是财务口径" % (100 * CHURN_RISK),
+            }
 
     from .reconcile import sim_trust
     st = sim_trust()
@@ -117,6 +131,7 @@ def threshold_calibrate(fpr_budget: float = 0.01):
         "suggestions": suggestions,
         "changed_vs_active": changed,
         "realized_fpr_normal_wide": realized_fpr,
-        "shadow": shadow_compare(changed) if changed else None,
+        "cost_comparison": cost_comparison,
+        "shadow": shadow,
         "note": "建议仅供提案:threshold_propose 提交(限速 ±50%),CLI /approve 生效",
     }

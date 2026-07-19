@@ -303,11 +303,14 @@ def feature_drift(time_grain: str = "day",
     rows_by_label = {lb: _bucket_account_features(buckets[lb]) for lb in labels}
     bench_rows = [r for lb in bench_labels for r in rows_by_label[lb]]
 
+    # 工具面瘦身:趋势用与 buckets 对齐的并行数组,桶名不逐特征重复 ——
+    # 趋势表是结果里最大的块,省的都是每次调用的固定开销
     feature_out: Dict[str, Dict] = {}
     alarms: List[str] = []
     for feat in feats:
         bench_vals, bench_miss = _split(bench_rows, feat)
-        trend, worst_psi, worst_bucket = [], None, None
+        p50s, means, misses, psis = [], [], [], []
+        worst_psi, worst_bucket = None, None
         for lb in labels:
             vals, miss = _split(rows_by_label[lb], feat)
             n = len(vals) + miss
@@ -316,18 +319,18 @@ def feature_drift(time_grain: str = "day",
                 psi_include_missing, bench_miss, miss)
             if psi is not None and (worst_psi is None or psi > worst_psi):
                 worst_psi, worst_bucket = psi, lb
-            trend.append({
-                "bucket": lb, "n": n,
-                "missing_rate": round(miss / n, 4) if n else None,
-                "mean": round(statistics.fmean(vals), 4) if vals else None,
-                "p50": round(statistics.median(vals), 4) if vals else None,
-                **({"psi": psi} if lb not in bench_labels else {"benchmark": True}),
-            })
+            p50s.append(round(statistics.median(vals), 2) if vals else None)
+            means.append(round(statistics.fmean(vals), 2) if vals else None)
+            misses.append(round(miss / n, 4) if n else None)
+            psis.append(psi)
         level = psi_level(worst_psi)
         if level == "alarm":
             alarms.append("%s 在 %s PSI=%.3f(>%.2f)" % (feat, worst_bucket, worst_psi, PSI_ALARM))
-        feature_out[feat] = {"worst_psi": worst_psi, "worst_bucket": worst_bucket,
-                             "level": level, "trend": trend}
+        feature_out[feat] = {
+            "worst_psi": worst_psi, "worst_bucket": worst_bucket, "level": level,
+            "p50": p50s, "mean": means, "psi": psis,
+            **({"missing_rate": misses} if any(misses) else {}),  # 全零不占键
+        }
 
     # 事件类型构成:类别 PSI(Top-K + Other),看流量结构变化(如领券占比暴涨)
     bench_types = Counter(e["type"] for lb in bench_labels for e in buckets[lb])
@@ -356,6 +359,7 @@ def feature_drift(time_grain: str = "day",
                      "events": len(buckets[lb])} for lb in labels],
         "psi_reference": "<%.1f 稳定; %.1f~%.2f 关注; >%.2f 告警" % (
             PSI_WATCH, PSI_WATCH, PSI_ALARM, PSI_ALARM),
+        "trend_note": "features 内各数组与 buckets 顺序对齐;psi 为 null 的桶是基准或样本不足",
         "features": feature_out,
         "event_type_mix": {"worst_psi": worst_psi, "worst_bucket": worst_bucket,
                            "level": level, "trend": type_trend},

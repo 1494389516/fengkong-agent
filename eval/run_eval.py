@@ -219,8 +219,11 @@ def run_gen_layer() -> int:
                 ("建议阈值实测误伤率 <= 5%", realized is not None and realized <= 0.05),
                 ("无参照快照时不误报漂移", cal.get("drift_alarm") is False),
                 ("单工具结果 <= 5000 chars(最大: %s %d)" % biggest, biggest[1] <= 5000),
-                ("rule_backtest 已瘦身 <= 1500 chars(现 %d)" % sizes["rule_backtest"],
-                 sizes["rule_backtest"] <= 1500),
+                # 1500 是纯指标期的瘦身线;rule_contribution(规则贡献)/cost
+                # (期望损失)/label_observation(表现覆盖)加入后上调至 2000,
+                # 三块都是聚合级判断素材,砍它们省的 token 会翻倍还给追问
+                ("rule_backtest 已瘦身 <= 2000 chars(现 %d)" % sizes["rule_backtest"],
+                 sizes["rule_backtest"] <= 2000),
             ])
             print("  宽口径 %s" % wide)
             print("  严口径 %s" % strict)
@@ -474,14 +477,62 @@ def run_privacy_layer() -> int:
     ])
 
 
+def run_strategy_layer() -> int:
+    """离线:策略生命周期工具 —— 区分度评估的小样本纪律、规则试衣间的
+    增量判定、对抗巡检的可用性、申诉回路的全链路落盘(隔离数据目录)。"""
+    with tempfile.TemporaryDirectory() as td:
+        for f in ("events_sample.json", "blacklist.json", "labels.json",
+                  "accounts.json", "appeals.json", "reports.json"):
+            shutil.copy(ROOT / "data" / f, Path(td) / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            from agent.tools import actions
+            from agent.tools.datasource import load_appeals, load_labels, postmortems_path
+
+            fr = registry.dispatch("feature_risk", {})
+            levels = {d["level"] for d in fr["features"].values()}
+            # 试衣间:u_1002(高频领券多 IP)已被现有规则覆盖 → 应判无增量
+            draft = registry.dispatch("rule_draft_test", {"conditions": [
+                {"feature": "distinct_ip", "op": ">=", "value": 5}]})
+            adv = registry.dispatch("adversary_watch", {})
+            queue = {q["uid"]: q["recommendation"]
+                     for q in registry.dispatch("appeal_review", {})["queue"]}
+            r1 = registry.dispatch("appeal_resolve", {
+                "appeal_id": 1, "decision": "reject", "reason": "灰名单设备+套现模式+fraud 标签"})
+            r2 = registry.dispatch("appeal_resolve", {
+                "appeal_id": 2, "decision": "accept", "reason": "判定 pass 无名单无属实举报"})
+            actions.decide(r1["action_id"], approve=True)
+            actions.decide(r2["action_id"], approve=True)
+            statuses = {a["appeal_id"]: a["status"] for a in load_appeals()}
+            return _report("策略生命周期(离线)", [
+                ("小样本上区分度指标全 n/a(样本纪律)", levels == {"n/a"}),
+                ("试衣间:命中 u_1002 且判无增量", draft["hit_accounts"] == ["u_1002"]
+                 and "无增量" in draft["verdict"]),
+                ("对抗巡检可用且带近阈监控项", adv.get("found") is True
+                 and len(adv["near_miss"]) == 3),
+                ("申诉建议:fraud 维持 / 干净账号解除",
+                 queue.get("u_1003") == "uphold" and queue.get("u_1001") == "release"),
+                ("申诉决议经审批落盘", statuses == {1: "rejected", 2: "accepted"}),
+                ("误伤核实自动修正标签", load_labels().get("u_1001", {}).get("label") == "normal"),
+                ("复盘日志已沉淀", postmortems_path().exists()),
+                ("已决议申诉不可重复提交", registry.dispatch("appeal_resolve", {
+                    "appeal_id": 1, "decision": "accept", "reason": "x"})["status"] == "already_resolved"),
+            ])
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+
 def run_cost_layer() -> int:
     """离线:结构性 token 成本预算 —— schema 与 system prompt 每请求随行,
     缓存命中可吸收,但决定了 miss 时的底价;失控即工具设计出了问题。"""
     from measure_costs import structural_sizes
     s = structural_sizes()
+    # 预算史:20 工具期 12000;策略生命周期五件套(feature_risk/adversary_watch/
+    # rule_draft_test/appeal_review/appeal_resolve)加入后 26 工具,上调至 14500
+    # (人均 ~550 chars 未松动)。再超说明该合并工具而不是再抬预算。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 12000 chars(现 %d,%d 个工具)"
-         % (s["schemas_chars"], s["tool_count"]), s["schemas_chars"] <= 12000),
+        ("工具 schema 总量 <= 14500 chars(现 %d,%d 个工具)"
+         % (s["schemas_chars"], s["tool_count"]), s["schemas_chars"] <= 14500),
         ("system prompt <= 3000 chars(现 %d)" % s["system_chars"],
          s["system_chars"] <= 3000),
     ])
@@ -602,6 +653,7 @@ def main() -> int:
     failures += run_profile_layer()
     failures += run_reconcile_layer()
     failures += run_gen_layer()
+    failures += run_strategy_layer()
     failures += run_privacy_layer()
     failures += run_cost_layer()
     failures += run_chart_smoke()
