@@ -50,10 +50,16 @@
       "expect_rules": ["R002"]
     },
     {
-      "name": "新号大额应转人工(R004 账龄错配)",
+      "name": "新号大额应转人工(R004 账龄错配 + R005 高危注册)",
       "event": {"uid": "u_1002", "ip": "203.0.113.10", "device_id": "dev_farm_x7", "type": "order", "amount": 500, "ts": 1784110000},
       "expect_action": "review",
-      "expect_rules": ["R004"]
+      "expect_rules": ["R004", "R005"]
+    },
+    {
+      "name": "高危注册号小额下单:金额不够 R004,仅注册分规则命中",
+      "event": {"uid": "u_1002", "ip": "203.0.113.10", "device_id": "dev_farm_x7", "type": "order", "amount": 50, "ts": 1784110000},
+      "expect_action": "review",
+      "expect_rules": ["R005"]
     },
     {
       "name": "老客同等金额不触发新号规则(误伤守卫)",

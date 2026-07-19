@@ -394,6 +394,7 @@ def run_reconcile_layer() -> int:
     planted = {("u_1001", 1784099100), ("u_1002", 1784109633), ("u_1003", 1784110800)}
     bt = registry.dispatch("rule_backtest", {})
     sim = bt.get("sim_consistency", {})
+    mm = r.get("master_mismatches", [])
     return _report("模拟一致性对账(离线)", [
         ("对账覆盖全部日志与事件", r.get("compared") == 44 and r.get("orphan_decisions") == 0
          and r.get("uncovered_events") == 0),
@@ -401,6 +402,8 @@ def run_reconcile_layer() -> int:
         ("一致部分无误报", got == planted),
         ("不一致率超线触发失信", r.get("trusted") is False and bool(r.get("warning"))),
         ("回测结果自动携带失信标记", sim.get("trusted") is False and bool(sim.get("warning"))),
+        ("主档完整性:埋设的注册分改写被抓出(仅 1 处)",
+         len(mm) == 1 and mm[0]["uid"] == "u_1004" and bool(r.get("integrity_warning"))),
     ])
 
 

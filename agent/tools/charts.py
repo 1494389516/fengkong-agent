@@ -49,6 +49,8 @@ SWEEP_DEFAULTS = {
     "r003_cashout_window_seconds": [600, 1800, 3600, 7200, 14400],
     "r004_max_account_age_seconds": [3600, 86400, 259200, 604800, 1209600],
     "r004_min_amount": [50, 100, 200, 500, 1000],
+    "r005_min_register_score": [40, 60, 70, 80, 90],
+    "r005_max_account_age_seconds": [86400, 259200, 604800, 1209600],
 }
 
 

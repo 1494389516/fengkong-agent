@@ -1,40 +1,45 @@
 {
- "_comment": "生产决策日志(骨架模拟,设定由生产引擎写入)。其中 3 条与 agent 本地模拟不一致——演练生产侧策略变更未同步到镜像的场景,consistency_check 必须抓出它们。",
+ "_comment": "生产决策日志(骨架模拟,设定由生产引擎写入)。其中 3 条与 agent 本地模拟不一致——演练生产侧策略变更未同步到镜像的场景,consistency_check 必须抓出它们。 另埋 1 处注册分与主档不一致(u_1004),主档完整性对账必须抓出。",
  "decisions": [
   {
    "uid": "u_1001",
    "ts": 1783929600,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1001",
    "ts": 1783933200,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1001",
    "ts": 1784016000,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1001",
    "ts": 1784019600,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1001",
    "ts": 1784098800,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1001",
@@ -43,7 +48,8 @@
    "rules": [
     "R101"
    ],
-   "policy_version": "prod-v8"
+   "policy_version": "prod-v8",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1009",
@@ -52,7 +58,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1009",
@@ -62,7 +69,8 @@
     "R001",
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1009",
@@ -73,14 +81,16 @@
     "R001",
     "R003"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 0
   },
   {
    "uid": "u_1002",
    "ts": 1784109600,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1003",
@@ -89,70 +99,80 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1002",
    "ts": 1784109603,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
    "ts": 1784109606,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
    "ts": 1784109609,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
    "ts": 1784109612,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
    "ts": 1784109615,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
    "ts": 1784109618,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
    "ts": 1784109621,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
    "ts": 1784109624,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
    "ts": 1784109627,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
@@ -161,14 +181,16 @@
    "rules": [
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
    "ts": 1784109633,
    "action": "pass",
    "rules": [],
-   "policy_version": "prod-v6"
+   "policy_version": "prod-v6",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
@@ -177,7 +199,8 @@
    "rules": [
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
@@ -186,7 +209,8 @@
    "rules": [
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
@@ -195,7 +219,8 @@
    "rules": [
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
@@ -204,7 +229,8 @@
    "rules": [
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
@@ -213,7 +239,8 @@
    "rules": [
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
@@ -222,7 +249,8 @@
    "rules": [
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
@@ -231,7 +259,8 @@
    "rules": [
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1002",
@@ -240,7 +269,8 @@
    "rules": [
     "R002"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 80
   },
   {
    "uid": "u_1003",
@@ -249,7 +279,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1003",
@@ -258,7 +289,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1003",
@@ -267,7 +299,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1003",
@@ -276,7 +309,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v8"
+   "policy_version": "prod-v8",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1004",
@@ -285,7 +319,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1004",
@@ -294,7 +329,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1004",
@@ -303,7 +339,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1004",
@@ -312,7 +349,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1004",
@@ -322,7 +360,8 @@
     "R001",
     "R003"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 70
   },
   {
    "uid": "u_1005",
@@ -331,7 +370,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1005",
@@ -340,7 +380,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1005",
@@ -349,7 +390,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1005",
@@ -358,7 +400,8 @@
    "rules": [
     "R001"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   },
   {
    "uid": "u_1005",
@@ -368,7 +411,8 @@
     "R001",
     "R003"
    ],
-   "policy_version": "prod-v7"
+   "policy_version": "prod-v7",
+   "register_risk_score": 100
   }
  ]
 }

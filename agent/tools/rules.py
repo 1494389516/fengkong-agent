@@ -12,7 +12,7 @@ from .featurelib import account_features
 from .policy import active_policy
 
 ACTION_ORDER = {"pass": 0, "review": 1, "reject": 2}
-RULE_COUNT = 4  # 当前规则集条数,便于 agent 感知覆盖范围
+RULE_COUNT = 5  # 当前规则集条数,便于 agent 感知覆盖范围
 
 # 阈值不再是本文件常量:全部经 policy.active_policy() 解析(版本化 + what-if
 # 覆盖),定阈依据见 policy.DEFAULTS 的注释,数值回归见 eval 第 1 层。
@@ -136,19 +136,27 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
                      % (int(p["r003_cashout_window_seconds"]) // 60, coupons, amount), "review")
 
     # ------------------------------------------------------------------
-    # R004 新号大额:账龄错配 —— 新号做老号的事。正常用户的消费信任靠时间
-    # 积累,注册没几天就下大额单不是典型生命周期,而时间恰是攻击者最缺的。
-    # 只在事件带 ts 且有账号主档时评估(账龄 = 事件 ts - 注册时间;无 ts 的
-    # 假设性咨询没有时点,无主档则数据缺失 —— 生产上主档缺失本身应告警)。
-    # review 而非 reject:也可能是真实新客首单,误伤代价高,留人工兜底。
+    # R004 新号大额 / R005 高危注册 × 新号交易 —— 两条"出生证明"规则。
+    # 共同前提:order 事件 + 带 ts(账龄=事件 ts-注册时间,无时点不评估)+
+    # 有主档(缺失在生产上应告警,骨架从简跳过)。都给 review:可能是真实
+    # 新客首单,误伤代价高,留人工兜底。
+    # R004 看行为错配(注册没几天就下大额单,信任要靠时间积累);
+    # R005 消费注册风险分 —— 分数是生产注册风控在注册时刻打的历史事实,
+    #   agent 只读不重算(唯一事实源,口径核验在 reconcile 的主档对账);
+    #   高分不拦零成本动作(领券留给行为规则),只在有资损的下单环节加闸。
     # ------------------------------------------------------------------
     if event_type == "order" and amount is not None and as_of is not None:
         acct = load_accounts().get(uid)
-        if acct and amount >= p["r004_min_amount"]:
+        if acct:
             age = as_of - acct["registered_at"]
-            if 0 <= age <= p["r004_max_account_age_seconds"]:
+            if amount >= p["r004_min_amount"] and 0 <= age <= p["r004_max_account_age_seconds"]:
                 _hit(hits, "R004", "注册仅 %.1f 小时即下单 %.2f(新号大额)"
                      % (age / 3600, amount), "review")
+            score = acct.get("register_risk_score")
+            if (score is not None and score >= p["r005_min_register_score"]
+                    and 0 <= age <= p["r005_max_account_age_seconds"]):
+                _hit(hits, "R005", "注册风险分 %d(阈值 %d)的新号下单 %.2f,账龄 %.1f 小时"
+                     % (score, p["r005_min_register_score"], amount, age / 3600), "review")
 
     action = "pass"
     for h in hits:
