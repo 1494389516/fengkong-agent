@@ -184,7 +184,9 @@ def population_baseline() -> Dict[str, Dict[str, float]]:
     deciles 是等频十分箱切点(9 个数):策略快照带上它之后,漂移检查可以做
     分布级 PSI 比对(drift.psi_against_edges),而不只盯 P99 单点 —— 中段的
     整体位移("温水式"养基线)只有分布比较才看得见。存切点不存原始样本,
-    快照体积不变量级。"""
+    快照体积不变量级。切点刻意不去重:重复切点的重数就是尖峰质量信息,
+    psi_against_edges 按重数还原 expected;在这里去重会让尖峰特征自比虚高
+    (统计核心 eval 层钉着)。"""
     out = {}
     for feat in BASELINE_FEATURES:
         vals = feature_values(feat)

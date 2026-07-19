@@ -80,7 +80,8 @@ def threshold_calibrate(fpr_budget: float = 0.01):
         for feat, cur in baseline.items():
             snap = ref.get(feat) or {}
             psi = psi_against_edges(snap.get("deciles") or [], feature_values(feat),
-                                    expected_n=snap.get("n"))
+                                    expected_n=snap.get("n"),
+                                    expected_p999=snap.get("p999"))
             if psi is not None:
                 drift_psi[feat] = psi
                 if psi > PSI_ALARM:

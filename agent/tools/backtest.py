@@ -73,11 +73,14 @@ def _dataset_fingerprint() -> tuple:
     return (str(d), tuple(parts))
 
 
-def account_verdicts(uids: Iterable[str], events: List[Dict]) -> Dict[str, Dict]:
+def account_verdicts(uids: Iterable[str], events: List[Dict],
+                     use_current_policy: bool = True) -> Dict[str, Dict]:
     """逐账号跑规则集:账号内任一事件命中即记入,处置取最重。
-    scan_all(全量巡检)与 backtest(指标回测)共用这一份口径。"""
+    scan_all(全量巡检)与 backtest(指标回测)共用这一份口径。
+    use_current_policy=False 时逐事件回放当时生效的策略版本(as-of 口径),
+    rule_drift 用它分离"流量变化"与"策略变化"。"""
     uids = sorted(uids)
-    cache_key = (_dataset_fingerprint(), policy.overrides_key(),
+    cache_key = (_dataset_fingerprint(), policy.overrides_key(), use_current_policy,
                  len(events), events[0]["ts"] if events else None,
                  events[-1]["ts"] if events else None, tuple(uids))
     hit = _VERDICT_CACHE.get(cache_key)
@@ -89,9 +92,8 @@ def account_verdicts(uids: Iterable[str], events: List[Dict]) -> Dict[str, Dict]
         hit_rules: set = set()
         reasons: List[str] = []
         for e in (e for e in events if e["uid"] == uid):
-            # 用当前策略评估历史数据(评估口径);逐事件回放当时策略是审计口径,
-            # 那个走 rule_eval 默认行为
-            r = rule_eval(e, use_current_policy=True)
+            # 默认当前策略(评估口径);as-of 模式逐事件回放当时策略(审计口径)
+            r = rule_eval(e, use_current_policy=use_current_policy)
             if rules.ACTION_ORDER[r["action"]] > rules.ACTION_ORDER[worst]:
                 worst = r["action"]
             for h in r["hits"]:
