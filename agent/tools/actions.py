@@ -64,13 +64,10 @@ def _limit_violations(values: Dict, current: Dict) -> List[str]:
 @tool(
     name="blacklist_add",
     description=(
-        "提交一条名单写入申请(black=黑 / gray=灰 / white=白)。此操作不会立即"
-        "生效 —— 申请进入待审批队列,需研究员在 CLI 执行 /approve 确认后才写入"
-        "名单库。reason 必须写清证据(命中哪些规则/信号、关键数值),进审计日志。"
-        "white 是误伤抑制(申诉通过/内部测试号):行为规则失效、reject 级证据"
-        "降档 review,建议必带 expires_days 有效期(白名单是攻击面,不搞永久)。"
-        "同一值已在同色名单或已在队列时返回现状;不同色允许提交(如灰升黑),"
-        "同值黑白并存时规则引擎以黑为准并告警。"
+        "提交名单写入申请(black/gray/white),进待审批队列,需 /approve 才生效。"
+        "reason 写清证据(命中规则/信号/数值),进审计日志。white 建议必带 "
+        "expires_days;gray 未带时按默认观察期提交。同值同色已在名单/队列返回"
+        "现状;不同色允许提交(灰升黑、黑值申诉加白)。三色语义见系统纪律。"
     ),
     parameters={
         "type": "object",
@@ -131,9 +128,8 @@ def blacklist_add(dimension: str, value: str, reason: str, expires_days: int = 0
 @tool(
     name="blacklist_remove",
     description=(
-        "提交一条名单移除申请(出灰 / 申诉纠错),进入待审批队列,需 /approve "
-        "生效并记审计。reason 必须写清依据(如 graylist_review 的期满干净结论、"
-        "申诉工单号)。名单只进不出会累积误伤 —— 灰名单观察期满且干净就该出。"
+        "提交名单移除申请(出灰/申诉纠错),进待审批队列,需 /approve 生效并记"
+        "审计。reason 写清依据(graylist_review 结论、申诉工单号)。"
     ),
     parameters={
         "type": "object",

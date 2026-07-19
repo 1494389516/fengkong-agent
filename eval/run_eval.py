@@ -209,6 +209,11 @@ def run_gen_layer() -> int:
                 len({u.rsplit("_", 1)[0] for u in c["accounts"]}) == 1
                 and c["accounts"][0].startswith("g_ring_")
                 for c in gr["components"])
+            # 灰名单生命周期在大样本上的冒烟:巡检覆盖全部灰记录,结论三分
+            from agent.tools.graylist import graylist_review as _gl_review
+            gl = _gl_review()
+            gl_expected = sum(1 for r in json.loads(
+                (out / "blacklist.json").read_text(encoding="utf-8")) if r["list"] == "gray")
             # token 成本预算:在同一份大样本上量每个工具的典型返回,超限即红。
             # 教训:rule_backtest 的 per_account 曾单次 18k+ chars,② 的 dict
             # 限幅与工具面瘦身都是这里钉住的。
@@ -246,6 +251,12 @@ def run_gen_layer() -> int:
                  and sw["rows"][-1]["rule_hits_normal"] > sw["rows"][0]["rule_hits_normal"]),
                 ("关联分量 = 团伙数且无误并组(3 团各自独立)",
                  gr["component_count"] == 3 and comps_pure),
+                ("灰名单巡检覆盖全部灰记录且结论三分",
+                 gl["gray_total"] == gl_expected
+                 and sum(gl["recommendations"].values()) == gl["gray_total"]),
+                ("灰名单巡检结果在单工具预算内",
+                 len(json.dumps(registry.dispatch("graylist_review", {}),
+                                ensure_ascii=False)) <= 5000),
                 ("单工具结果 <= 5000 chars(最大: %s %d)" % biggest, biggest[1] <= 5000),
                 ("rule_backtest 已瘦身 <= 1500 chars(现 %d)" % sizes["rule_backtest"],
                  sizes["rule_backtest"] <= 1500),
@@ -336,6 +347,23 @@ def run_whitelist_layer() -> int:
                 ("同值不同色允许提交(不被 already_listed 挡住)",
                  r_up.get("status") == "pending_confirmation"),
             ]
+            # 误伤抑制的收益必须进指标:t_vip 是行为上会误伤的"正常账号",
+            # 有白名单时回测 FP=0,去掉白名单立刻 FP+1 —— 白名单的价值可计量
+            (base / "labels.json").write_text(json.dumps({
+                "t_vip": {"label": "normal", "note": "eval:误伤面"},
+                "t_rej": {"label": "fraud", "note": "eval"},
+                "t_exp": {"label": "fraud", "note": "eval"},
+                "t_conf": {"label": "fraud", "note": "eval"},
+                "t_hook": {"label": "fraud", "note": "eval"},
+            }))
+            wide_with = backtest()["operating_points"]["flag=review+reject"]
+            bl = json.loads((base / "blacklist.json").read_text(encoding="utf-8"))
+            (base / "blacklist.json").write_text(json.dumps(
+                [r for r in bl if not (r["value"] == "t_vip" and r["list"] == "white")]))
+            wide_without = backtest()["operating_points"]["flag=review+reject"]
+            checks.append(("白名单收益进指标:有白 FP=0 / 无白 FP=1(recall 不变)",
+                           wide_with["fp"] == 0 and wide_without["fp"] == 1
+                           and wide_with["recall"] == wide_without["recall"] == 1.0))
         finally:
             os.environ.pop("FK_DATA_DIR", None)
 

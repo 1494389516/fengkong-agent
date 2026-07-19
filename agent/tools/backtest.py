@@ -162,9 +162,8 @@ def shadow_backtest(overrides: Dict):
     description=(
         "对全量标注账号回测当前生效策略(评估口径:当前阈值 × 历史数据),返回两个"
         "口径(flag=review+reject / flag=reject_only)的混淆矩阵与 precision/recall/F1、"
-        "逐账号预测、误判清单。overrides 可临时覆盖阈值做 what-if(不修改配置),"
-        "如 {\"r002_max_gap_seconds\": 60};可用键:" + ", ".join(OVERRIDABLE) + "。"
-        "凡涉及规则效果/指标的问题必须用本工具取数,不要自行推算。"
+        "逐账号预测、误判清单。overrides 临时覆盖阈值做 what-if(不修改配置,"
+        "可用键见参数说明)。凡涉及规则效果/指标的问题必须用本工具取数,不要自行推算。"
     ),
     parameters={
         "type": "object",

@@ -59,13 +59,12 @@ def _hit(hits: List[Dict[str, str]], rule_id: str, reason: str, action: str) -> 
 @tool(
     name="rule_eval",
     description=(
-        "对一个事件试跑规则集,返回命中的规则列表和最终处置动作(pass/review/reject)。"
-        "事件字段:uid(必填)、ip、device_id、type(如 login/order/coupon_claim)、"
-        "amount、ts。带 ts 时默认完整回放:特征只用事件之前的数据,阈值用当时生效"
-        "的策略版本(审计口径,'当时会怎么判');use_current_policy=true 则改用当前"
-        "最新阈值评估该事件('现在会怎么判'),特征仍按事件时点取证。命中白名单时"
-        "全体降一档(reject->review,review->pass),hits 里保留 original_action;"
-        "同值黑白冲突时白名单失效并返回 whitelist_conflict。"
+        "对一个事件试跑规则集,返回命中规则与最终处置(pass/review/reject)。"
+        "事件字段:uid(必填)、ip、device_id、type、amount、ts。带 ts 默认完整"
+        "回放(当时的特征 + 当时的策略版本,审计口径);use_current_policy=true "
+        "用当前最新阈值('现在会怎么判'),特征仍按事件时点。白名单命中降一档"
+        "(hits 保留 original_action);黑白冲突返回 whitelist_conflict;"
+        "灰名单+行为命中返回 gray_escalation_hint。"
     ),
     parameters={
         "type": "object",

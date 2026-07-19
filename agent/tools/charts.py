@@ -325,12 +325,11 @@ def chart_account_timeline(uid: str):
 @tool(
     name="chart_threshold_sweep",
     description=(
-        "对单个规则阈值做扫描回测:逐个候选值跑回测,画 precision/recall/F1 曲线 + "
-        "该规则自身命中数归因曲线(命中欺诈/误伤正常,右轴)。返回逐点指标表;"
-        "aggregate_insensitive=true 表示聚合指标全程无变化(参数作用被其他规则"
-        "遮蔽或无边界样本),此时没有 best 值,严禁宣称'最优阈值';连归因曲线也"
-        "无变化时不出图(nothing_to_plot=true),把 note 里的原因转告研究员并"
-        "建议换更大数据集。param 可选:" + ", ".join(SWEEP_DEFAULTS)
+        "对单个规则阈值扫描回测:逐候选值画 precision/recall/F1 曲线 + 该规则"
+        "自身命中归因曲线(命中欺诈/误伤正常,右轴)。aggregate_insensitive=true "
+        "= 聚合指标全程无变化(被其他规则遮蔽/无边界样本),无 best 值;"
+        "nothing_to_plot=true = 连归因也平直,不出图,把 note 原因转告研究员。"
+        "可选参数见 param 枚举。"
     ),
     parameters={
         "type": "object",

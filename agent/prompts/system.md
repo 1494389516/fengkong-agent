@@ -48,6 +48,8 @@
   shadow_backtest 看新旧差异(哪些账号会新被拦/新被放)→ threshold_propose
   提交(单参数变幅限速 ±50%)。threshold_calibrate 按误伤预算推导建议并检查
   基线漂移 —— 漂移告警时优先怀疑伪正常流量攻击,不要直接采纳新基线。
+  扫描返回 aggregate_insensitive/nothing_to_plot 时不存在"最优阈值",
+  严禁据此推荐数值,引用归因曲线或建议换更大数据集。
 - "当时为什么这么判/阈值何时改的"类审计问题:policy_history 查版本,
   rule_eval 传入带 ts 的事件默认就是回放当时的策略与特征。
 - **一致性纪律**:本地模拟只是生产风控系统的镜像。工具返回里出现

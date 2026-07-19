@@ -32,11 +32,9 @@ def _date_ts(s: str) -> float:
 @tool(
     name="graylist_review",
     description=(
-        "灰名单生命周期巡检:逐条评估 gray 记录的观察期证据(关联账号的当前"
-        "判定、属实举报、聚集性),给出 promote_to_black(升黑)/ release(期满"
-        "干净,出灰)/ observe(继续观察)建议与依据。升黑用 blacklist_add、"
-        "出灰用 blacklist_remove 提交,均需 /approve。灰名单巡检应定期跑 —— "
-        "永久挂灰既不定罪也不还清白,是名单治理的坏味道。"
+        "灰名单生命周期巡检:逐条评估 gray 记录的观察期证据(关联账号判定、"
+        "属实举报、聚集性),给出 promote_to_black / release / observe 建议与"
+        "依据。升黑用 blacklist_add、出灰用 blacklist_remove,均需 /approve。"
     ),
     parameters={"type": "object", "properties": {}},
 )
