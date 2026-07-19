@@ -82,6 +82,11 @@
       "name": "套现团伙应报设备聚集",
       "uid": "u_1003",
       "expect_signal_any": ["shared_device"]
+    },
+    {
+      "name": "盗号账号应报地理跳变(深圳->曼谷 67 分钟)",
+      "uid": "u_1009",
+      "expect_signal_any": ["geo_jump"]
     }
   ],
   "agent_cases": [

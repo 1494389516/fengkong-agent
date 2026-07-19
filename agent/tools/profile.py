@@ -16,11 +16,12 @@ from typing import Dict, List, Optional
 
 from . import tool
 from .backtest import account_verdicts
-from .datasource import audit_log_path, load_accounts, load_events
+from .blacklist import blacklist_query
+from .datasource import audit_log_path, load_accounts, load_events, load_reports
 from .features import feature_stats
 from .graph import component_summary
+from .intel import ip_type_summary
 from .monitor import account_monitor
-from .blacklist import blacklist_query
 
 # LTV 分档:误伤代价的粗颗粒度量。档位只影响"处置建议措辞",不改判定 ——
 # 判定归规则,代价归人权衡,两者在输出里分开呈现。
@@ -62,7 +63,8 @@ def _disposal_history(uid: str) -> List[Dict]:
     description=(
         "账号一站式调查档案:注册主档(时间/方式/渠道/注册 IP 与设备的名单联查)、"
         "账龄与注册->首单间隔(账龄错配)、价值分档(LTV,给出误伤代价提示)、"
-        "当前策略下的判定与命中规则、监控信号(含自身基线)、关联分量(团伙)、"
+        "当前策略下的判定与命中规则、监控信号(含自身基线与地理跳变)、"
+        "IP 类型分布(家宽/基站/机房/代理)、关联分量(团伙)、被举报摘要、"
         "该 uid 的历史处置审批记录。调查'这个账号什么情况'类问题先调这个,"
         "再按需用单项工具深挖。"
     ),
@@ -107,11 +109,21 @@ def account_profile(uid: str):
         result["current_verdict"] = account_verdicts([uid], events)[uid]
         feats = feature_stats(uid)
         result["features"] = feats
+        # IP 质量:distinct_ip 是数量,这里是物种(家宽/基站/机房/代理)
+        result["ip_types"] = ip_type_summary({e["ip"] for e in mine})
         mon = account_monitor(uid)
         result["monitor"] = {k: mon[k] for k in
                              ("signal_types", "anomalous_windows", "shared_devices",
-                              "blacklist_signals", "self_baseline_signals")}
+                              "blacklist_signals", "self_baseline_signals", "geo_jumps")}
         result["relations"] = component_summary(uid)
+
+    # 举报摘要:verified 是强证据;dismissed 是"曾被误举报"的澄清证据,不作处置依据
+    against = [r for r in load_reports() if r.get("reported_uid") == uid]
+    result["reports_against"] = {
+        "count": len(against),
+        "verified": sum(1 for r in against if r.get("status") == "verified"),
+        "categories": sorted({r.get("category") for r in against}),
+    } if against else {"count": 0}
 
     result["disposal_history"] = _disposal_history(uid)
     return result

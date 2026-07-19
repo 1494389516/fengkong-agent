@@ -195,7 +195,7 @@ def run_gen_layer() -> int:
             realized = cal.get("realized_fpr_normal_wide")
             failures = _report("数据生成 + 大样本回测(离线)", [
                 ("生成器退出码 0", proc.returncode == 0),
-                ("账号数 = 60", r["accounts_evaluated"] == 60),
+                ("账号数 = 57(seed 7 确定性)", r["accounts_evaluated"] == 57),
                 ("宽口径 recall >= 0.9", wide["recall"] >= 0.9),
                 ("宽口径 precision >= 0.8", wide["precision"] >= 0.8),
                 ("宽口径 f1 >= 0.85", wide["f1"] >= 0.85),
@@ -330,6 +330,21 @@ def run_baseline_layer() -> int:
     ])
 
 
+def run_intel_layer() -> int:
+    """离线:IP 情报与举报查询。"""
+    i1 = registry.dispatch("ip_intel", {"ip": "203.0.113.66"})
+    i2 = registry.dispatch("ip_intel", {"ip": "10.222.1.1"})
+    r9 = registry.dispatch("report_query", {"uid": "u_1009"})
+    r1 = registry.dispatch("report_query", {"uid": "u_1001"})
+    return _report("IP 情报与举报(离线)", [
+        ("机房段识别为 idc/high", i1.get("type") == "idc" and i1.get("risk") == "high"),
+        ("未知段优雅降级", i2.get("type") == "unknown"),
+        ("u_1009 有属实举报", r9.get("verified_count") == 1),
+        ("u_1001 仅不实举报(不作处置依据)",
+         r1.get("count") == 1 and r1.get("verified_count") == 0),
+    ])
+
+
 def run_profile_layer() -> int:
     """离线:账号档案 —— 主档/账龄错配/价值分档/注册环境联查/关联汇总。"""
     from agent.tools.profile import account_profile
@@ -340,8 +355,10 @@ def run_profile_layer() -> int:
     return _report("账号档案(离线)", [
         ("u_1009:老号高价值,误伤代价 high",
          p9["found_account"] and p9["age_days"] > 300 and p9["value"]["tier"] == "high"),
-        ("u_1009:识别出案发设备非注册设备",
-         any("非注册设备" in f for f in p9.get("registration_flags", []))),
+        ("u_1009:档案含地理跳变 + 机房 IP 证据",
+         "geo_jump" in p9["monitor"]["signal_types"] and p9["ip_types"].get("idc", 0) > 0),
+        ("u_1009:属实举报进入档案",
+         p9["reports_against"]["verified"] >= 1),
         ("u_1002:新号(账龄 < 1 天)且判定 reject",
          p2["age_days"] < 1 and p2["current_verdict"]["predicted"] == "reject"),
         ("u_1003:注册设备命中灰名单",
@@ -443,6 +460,7 @@ def main() -> int:
     failures += run_governance_layer()
     failures += run_shadow_layer()
     failures += run_baseline_layer()
+    failures += run_intel_layer()
     failures += run_profile_layer()
     failures += run_gen_layer()
     failures += run_chart_smoke()

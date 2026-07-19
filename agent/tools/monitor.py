@@ -13,6 +13,7 @@
   blacklist         uid / ip / device 命中黑灰名单
   self_new_device   近窗出现历史未见设备(自身基线,盗号信号)
   self_amount_spike 近窗最大订单较自身历史突增(自身基线,销赃信号)
+  geo_jump          相邻事件地理跳变(移动速度超过民航速度,物理不可能)
 
 自身基线带账龄门槛(policy.self_min_history_events):历史太浅的账号不启用
 —— 否则盗号者潜伏几天"养"出一条正常自身基线就能骗过它,新号也会误报。
@@ -23,6 +24,7 @@ from collections import defaultdict
 from . import tool
 from .blacklist import blacklist_query
 from .datasource import load_events
+from .intel import geo_jumps
 from .policy import active_policy
 
 
@@ -109,6 +111,11 @@ def account_monitor(uid: str, window_seconds: int = 300):
                 self_signals.append("近窗最大订单 %.2f,为自身历史最大 %.2f 的 %.1f 倍" % (
                     max(recent_amt), max(prior_amt), max(recent_amt) / max(prior_amt)))
 
+    # 2.7) 地理跳变(经典盗号信号,情报缺失的网段不参与)
+    jumps = geo_jumps(mine, p["geo_jump_speed_kmh"])
+    if jumps:
+        signal_types.add("geo_jump")
+
     # 3) 黑灰名单关联(uid + 该账号用过的全部 ip/设备)
     blacklist_signals = []
     dims = [("uid", uid)]
@@ -128,6 +135,7 @@ def account_monitor(uid: str, window_seconds: int = 300):
         "shared_devices": shared_devices,
         "blacklist_signals": blacklist_signals,
         "self_baseline_signals": self_signals,
+        "geo_jumps": jumps,
         "signal_types": sorted(signal_types),
         "policy_version": p["_version"],
     }

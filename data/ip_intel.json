@@ -1,0 +1,9 @@
+{
+  "_comment": "IP 情报库(按 /24 网段):type = residential 家宽 / mobile 基站 / idc 机房 / proxy 代理秒拨;真实系统接第三方情报源,骨架用静态表模拟。同样 3 个 IP,3 个家宽和 3 个机房是两个物种。",
+  "112.96.100": {"type": "mobile", "carrier": "移动", "city": "深圳", "lat": 22.54, "lon": 114.06, "risk": "low"},
+  "120.229.7": {"type": "mobile", "carrier": "移动", "city": "深圳", "lat": 22.55, "lon": 114.1, "risk": "low"},
+  "116.25.40": {"type": "residential", "carrier": "电信", "city": "深圳", "lat": 22.53, "lon": 114.05, "risk": "low"},
+  "203.0.113": {"type": "idc", "carrier": null, "city": "曼谷", "lat": 13.75, "lon": 100.5, "risk": "high", "note": "已知代理池出没网段"},
+  "198.51.100": {"type": "idc", "carrier": null, "city": "上海", "lat": 31.23, "lon": 121.47, "risk": "medium", "note": "云主机段"},
+  "192.0.2": {"type": "proxy", "carrier": null, "city": null, "lat": null, "lon": null, "risk": "high", "note": "秒拨池,地理位置漂移不可信"}
+}

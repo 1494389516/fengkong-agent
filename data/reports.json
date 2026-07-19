@@ -1,0 +1,20 @@
+[
+ {
+  "report_id": 1,
+  "reported_uid": "u_1009",
+  "reporter": "cs_ticket_8841",
+  "ts": 1784110000,
+  "category": "unauthorized_charge",
+  "text": "机主来电:本人未操作,账号在境外登录并下单 4999",
+  "status": "verified"
+ },
+ {
+  "report_id": 2,
+  "reported_uid": "u_1001",
+  "reporter": "u_3301",
+  "ts": 1784050000,
+  "category": "promo_abuse",
+  "text": "怀疑这个人抢券太快",
+  "status": "dismissed"
+ }
+]

@@ -40,6 +40,7 @@ DEFAULTS: Dict[str, float] = {
     "r004_max_account_age_seconds": 604800,  # 注册 7 天内算新号
     "r004_min_amount": 200.0,                # 新号订单金额下限,低于此不值得看
     # 监控窗口信号(与 R002 分开:监控偏灵敏、规则偏保守)
+    "geo_jump_speed_kmh": 900.0,  # 超过民航巡航速度的"移动"= 物理不可能
     "monitor_burst_min": 8,
     "monitor_ip_churn_min": 3,
     "monitor_rapid_gap_seconds": 5,
