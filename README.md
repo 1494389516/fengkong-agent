@@ -1,4 +1,12 @@
-# 风控分析 Agent
+# 风控分析 Agent · Fengkong Agent
+
+> An LLM-powered risk-control analyst agent for e-commerce anti-fraud — rules engine,
+> drift/adversary monitoring, feature risk evaluation (IV/KS/AUC/PSI), appeal loop,
+> two-phase human approval, and 170+ offline eval assertions. A production-disciplined
+> reference skeleton, not a demo.
+>
+> Keywords: anti-fraud · risk-control · llm-agent · fraud-detection · scorecard ·
+> drift-monitoring · PSI · rules-engine · function-calling
 
 基于 DeepSeek function calling 的风控分析 agent:协助风控研究员调查账号、排查团伙、
 回测规则、论证调参,并通过两阶段审批执行处置。本仓库是一个**带完整工程纪律的骨架**
