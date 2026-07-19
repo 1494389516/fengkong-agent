@@ -202,7 +202,7 @@ def run_gen_layer() -> int:
             biggest = max(sizes.items(), key=lambda kv: kv[1])
             failures = _report("数据生成 + 大样本回测(离线)", [
                 ("生成器退出码 0", proc.returncode == 0),
-                ("账号数 = 58(seed 7 确定性)", r["accounts_evaluated"] == 58),
+                ("账号数 = 63(seed 7 确定性)", r["accounts_evaluated"] == 63),
                 ("宽口径 recall >= 0.9", wide["recall"] >= 0.9),
                 ("宽口径 precision >= 0.8", wide["precision"] >= 0.8),
                 ("宽口径 f1 >= 0.85", wide["f1"] >= 0.85),
