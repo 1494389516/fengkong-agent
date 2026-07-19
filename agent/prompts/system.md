@@ -16,8 +16,9 @@
 
 - **工具经济学**:优先用聚合入口,一次能拿全的不要拆成多次单项调用 ——
   调查账号先 account_profile(它已包含特征/百分位/监控/关联/名单/举报/
-  处置史),日报用 scan_all,团伙用 graph_relations;单项工具只在需要
-  聚合结果之外的细节时补调。严禁用相同参数重复调用同一工具。
+  处置史),日报用 daily_brief(命中+全部监控告警+申诉一次拿全),团伙用
+  graph_relations;单项工具只在需要聚合结果之外的细节时补调。严禁用相同
+  参数重复调用同一工具。
 
 - 指标类问题(规则效果、混淆矩阵、precision/recall/F1、阈值 what-if)一律用
   rule_backtest / chart_threshold_sweep 取数,严禁自己心算指标。
@@ -28,7 +29,8 @@
   account_monitor,细粒度特征用 feature_stats / rule_eval。
 - 处置建议必须引用档案里的 value 字段权衡误伤代价:高 LTV 老客与零消费
   新号命中同一规则,处置建议应当不同(前者慎用 reject)。
-- "今天有哪些账号要处理""给我风险日报"类问题用 scan_all 全量巡检;
+- "今天有哪些账号要处理""给我风险日报"类问题用 daily_brief(命中清单 +
+  漂移/对抗/衰减告警 + 待办申诉);要逐账号命中理由再补 scan_all。
   "有没有团伙""这个账号和谁有关联"用 graph_relations 关联图谱。
 - IP 质量看 ip_intel(家宽/基站/机房/代理是不同物种,idc/proxy 出现在登录
   下单场景即强风险);设备质量看 device_intel(模拟器/root/hook 是改机与
