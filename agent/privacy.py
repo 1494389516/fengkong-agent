@@ -28,7 +28,10 @@ from typing import Dict, List, Tuple
 _PATTERNS: List[Tuple[str, "re.Pattern"]] = [
     ("DEV", re.compile(r"(?<![A-Za-z0-9])(?:g_)?dev_[A-Za-z0-9_]+")),
     ("UID", re.compile(r"(?<![A-Za-z0-9])(?:u_\d+|g_(?:norm|bot|ring|stl|rpt)_[A-Za-z0-9_]+)")),
-    ("IP", re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?!\d)")),
+    # 2~3 个点号段:除完整 IP 外,ip_intel 的 segment 字段("203.0.113")也是
+    # 敏感网段,只匹配 4 段会让 24 位地址信息绕过脱敏出边界。贪婪量词保证
+    # 完整 IP 优先整体成 token,不会被拆成"前三段 + 尾段"。
+    ("IP", re.compile(r"(?<![\d.])(?:\d{1,3}\.){2,3}\d{1,3}(?!\d)")),
 ]
 
 _TOKEN_RE = re.compile(r"(?:UID|IP|DEV)_[0-9a-f]{8}")

@@ -1084,6 +1084,12 @@ def run_serve_layer() -> int:
             except OSError:
                 import time as _t
                 _t.sleep(0.1)
+        if health is None:
+            # 服务没起来(启动报错/端口占用/机器慢):这是本层 FAIL,不是评估
+            # 框架崩溃 —— 继续往下 _req 会连接拒绝抛异常,把整个 eval 掀翻
+            return _report("在线决策服务冒烟(离线)", [
+                ("服务在 5s 内就绪", False),
+            ])
         event = {"uid": "u_1002", "type": "coupon_claim", "ts": 1784109633}
         offline = rule_eval(dict(event), use_current_policy=True)
         code, online = _req("/decide", event)

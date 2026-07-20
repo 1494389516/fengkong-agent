@@ -57,6 +57,10 @@ def account_features(uid: str, as_of_ts: Optional[float] = None,
         return {"uid": uid, "found": False, "as_of_ts": as_of_ts, "window_seconds": window_seconds}
     ts = sorted(e["ts"] for e in evs)
     gaps = [b - a for a, b in zip(ts, ts[1:])]
+    # 领券专用间隔:R002 问的是"领券多快",全事件流的 min_gap 会把
+    # login→order 的手快当成刷券证据(实锤误伤过正常账号)
+    coupon_ts = sorted(e["ts"] for e in evs if e["type"] == "coupon_claim")
+    coupon_gaps = [b - a for a, b in zip(coupon_ts, coupon_ts[1:])]
     types: Dict[str, int] = {}
     for e in evs:
         types[e["type"]] = types.get(e["type"], 0) + 1
@@ -75,6 +79,7 @@ def account_features(uid: str, as_of_ts: Optional[float] = None,
         "order_amount_max": max(amounts) if amounts else None,
         "order_amount_sum": round(sum(amounts), 2) if amounts else 0,
         "min_gap_seconds": min(gaps) if gaps else None,
+        "coupon_min_gap_seconds": min(coupon_gaps) if coupon_gaps else None,
         "span_seconds": ts[-1] - ts[0],
         "ips": sorted({e["ip"] for e in evs}),
         "devices": sorted({e["device_id"] for e in evs}),

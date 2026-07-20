@@ -41,7 +41,9 @@ def _derive(fpr_budget: float) -> Dict[str, float]:
     v = _quantile(feature_values("min_gap_seconds"), fpr_budget)
     if v is not None:
         out["r002_max_gap_seconds"] = int(v)
-    v = _quantile(feature_values("event_count"), 1 - fpr_budget)
+    # R002 计数是领券口径(见 rules.py R002),阈值必须从领券数分布推导:
+    # 用全事件数分布会把"登录+下单多"的活跃人群当成刷券基线,阈值虚高
+    v = _quantile(feature_values("coupon_claims"), 1 - fpr_budget)
     if v is not None:
         out["r002_min_events"] = int(v)
     v = _quantile(feature_values("order_amount_max"), 1 - fpr_budget)

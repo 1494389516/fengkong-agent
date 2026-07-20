@@ -47,8 +47,12 @@ def alarm_fingerprint(alarm: str) -> str:
 
 def alarm_severity(alarm: str) -> float:
     """告警严重度:文本里最大的数值(PSI 值/百分比)。用于恶化重浮:
-    ack 静默的是"当时那个程度",不是这个问题本身。"""
-    nums = [float(m) for m in re.findall(r"\d+(?:\.\d+)?", alarm)]
+    ack 静默的是"当时那个程度",不是这个问题本身。
+    日期/时间和标识符里的数字(2026-07-15、R006、u_1009)不是程度,必须剔除
+    —— 否则年份永远是最大数,恶化重浮永远触发不了。"""
+    cleaned = re.sub(r"\d{4}-\d{2}-\d{2}", "", alarm)
+    cleaned = re.sub(r"\d{1,2}:\d{2}(?::\d{2})?", "", cleaned)
+    nums = [float(m) for m in re.findall(r"(?<![\w.])\d+(?:\.\d+)?", cleaned)]
     return max(nums) if nums else 0.0
 
 

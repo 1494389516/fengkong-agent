@@ -162,12 +162,15 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
     # 因为极端活跃的真人无法完全排除,而"高频 + 换 IP"基本只能是脚本。
     # ------------------------------------------------------------------
     if feats and event_type == "coupon_claim":
-        gap = feats.get("min_gap_seconds")
+        # 间隔与计数都必须是领券口径:全事件流的 event_count/min_gap 会把
+        # "登录多、下单快"的活跃正常账号当成刷券 bot(实锤误伤过,见 backtest
+        # 的 R002 fp),证据文案里的"领券 N 次"也会变成编造数字。
+        gap = feats.get("coupon_min_gap_seconds")
         # 特征按 ts < as_of 取证(防泄漏),不含当前被评估事件;但"第 N 次领券"
         # 的计数必须含当次 —— 生产引擎在第 N 次到达时就计数并拦截,而回放里
         # feats 只数到 N-1,strict 比较让实际生效阈值变成 N+1:恰好刷满阈值的
         # bot 会在回放里漏过、与生产结论分歧。当次即一次 coupon_claim,+1 对齐。
-        count = feats["event_count"] + 1
+        count = feats["coupon_claims"] + 1
         if gap is not None and gap <= p["r002_max_gap_seconds"] and count >= p["r002_min_events"]:
             action = "reject" if feats["distinct_ip"] >= p["r002_reject_min_ips"] else "review"
             _hit(hits, "R002", "领券最短间隔 %ds,累计 %d 次,涉及 %d 个 IP" % (

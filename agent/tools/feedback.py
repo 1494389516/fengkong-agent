@@ -16,6 +16,7 @@ from typing import Dict, List
 
 from . import tool
 from .backtest import account_verdicts
+from .blacklist import active_records
 from .datasource import (appeals_path, blacklist_path, labels_path, load_accounts,
                          load_appeals, load_blacklist, load_events, load_labels,
                          postmortems_path)
@@ -68,7 +69,9 @@ def appeal_review():
         v = verdicts.get(uid, {})
         label = (labels.get(uid) or {}).get("label")
         ltv = (accounts.get(uid) or {}).get("ltv")
-        bl = [r for r in load_blacklist() if r["dimension"] == "uid" and r["value"] == uid]
+        # 只看未过期记录:过期名单在规则引擎里"视为不存在",拿失效证据
+        # 建议维持(或阻断解除)会让申诉结论与实际判定口径脱节
+        bl = active_records("uid", uid)
         verified = report_query(uid)["verified_count"]
         # 建议只看硬证据,申诉文案不参与:fraud 标签/属实举报/黑名单任一在手
         # 即建议维持;干干净净(normal 或无标签 + 无处置 + 无不利名单)建议解除
@@ -151,7 +154,9 @@ def apply_appeal_decision(action: Dict) -> Dict:
     """actions.decide 批准 appeal_resolve 后调用:落盘申诉状态;accept 额外
     解除 uid 名单、修正标签、写复盘日志。返回落盘摘要(进审计日志)。"""
     appeal_id, uid, decision = action["appeal_id"], action["uid"], action["decision"]
-    appeals = load_appeals()
+    # 逐条拷贝再改:load_appeals 返回的是进程内缓存,就地改 status 后若写盘
+    # 失败(文件 mtime 未变、缓存不失效),缓存里会留下一个从未落盘的幻影状态
+    appeals = [dict(a) for a in load_appeals()]
     for a in appeals:
         if a["appeal_id"] == appeal_id:
             a["status"] = "accepted" if decision == "accept" else "rejected"
@@ -159,9 +164,11 @@ def apply_appeal_decision(action: Dict) -> Dict:
                               encoding="utf-8")
     applied = {"appeal_status": "accepted" if decision == "accept" else "rejected"}
     if decision == "accept":
-        # ① 解除 uid 维度名单(ip/设备维度不动:资源可能仍被他人滥用)
+        # ① 解除 uid 维度的黑/灰记录(ip/设备维度不动:资源可能仍被他人滥用;
+        #    白名单更不能动 —— 那是误伤保护,删掉等于让刚洗清的用户裸奔)
         records = load_blacklist()
-        kept = [r for r in records if not (r["dimension"] == "uid" and r["value"] == uid)]
+        kept = [r for r in records if not (r["dimension"] == "uid" and r["value"] == uid
+                                           and r["list"] != "white")]
         if len(kept) != len(records):
             blacklist_path().write_text(json.dumps(kept, ensure_ascii=False, indent=1),
                                         encoding="utf-8")

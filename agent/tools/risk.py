@@ -76,14 +76,21 @@ def _auc(fraud: List[float], normal: List[float]) -> float:
 
 
 def _ks(fraud: List[float], normal: List[float]) -> float:
-    """两类经验 CDF 的最大距离(非缺失值)。"""
+    """两类经验 CDF 的最大距离(非缺失值)。CDF 只在"当前值整段走完"后才可比:
+    同值段中途取差会把并列值当成先后关系,两个完全相同的分布能算出 KS=1。"""
     f, n = sorted(fraud), sorted(normal)
     ks = 0.0
     i = j = 0
     while i < len(f) or j < len(n):
-        if j >= len(n) or (i < len(f) and f[i] <= n[j]):
-            i += 1
+        if j >= len(n):
+            v = f[i]
+        elif i >= len(f):
+            v = n[j]
         else:
+            v = min(f[i], n[j])
+        while i < len(f) and f[i] == v:
+            i += 1
+        while j < len(n) and n[j] == v:
             j += 1
         ks = max(ks, abs(i / len(f) - j / len(n)))
     return round(ks, 4)

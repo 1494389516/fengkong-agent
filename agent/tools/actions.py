@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 
 from . import tool
 from . import policy
-from .blacklist import VALID_LISTS
+from .blacklist import VALID_LISTS, active_records
 from .datasource import audit_log_path, blacklist_path, load_blacklist, pending_actions_path
 
 VALID_DIMENSIONS = ("uid", "ip", "device_id")
@@ -88,9 +88,10 @@ def blacklist_add(dimension: str, value: str, reason: str, expires_days: int = 0
     if dimension not in VALID_DIMENSIONS or target_list not in VALID_LISTS:
         return {"error": "dimension 必须是 %s 之一,list 必须是 %s 之一" % (VALID_DIMENSIONS, VALID_LISTS)}
     # 防重按(维度, 值, 同色)比对:不同色是合法诉求(灰升黑 / 黑值申诉加白),
-    # 冲突裁决在规则引擎(黑白并存以黑为准)与人工审批,不在提交入口一刀切
-    existing = [r for r in load_blacklist() if r["dimension"] == dimension
-                and r["value"] == value and r["list"] == target_list]
+    # 冲突裁决在规则引擎(黑白并存以黑为准)与人工审批,不在提交入口一刀切。
+    # 只看未过期记录(active_records):过期记录在规则引擎里"视为不存在",
+    # 若还挡新申请,过期后卷土重来的值就永远无法再次拉黑
+    existing = active_records(dimension, value, lists=(target_list,))
     if existing:
         return {"status": "already_listed", "records": existing}
     pending = _load_pending()
