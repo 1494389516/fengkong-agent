@@ -227,6 +227,16 @@ def run_gen_layer() -> int:
             # 无关),团伙成员数是每团 randint(3,6) 才随机。之前钉 "==62" 每加一处
             # random() 调用就位移 RNG 流、逼着改这个数;改成"确定部分精确 + 团伙部分
             # 范围"后,断言只在账号结构真的坏了时才红。
+            # 地理一致性:/24 撞段 + 情报首写胜出曾让 normal 账号的事件定位到
+            # 别人的常驻城市,凭空造出物理不可能的跳变(评估集标签噪声)
+            ipi = json.loads((out / "ip_intel.json").read_text(encoding="utf-8"))
+            evs_all = json.loads((out / "events_sample.json").read_text(encoding="utf-8"))
+            norm_cities = {}
+            for e in evs_all:
+                if e["uid"].startswith("g_norm_"):
+                    city = ipi.get(e["ip"].rsplit(".", 1)[0], {}).get("city")
+                    if city:
+                        norm_cities.setdefault(e["uid"], set()).add(city)
             per = r["per_account"]
             n_norm = sum(1 for u in per if u.startswith("g_norm_"))
             n_bot = sum(1 for u in per if u.startswith("g_bot_"))
@@ -246,6 +256,8 @@ def run_gen_layer() -> int:
                 ("无生产日志时对账优雅降级",
                  registry.dispatch("consistency_check", {}).get("available") is False),
                 ("R006 强拒误伤被计量(root 真机正常用户 >= 1)", len(r006_fp) >= 1),
+                ("正常账号地理一致(无撞段造出的假跳变)",
+                 bool(norm_cities) and all(len(c) == 1 for c in norm_cities.values())),
                 ("区分度评估:大样本上有排名且指标有界",
                  bool(fr.get("ranking_by_iv")) and fr_top.get("iv", 0) > 0
                  and 0.5 <= fr_top.get("auc", 0) <= 1.0
@@ -734,6 +746,24 @@ def run_regression_layer() -> int:
          "g_rpt_0007" not in t.tokenize("reporter g_rpt_0007")),
         ("脱敏:图表工具完整返回无标识符泄漏(原始泄漏路径)",
          "u_1002" not in t.tokenize(chart_json)),
+        # ip_intel 的 segment 字段是三段网段:只匹配 4 段的正则会放走 24 位
+        # 地址信息,LLM 能拿它对照还原同结果里的 IP token
+        ("脱敏:三段网段(ip_intel segment)不出边界",
+         "203.0.113" not in t.tokenize('{"ip": "203.0.113.66", "segment": "203.0.113"}')),
+    ]
+
+    # -- ops:告警严重度取"程度"而非日期年份 —— 修复前每条带日期的告警严重度
+    #    恒为 2026,ack 后无论恶化到什么程度都触不了 1.25 倍重浮线 --
+    from agent.tools.ops import ESCALATE_RATIO, alarm_fingerprint, alarm_severity
+    a_old = "event_count 在 2026-07-15 PSI=0.310(>0.25)"
+    a_new = "event_count 在 2026-07-16 PSI=0.980(>0.25)"
+    checks += [
+        ("告警严重度:取 PSI/百分比,剔除日期与标识符数字",
+         alarm_severity(a_old) == 0.31
+         and alarm_severity("R006 命中率在 2026-07-19 由 16.8% 变为 7.3%") == 16.8),
+        ("告警严重度:同指纹恶化可越过重浮线",
+         alarm_fingerprint(a_old) == alarm_fingerprint(a_new)
+         and alarm_severity(a_new) > alarm_severity(a_old) * ESCALATE_RATIO),
     ]
 
     # -- actions:限速的 0 值短路与开关取值域 --
@@ -808,6 +838,22 @@ def run_regression_layer() -> int:
                 "type": "coupon_claim", "ts": 1000 + i * 2} for i in range(n)]
         evs += [{"uid": "t_norm", "ip": "10.0.0.2", "device_id": "t_dev2",
                  "type": "coupon_claim", "ts": 2000 + i * 3600} for i in range(3)]
+        # t_active:活跃正常账号 —— 登录/下单又多又快(19s),但从未领过券。
+        # 修复前 R002 拿全事件数当"领券次数"、全事件间隔当"领券间隔",
+        # 这种账号第一次领券就被硬拒,证据数字全是编造的
+        for i in range(12):
+            evs += [{"uid": "t_active", "ip": "10.0.0.%d" % (3 + i % 3),
+                     "device_id": "t_dev3", "type": "login", "ts": 5000 + i * 100},
+                    {"uid": "t_active", "ip": "10.0.0.%d" % (3 + i % 3),
+                     "device_id": "t_dev3", "type": "order", "ts": 5000 + i * 100 + 19,
+                     "amount": 50}]
+        # t_slowclaims:领券次数够多但间隔 1 小时(慢),只是每次领完 5s 后
+        # 有个登录 —— 领券间隔必须按领券事件算,不能被相邻登录带快
+        for i in range(10):
+            evs += [{"uid": "t_slowclaims", "ip": "10.0.0.9", "device_id": "t_dev4",
+                     "type": "coupon_claim", "ts": 50000 + i * 3600},
+                    {"uid": "t_slowclaims", "ip": "10.0.0.9", "device_id": "t_dev4",
+                     "type": "login", "ts": 50000 + i * 3600 + 5}]
         (base / "events_sample.json").write_text(json.dumps(evs))
         (base / "blacklist.json").write_text("[]")
         (base / "labels.json").write_text("{}")
@@ -821,6 +867,36 @@ def run_regression_layer() -> int:
                             "type": "coupon_claim", "ts": 1000 + (n - 1) * 2})
             checks.append(("R002:恰好刷满阈值次数的第 N 次即命中(无差一)",
                            any(h["rule_id"] == "R002" for h in r2["hits"])))
+            r_act = rule_eval({"uid": "t_active", "ip": "10.0.0.3", "device_id": "t_dev3",
+                               "type": "coupon_claim", "ts": 5000 + 12 * 100 + 60})
+            r_slow = rule_eval({"uid": "t_slowclaims", "ip": "10.0.0.9",
+                                "device_id": "t_dev4", "type": "coupon_claim",
+                                "ts": 50000 + 10 * 3600})
+            checks += [
+                ("R002:活跃但从未领券的账号首次领券不命中(领券计数口径)",
+                 not any(h["rule_id"] == "R002" for h in r_act["hits"])),
+                ("R002:慢速领券不被相邻快事件带成刷券(领券间隔口径)",
+                 not any(h["rule_id"] == "R002" for h in r_slow["hits"])),
+            ]
+            # 草案覆盖判定必须对全部命中跑规则:无标签数据上,已被现有规则
+            # 抓住的命中要计入 overlap,没抓住的要变成"待人工核查"而不是
+            # 被误判"已覆盖"(修复前 flagged 集合永远不含无标签账号)
+            d_cov = registry.dispatch("rule_draft_test", {"conditions": [
+                {"feature": "coupon_claims", "op": ">=", "value": 8},
+                {"feature": "event_count", "op": "<=", "value": 12}]})
+            d_new = registry.dispatch("rule_draft_test", {"conditions": [
+                {"feature": "coupon_claims", "op": ">=", "value": 8},
+                {"feature": "event_count", "op": ">=", "value": 15}]})
+            checks += [
+                ("草案试穿:无标签但已被规则覆盖的命中计入 overlap",
+                 d_cov["hit_accounts"] == ["t_bot"]
+                 and d_cov["overlap_with_active_rules"] == 1
+                 and "无增量" in d_cov["verdict"]),
+                ("草案试穿:无标签且未被覆盖的命中提示人工核查而非'已覆盖'",
+                 d_new["hit_accounts"] == ["t_slowclaims"]
+                 and d_new["net_new_unlabeled"] == ["t_slowclaims"]
+                 and "无标签" in d_new["verdict"]),
+            ]
             cal = registry.dispatch("threshold_calibrate", {})
             checks.append(("漂移:快照 P99=0 抬升必须告警(0 不是缺失)",
                            cal.get("drift_alarm") is True
@@ -865,6 +941,97 @@ def run_regression_layer() -> int:
                            and bl_before == bl_after == 0))
         finally:
             os.environ.pop("FK_DATA_DIR", None)
+
+    # -- 名单过期语义 / 申诉链路 / 告警确认闭环(完整数据副本)--
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in (ROOT / "data").glob("*.json"):
+            shutil.copy(f, base / f.name)
+        (base / "pending_actions.json").unlink(missing_ok=True)
+        # 植入两条已过期记录:过期 = 规则引擎里"视为不存在",提交入口和
+        # 申诉建议必须同口径,否则过期后卷土重来的值永远无法再拉黑、
+        # 失效证据还能维持原判
+        bl = json.loads((base / "blacklist.json").read_text(encoding="utf-8"))
+        bl += [{"dimension": "ip", "value": "9.9.9.9", "list": "gray",
+                "reason": "eval:已过期", "added_at": "2026-01-01", "expires_at": "2026-02-01"},
+               {"dimension": "uid", "value": "u_1001", "list": "black",
+                "reason": "eval:已过期", "added_at": "2026-01-01", "expires_at": "2026-02-01"}]
+        (base / "blacklist.json").write_text(json.dumps(bl, ensure_ascii=False))
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            checks.append(("名单:过期同色记录不挡重新拉黑",
+                           actions.blacklist_add("ip", "9.9.9.9", reason="eval",
+                                                 **{"list": "gray"})["status"]
+                           == "pending_confirmation"))
+            q = {a["uid"]: a["recommendation"]
+                 for a in registry.dispatch("appeal_review", {})["queue"]}
+            checks.append(("申诉建议:过期黑记录不作维持证据(u_1001 仍 release)",
+                           q.get("u_1001") == "release"))
+
+            # 决议落盘失败:申诉必须还是 pending(修复前就地改写缓存,留下
+            # 从未落盘的幻影 accepted,重试直接被 already_resolved 挡住)
+            from agent.tools import feedback
+            from agent.tools.datasource import load_appeals
+            aid = registry.dispatch("appeal_resolve", {
+                "appeal_id": 2, "decision": "accept",
+                "reason": "eval:误伤成立"})["action_id"]
+            real_path = feedback.appeals_path
+            feedback.appeals_path = lambda: base / "no_such_dir" / "appeals.json"
+            raised = False
+            try:
+                actions.decide(aid, approve=True)
+            except OSError:
+                raised = True
+            finally:
+                feedback.appeals_path = real_path
+            checks.append(("申诉落盘失败:状态仍 pending、缓存无幻影决议",
+                           raised and [a for a in load_appeals()
+                                       if a["appeal_id"] == 2][0]["status"] == "pending"))
+            # 重试成功:accept 移除黑/灰(含过期黑),白名单必须保留 ——
+            # 刚被核实误伤的用户不能反而失去误伤保护
+            actions.decide(aid, approve=True)
+            recs = sorted(x["list"] for x in
+                          json.loads((base / "blacklist.json").read_text(encoding="utf-8"))
+                          if x["dimension"] == "uid" and x["value"] == "u_1001")
+            checks.append(("申诉 accept:黑/灰移除、白名单保留", recs == ["white"]))
+
+            # 告警确认闭环:ack 静默"当时那个程度",同指纹恶化必须重浮。
+            # 直接按 duty_ops 的落盘结构写 ack(它的"告警必须在当前日报里"
+            # 防呆与本断言无关),守卫的是 filter_acked 的严重度比较语义
+            from agent.tools import ops
+            ops._save(ops.alert_acks_path(), [{
+                "fingerprint": ops.alarm_fingerprint(a_old),
+                "severity": ops.alarm_severity(a_old), "alarm": a_old,
+                "reason": "eval", "acked_at": "2026-07-15T00:00:00Z"}])
+            checks.append(("告警确认:未恶化保持静默、同指纹恶化重浮",
+                           ops.filter_acked([a_old])["acked_count"] == 1
+                           and not ops.filter_acked([a_old])["active"]
+                           and ops.filter_acked([a_new])["escalated_count"] == 1))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+    # -- CLI 冒烟:三类待办都能展示、批准,文案方向正确(修复前 appeal_resolve
+    #    待办直接 KeyError 崩掉 CLI,移除申请批准后打印"已写入名单")--
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in (ROOT / "data").glob("*.json"):
+            shutil.copy(f, base / f.name)
+        (base / "pending_actions.json").unlink(missing_ok=True)
+        env = dict(os.environ, FK_DATA_DIR=td, DEEPSEEK_API_KEY="sk-eval-cli-smoke")
+        seed = ("from agent.tools.feedback import appeal_resolve\n"
+                "from agent.tools.actions import blacklist_remove\n"
+                "appeal_resolve(2, 'accept', 'eval:cli')\n"
+                "blacklist_remove(dimension='ip', value='203.0.113.66',"
+                " **{'list': 'black', 'reason': 'eval:cli'})\n")
+        subprocess.run([sys.executable, "-c", seed], env=env, cwd=str(ROOT),
+                       capture_output=True)
+        p = subprocess.run([sys.executable, str(ROOT / "main.py")], env=env, text=True,
+                           capture_output=True, timeout=60,
+                           input="/pending\n/approve 1\n/approve 2\nexit\n")
+        checks.append(("CLI:申诉/移除待办可展示可批准、文案方向正确、无崩溃",
+                       p.returncode == 0 and "Traceback" not in p.stderr
+                       and "申诉决议" in p.stdout and "已批准并移出" in p.stdout
+                       and "已批准并写入" not in p.stdout))
 
     return _report("复检修复回归(离线)", checks)
 
@@ -927,6 +1094,12 @@ def run_stats_layer() -> int:
          and abs(_auc(base[:500], same[:500]) - 0.5) < 0.06),
         ("KS 有界且完全可分=1",
          _ks([1, 2, 3] * 10, [10, 11, 12] * 10) == 1.0),
+        # 同值(ties)是 KS 的经典坑:CDF 必须整个同值段走完才可比,段中途取差
+        # 会把并列当先后 —— 修复前两个完全相同的分布算出 KS=1.0,离散计数特征
+        # (distinct_device 这类)的区分度全线虚高
+        ("KS:全同值自比=0,同值混叠取真值(修复:同值段中途取差)",
+         _ks([1.0] * 10, [1.0] * 10) == 0.0
+         and _ks([1.0] * 44 + [2.0] * 4, [1.0] * 200) == round(4 / 48, 4)),
         ("IV:完全可分为强档且 Laplace 平滑不爆表",
          sep_iv["level"] == "strong" and sep_iv["iv"] < 10),
     ])
