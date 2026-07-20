@@ -102,9 +102,9 @@ def _events_df(uid: Optional[str] = None) -> pd.DataFrame:
 
 # 基线百分位面板的特征集:(键, 中文名, 低值可疑, 对应阈值的 policy 键)
 PCT_FEATURES = [
-    ("event_count", "事件数", False, "r002_min_events"),
+    ("event_count", "事件数", False, None),
     ("distinct_ip", "去重 IP", False, None),
-    ("coupon_claims", "领券数", False, None),
+    ("coupon_claims", "领券数", False, "r002_min_events"),
     ("order_amount_max", "最大订单", False, "r003_high_amount"),
     ("min_gap_seconds", "最短间隔(低=可疑)", True, "r002_max_gap_seconds"),
 ]

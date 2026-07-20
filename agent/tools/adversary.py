@@ -36,7 +36,7 @@ def _near_watches(p: Dict) -> List[Dict]:
     return [
         {"feature": "min_gap_seconds", "rule": "R002",
          "threshold": p["r002_max_gap_seconds"], "evade_side": "above"},
-        {"feature": "event_count", "rule": "R002",
+        {"feature": "coupon_claims", "rule": "R002",
          "threshold": p["r002_min_events"], "evade_side": "below"},
         {"feature": "order_amount_max", "rule": "R003",
          "threshold": p["r003_high_amount"], "evade_side": "below"},

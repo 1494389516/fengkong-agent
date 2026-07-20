@@ -16,7 +16,7 @@
 from typing import Dict, List, Optional
 
 from . import tool
-from .backtest import backtest
+from .backtest import account_verdicts
 from .datasource import load_events, load_labels
 from .featurelib import account_features
 
@@ -87,17 +87,17 @@ def rule_draft_test(conditions: List[Dict], window_seconds: Optional[int] = None
     tp = [u for u in labeled_hits if labels[u] == "fraud"]
     fp = [u for u in labeled_hits if labels[u] == "normal"]
 
-    # 与现有规则集的关系:重叠部分是冗余,net_new 才是增量价值
-    base = backtest()
-    overlap_note = None
-    net_new, net_new_fp, already_flagged = [], [], []
-    if "error" not in base:
-        flagged = {u for u, a in base["per_account"].items() if a["predicted"] != "pass"}
-        already_flagged = [u for u in hit_uids if u in flagged]
-        net_new = [u for u in tp if u not in flagged]           # 现在漏掉、草案能抓
-        net_new_fp = [u for u in fp if u not in flagged]        # 草案新引入的误伤
-    else:
-        overlap_note = "回测不可用(%s),重叠分析跳过" % base["error"]
+    # 与现有规则集的关系:重叠部分是冗余,net_new 才是增量价值。
+    # 覆盖判定必须对全部命中账号跑规则(account_verdicts),不能借用 backtest
+    # 的 per_account —— 那只覆盖有标签账号,无标签命中会被当成"已覆盖",
+    # 恰恰漏掉草案最有价值的场景:现有规则和标签都没碰过的新模式。
+    verdicts = account_verdicts(hit_uids, load_events()) if hit_uids else {}
+    flagged = {u for u, a in verdicts.items() if a["predicted"] != "pass"}
+    already_flagged = [u for u in hit_uids if u in flagged]
+    net_new = [u for u in tp if u not in flagged]           # 现在漏掉、草案能抓
+    net_new_fp = [u for u in fp if u not in flagged]        # 草案新引入的误伤
+    # 无标签且现有规则未覆盖:定性未知的真增量候选,交人工核查
+    net_new_unlabeled = [u for u in hit_uids if u not in labels and u not in flagged]
 
     precision = round(len(tp) / len(labeled_hits), 4) if labeled_hits else None
     return {
@@ -111,12 +111,14 @@ def rule_draft_test(conditions: List[Dict], window_seconds: Optional[int] = None
         "overlap_with_active_rules": len(already_flagged),
         "net_new_catches": net_new,
         "net_new_false_positives": net_new_fp,
-        **({"overlap_note": overlap_note} if overlap_note else {}),
+        "net_new_unlabeled": net_new_unlabeled,
         "verdict": (
             "无命中,条件过严或方向不对" if not hit_uids else
-            "全部命中已被现有规则覆盖,草案无增量" if not net_new and not net_new_fp else
+            "全部命中已被现有规则覆盖,草案无增量"
+            if not (net_new or net_new_fp or net_new_unlabeled) else
             "有增量召回且无新误伤,值得转正式实现" if net_new and not net_new_fp else
             "有增量但引入新误伤,收紧条件或叠加信号" if net_new else
-            "无增量召回还引入新误伤,放弃此方向"),
+            "无增量召回还引入新误伤,放弃此方向" if net_new_fp else
+            "增量命中均无标签,先人工核查这些账号再定方向"),
         "note": "账号级口径的方向验证;转正式规则需研究员实现 + 评审 + eval 回归",
     }

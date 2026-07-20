@@ -122,8 +122,15 @@ class Gen:
         r = self.rng
         uid = "g_norm_%04d" % i
         device = "g_dev_n%04d" % i
-        ips = ["10.%d.%d.%d" % (r.randint(0, 200), r.randint(0, 250), r.randint(1, 250))
-               for _ in range(r.randint(1, 3))]
+        # 网段情报首写胜出(seg_intel setdefault):两个正常用户随机撞上同一个
+        # /24 时,后者的事件会被定位到前者的常驻城市,给 normal 标签账号造出
+        # 物理不可能的地理跳变(评估集标签噪声)。撞段就重抽,保证段独占。
+        ips = []
+        for _ in range(r.randint(1, 3)):
+            ip = "10.%d.%d.%d" % (r.randint(0, 200), r.randint(0, 250), r.randint(1, 250))
+            while ip.rsplit(".", 1)[0] in self.ip_intel:
+                ip = "10.%d.%d.%d" % (r.randint(0, 200), r.randint(0, 250), r.randint(1, 250))
+            ips.append(ip)
         home = r.choice(CITIES)  # 正常用户的多个网段都在常驻城市,不产生地理跳变
         for ip in ips:
             self.seg_intel(ip, r.choice(["residential", "mobile"]), home, "low")

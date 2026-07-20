@@ -67,11 +67,17 @@ def main():
                 elif kind == "blacklist_remove":
                     print("  [待审批] #%d 移出%s名单 %s=%s | %s" % (
                         a["action_id"], a["list"], a["dimension"], a["value"], a["reason"]))
-                else:
+                elif kind == "appeal_resolve":
+                    print("  [待审批] #%d 申诉决议 appeal#%d uid=%s -> %s | %s" % (
+                        a["action_id"], a["appeal_id"], a["uid"], a["decision"], a["reason"]))
+                elif kind == "blacklist_add":
                     print("  [待审批] #%d %s=%s -> %s名单%s | %s" % (
                         a["action_id"], a["dimension"], a["value"], a["list"],
                         "(观察期 %d 天)" % a["expires_days"] if a.get("expires_days") else "",
                         a["reason"]))
+                else:  # 未知类型:宁可展示原始内容,不能让 CLI 崩掉
+                    print("  [待审批] #%d %s | %s" % (
+                        a["action_id"], kind, a.get("reason", a)))
             continue
         if low.startswith("/approve") or low.startswith("/deny"):
             approve = low.startswith("/approve")
@@ -90,10 +96,22 @@ def main():
                 print("  [%s] #%d 阈值变更 %s(已记审计日志)" % (
                     "已批准,新策略版本生效" if approve else "已驳回",
                     a["action_id"], a["values"]))
-            else:
+            elif a.get("kind") == "blacklist_remove":
+                # 移除申请不能复用"写入"文案:方向说反会让值班误判名单现状
+                print("  [%s] #%d %s=%s 移出%s名单(已记审计日志)" % (
+                    "已批准并移出" if approve else "已驳回",
+                    a["action_id"], a["dimension"], a["value"], a["list"]))
+            elif a.get("kind") == "appeal_resolve":
+                print("  [%s] #%d 申诉决议 appeal#%d uid=%s -> %s(已记审计日志)" % (
+                    "已批准并落盘" if approve else "已驳回",
+                    a["action_id"], a["appeal_id"], a["uid"], a["decision"]))
+            elif a.get("kind", "blacklist_add") == "blacklist_add":
                 print("  [%s] #%d %s=%s -> %s名单(已记审计日志)" % (
                     "已批准并写入" if approve else "已驳回",
                     a["action_id"], a["dimension"], a["value"], a["list"]))
+            else:
+                print("  [%s] #%d %s(已记审计日志)" % (
+                    "已批准" if approve else "已驳回", a["action_id"], a.get("kind")))
             continue
         answer = agent.ask(
             user_input,
