@@ -762,6 +762,56 @@ def run_reconcile_layer() -> int:
     ])
 
 
+def run_mismatch_queue_layer() -> int:
+    """离线:对账差异工单闭环 —— 开单/销单/缓存不打扰/复发重开/恢复自动销单,
+    且二次对账不得重复开单(键必须稳定)。"""
+    with tempfile.TemporaryDirectory() as td:
+        for f in ("events_sample.json", "decisions_log.json", "blacklist.json",
+                  "accounts.json", "device_intel.json", "thresholds.json"):
+            shutil.copy(ROOT / "data" / f, Path(td) / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            c1 = registry.dispatch("consistency_check", {})
+            checks = [
+                ("首次对账开出 3 张工单(与埋设漂移数一致)",
+                 c1.get("mismatch_queue", {}).get("fresh_open") == 3
+                 and c1["mismatch_queue"]["open"] == 3),
+            ]
+            registry.dispatch("mismatch_resolve",
+                              {"key": "u_1002:1784109633", "cause": "known_diff",
+                               "note": "eval:测试销单"})
+            q = registry.dispatch("mismatch_queue", {})
+            checks.append(("销单后 open=2 resolved=1",
+                           q["stats"]["open"] == 2 and q["stats"]["resolved"] == 1
+                           and q["stats"]["total"] == 3))
+            registry.dispatch("consistency_check", {})  # 状态未变 -> 缓存命中
+            q = registry.dispatch("mismatch_queue", {})
+            checks.append(("对账缓存命中不打扰已销单",
+                           q["stats"]["open"] == 2 and q["stats"]["resolved"] == 1))
+            dp = Path(td) / "decisions_log.json"
+            dp.write_text(dp.read_text(encoding="utf-8") + "\n")  # mtime 触发重跑
+            registry.dispatch("consistency_check", {})
+            q = registry.dispatch("mismatch_queue", {})
+            item = [i for i in q["items"] if i["key"] == "u_1002:1784109633"]
+            checks.append(("复发自动重开且保留原销单说明",
+                           q["stats"]["total"] == 3 and item
+                           and item[0]["status"] == "open"
+                           and item[0]["note"] == "复发重开:eval:测试销单"))
+            (Path(td) / "decisions_log.json").write_text(json.dumps({
+                "decisions": [{"uid": "u_1001", "ts": 1783929600, "action": "pass",
+                               "rules": [], "policy_version": "v",
+                               "register_risk_score": 0}],
+            }, ensure_ascii=False), encoding="utf-8")
+            registry.dispatch("consistency_check", {})
+            q = registry.dispatch("mismatch_queue", {})
+            checks.append(("对账恢复自动销单,无重复工单",
+                           q["stats"]["open"] == 0 and q["stats"]["stale"] == 3
+                           and q["stats"]["total"] == 3))
+            return _report("对账差异工单闭环(离线,临时目录)", checks)
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+
+
 def run_privacy_layer() -> int:
     """离线:脱敏层往返与稳定性 + 用户内容注入防线(含逃逸尝试)。"""
     from agent.privacy import Tokenizer
@@ -1332,6 +1382,7 @@ def main() -> int:
     failures += run_intel_layer()
     failures += run_profile_layer()
     failures += run_reconcile_layer()
+    failures += run_mismatch_queue_layer()
     failures += run_gen_layer()
     failures += run_stats_layer()
     failures += run_depth_layer()

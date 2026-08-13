@@ -15,12 +15,17 @@ max_sim_mismatch_rate(policy)时:
 无日志的数据集(如生成集)优雅降级:对账不可用,工具不附标记,
 但模拟结论应标注"未对账"。
 """
+import json
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from . import tool
 from .datasource import data_dir, load_accounts, load_decisions, load_events
 from .policy import active_policy
 from .rules import rule_eval
+
+QUEUE_CAUSES = ("policy_sync_lag", "sim_bug", "data_lag", "known_diff", "other")
+QUEUE_STATES = ("open", "resolved", "stale")
 
 _cache: Dict = {}
 
@@ -114,7 +119,155 @@ def reconcile() -> Optional[Dict]:
             % len(master_mismatches))
     if not active_policy()["_overridden"]:
         _cache["r"] = (key, result)
+        # 差异工单:只在非 what-if 覆盖时落盘(开单/销单/重开)。
+        # 覆盖期间的 rule_eval 用的是假想阈值,差异没有生产语义,不能进工单。
+        # 语义注意:fresh_open 是本轮对账发现的差异数(不随销单变化),
+        # 队列实际状态以 mismatch_queue 工具为准。
+        qstats = _update_mismatch_queue(mismatches)
+        result["mismatch_queue"] = {"fresh_open": len(mismatches), **qstats}
+        result["mismatch_queue_note"] = (
+            "差异已自动入工单(open/对账恢复自动 stale/复发自动重开);"
+            "用 mismatch_queue 查看,mismatch_resolve 销单")
     return result
+
+
+# ---------------------------------------------------------------------------
+# 差异工单:对账发现不一致只是第一步,生产中这些差异必须有人销单。
+# 之前 consistency_check 只"提醒"(失信标注),没有闭环 —— 差异会不会被
+# 排查、谁在处理、结论是什么,全无记录。工单把对账闭环补上:
+#   open     = 待排查(consistency_check 每次跑都会刷新证据)
+#   resolved = 已销单(记录根因分类 cause + 处置说明 note)
+#   stale    = 对账恢复后自动销单(数据/策略修好了,无需人工)
+# 已销单的差异若复发(再次出现在对账结果里)自动重开 —— 修复无效必须可见。
+# 工单文件不在对账缓存键里,销单不污染 reconcile 缓存。
+# ---------------------------------------------------------------------------
+
+def mismatch_queue_path():
+    return data_dir() / "mismatch_queue.json"
+
+
+def _load_queue():
+    p = mismatch_queue_path()
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+
+
+def _save_queue(items) -> None:
+    mismatch_queue_path().write_text(
+        json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _queue_stats(items) -> Dict[str, int]:
+    out = {"open": 0, "resolved": 0, "stale": 0}
+    for it in items:
+        s = it.get("status")
+        if s in out:
+            out[s] += 1
+    out["total"] = len(items)
+    return out
+
+
+def _update_mismatch_queue(mismatches) -> Dict[str, int]:
+    """把本轮对账差异并入工单队列,返回队列统计。
+    键统一用字符串 "uid:ts"(与工单里的 key 字段一致,否则二次对账时
+    元组键查不到既有单,会把所有旧单当新单重开)。"""
+    current = {"%s:%s" % (m["uid"], m["ts"]): m for m in mismatches}
+    items = _load_queue()
+    by_key = {it["key"]: it for it in items}
+    out = []
+    for key, m in current.items():
+        it = by_key.get(key)
+        if it is None:  # 新差异:开单
+            out.append({
+                "key": key, "uid": m["uid"], "ts": m["ts"],
+                "prod": m["prod"], "local": m["local"],
+                "prod_rules": m["prod_rules"], "local_rules": m["local_rules"],
+                "status": "open", "opened_at": _now_iso(),
+                "resolved_at": None, "cause": None, "note": "",
+            })
+        else:  # 既有单:刷新证据;已销单的复发自动重开
+            it.update({"prod": m["prod"], "local": m["local"],
+                       "prod_rules": m["prod_rules"],
+                       "local_rules": m["local_rules"]})
+            if it.get("status") != "open":
+                it["status"] = "open"
+                it["resolved_at"] = None
+                it["cause"] = None
+                it["note"] = "复发重开:" + it.get("note", "")
+            out.append(it)
+    for it in items:
+        if it["key"] not in current:
+            if it.get("status") == "open":  # 对账恢复 = 自动销单
+                it["status"] = "stale"
+                it["resolved_at"] = _now_iso()
+                it["cause"] = "auto_stale"
+            out.append(it)
+    _save_queue(out)
+    return _queue_stats(out)
+
+
+@tool(
+    name="mismatch_queue",
+    description=(
+        "查询对账差异工单(consistency_check 的闭环):open=待排查,resolved=已销单"
+        "(带根因分类),stale=对账恢复自动销单。返回统计与明细,按开单时间倒序。"
+        "销单用 mismatch_resolve。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": list(QUEUE_STATES) + [""],
+                       "description": "可选:只列某状态,空=全部"},
+            "limit": {"type": "integer", "description": "最多返回条数,默认 20,最大 100"},
+        },
+    },
+)
+def mismatch_queue(status: str = "", limit: int = 20):
+    limit = max(1, min(int(limit or 20), 100))
+    items = _load_queue()
+    stats = _queue_stats(items)
+    if status:
+        items = [i for i in items if i.get("status") == status]
+    items = sorted(items, key=lambda x: x.get("opened_at") or "", reverse=True)
+    return {"stats": stats, "returned": min(limit, len(items)),
+            "items": items[:limit]}
+
+
+@tool(
+    name="mismatch_resolve",
+    description=(
+        "销单:对一条对账差异工单记录根因分类与处置说明,状态置 resolved。"
+        "cause 取值:policy_sync_lag(阈值未同步)/ sim_bug(本地模拟实现差异)/ "
+        "data_lag(数据时间错位)/ known_diff(已知可接受差异)/ other。"
+        "若修复无效、差异复发,对账会自动把工单重开为 open。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "key": {"type": "string", "description": "工单键 uid:ts(见 mismatch_queue 返回)"},
+            "cause": {"type": "string", "enum": list(QUEUE_CAUSES),
+                      "description": "差异根因分类"},
+            "note": {"type": "string", "description": "处置说明,写入工单"},
+        },
+        "required": ["key", "cause"],
+    },
+)
+def mismatch_resolve(key: str, cause: str, note: str = ""):
+    if cause not in QUEUE_CAUSES:
+        return {"error": "cause 必须是 %s 之一" % list(QUEUE_CAUSES)}
+    items = _load_queue()
+    for it in items:
+        if it.get("key") == key:
+            it["status"] = "resolved"
+            it["cause"] = cause
+            it["resolved_at"] = _now_iso()
+            it["note"] = note
+            _save_queue(items)
+            return {"status": "resolved", "key": key, "cause": cause}
+    return {"error": "工单不存在: %s(用 mismatch_queue 查当前队列)" % key}
 
 
 def sim_trust() -> Optional[Dict]:
@@ -135,6 +288,7 @@ def sim_trust() -> Optional[Dict]:
     description=(
         "对账:agent 本地规则模拟 vs 生产决策日志,逐事件比对处置结论。返回"
         "一致率、不一致清单(本地/生产的动作与命中规则)、失信判定与告警。"
+        "差异自动写入工单队列(mismatch_queue 查看、mismatch_resolve 销单)。"
         "任何基于模拟的结论(rule_backtest/shadow_backtest/threshold_calibrate)"
         "之前都应确认对账可信;失信时先排查规则与阈值同步,不要继续输出模拟指标。"
     ),

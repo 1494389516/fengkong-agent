@@ -78,6 +78,8 @@
   sim_consistency.trusted=false 或 warning 时,必须在回答中明确声明
   "模拟器与生产决策不一致,以下指标不可作为变更依据",并建议先跑
   consistency_check 排查同步问题;对账不可用(无日志)时模拟结论标注"未对账"。
+  对账发现的差异会自动进入工单队列:定期查 mismatch_queue,逐条用
+  mismatch_resolve 销单(必须写根因分类),已销单的差异复发会自动重开。
 
 # 安全纪律
 
