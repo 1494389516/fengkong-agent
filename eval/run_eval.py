@@ -209,6 +209,61 @@ def run_actions_layer() -> int:
             os.environ.pop("FK_DATA_DIR", None)
 
 
+def run_health_layer() -> int:
+    """离线:数据体检 —— 手工样本必须全绿;埋 9 类脏数据后必须精确检出、
+    且不误报(可选文件缺失不算 issue)。"""
+    ok = registry.dispatch("data_health_check", {})
+    checks = [
+        ("原始样本体检全绿(0 issue)",
+         ok.get("summary") == "ok" and ok.get("issues_total") == 0),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        shutil.copy(ROOT / "data" / "events_sample.json",
+                    Path(td) / "events_sample.json")
+        shutil.copy(ROOT / "data" / "blacklist.json", Path(td) / "blacklist.json")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            events = json.loads((Path(td) / "events_sample.json").read_text(
+                encoding="utf-8"))
+            events[0].pop("ip")                       # 缺必填字段
+            events[1]["ts"] = -5                      # 非法 ts
+            events[2]["type"] = "lottery"             # 未知事件类型
+            events.append(dict(events[0]))            # (uid,type,ts) 重复
+            (Path(td) / "events_sample.json").write_text(
+                json.dumps(events, ensure_ascii=False), encoding="utf-8")
+            bl = json.loads((Path(td) / "blacklist.json").read_text(
+                encoding="utf-8"))
+            bl[0]["list"] = "purple"                  # 非法名单颜色
+            bl.append(dict(bl[1]))                    # 名单重复
+            bl[2]["expires_at"] = "07/10/2026"        # 日期格式错误
+            (Path(td) / "blacklist.json").write_text(
+                json.dumps(bl, ensure_ascii=False), encoding="utf-8")
+            accts = json.loads((ROOT / "data" / "accounts.json").read_text(
+                encoding="utf-8"))
+            accts.pop("u_1009", None)                 # 主档缺失 -> 覆盖率告警
+            (Path(td) / "accounts.json").write_text(
+                json.dumps(accts, ensure_ascii=False), encoding="utf-8")
+            (Path(td) / "audit.jsonl").write_text(
+                '{"ts":"x"}\n{损坏行}\n', encoding="utf-8")  # jsonl 损坏行
+            r = registry.dispatch("data_health_check", {})
+            kinds = {}
+            for rep in r.get("files", {}).values():
+                for k, v in (rep.get("issues") or {}).items():
+                    kinds[k] = kinds.get(k, 0) + v["count"]
+            planted = {"missing_field", "ts_invalid", "unknown_type",
+                       "dup_event", "unknown_color", "dup_record",
+                       "expires_format", "master_missing", "corrupt_lines"}
+            checks += [
+                ("脏数据判定 fail", r.get("summary") == "fail"),
+                ("植入的 9 类问题全部检出", planted.issubset(kinds.keys())),
+                ("无 parse_failed 误报(可选文件缺失不算)",
+                 "parse_failed" not in kinds),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("数据体检(离线)", checks)
+
+
 def run_gen_layer() -> int:
     """离线:生成器产出小规模数据集,回测指标须过下限。
     下限故意留了余量(生成含随机性,虽然种子固定,但规则阈值调整后指标会漂),
@@ -1267,6 +1322,7 @@ def main() -> int:
     failures += run_scan_layer()
     failures += run_graph_layer()
     failures += run_actions_layer()
+    failures += run_health_layer()
     failures += run_whitelist_layer()
     failures += run_graylist_layer()
     failures += run_policy_layer()
