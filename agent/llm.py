@@ -23,7 +23,8 @@ def load_config():
 
 
 def make_client(cfg):
-    return OpenAI(
-        api_key=cfg["api_key"],
-        base_url=cfg.get("base_url", "https://api.deepseek.com"),
-    )
+    base_url = cfg.get("base_url", "https://api.deepseek.com")
+    if cfg.get("strict_mode"):
+        # strict mode 要求 beta endpoint —— 见 DeepSeek Tool Calls 文档
+        base_url = "https://api.deepseek.com/beta"
+    return OpenAI(api_key=cfg["api_key"], base_url=base_url)

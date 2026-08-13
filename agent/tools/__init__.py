@@ -60,18 +60,41 @@ def tool(name: str, description: str, parameters: Dict[str, Any]) -> Callable:
     return decorator
 
 
-def schemas() -> List[Dict[str, Any]]:
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": t["description"],
-                "parameters": t["parameters"],
-            },
+def _apply_strict_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """递归补齐 strict mode 要求的 JSON Schema 字段。
+
+    DeepSeek strict mode 要求每个 object:
+      - 所有 properties 都在 required 里
+      - additionalProperties: false
+    见 https://api-docs.deepseek.com/guides/tool_calls#strict-mode-beta
+    注意代价:可选字段会被强制变成必填(模型每次都须给出全部属性),
+    因此 strict 是显式开关(config.strict_mode),默认关闭。
+    """
+    schema = dict(schema)
+    if schema.get("type") == "object":
+        props = schema.get("properties") or {}
+        schema["properties"] = {k: _apply_strict_schema(v) for k, v in props.items()}
+        schema["required"] = list(props.keys())
+        schema["additionalProperties"] = False
+    return schema
+
+
+def schemas(*, strict: bool = False) -> List[Dict[str, Any]]:
+    """生成 tools 参数。strict=True 时对齐 DeepSeek strict mode (beta endpoint)。"""
+    out: List[Dict[str, Any]] = []
+    for name, t in _REGISTRY.items():
+        params = dict(t["parameters"])
+        if strict:
+            params = _apply_strict_schema(params)
+        fn: Dict[str, Any] = {
+            "name": name,
+            "description": t["description"],
+            "parameters": params,
         }
-        for name, t in _REGISTRY.items()
-    ]
+        if strict:
+            fn["strict"] = True
+        out.append({"type": "function", "function": fn})
+    return out
 
 
 def dispatch(name: str, arguments: Dict[str, Any]) -> Any:

@@ -74,7 +74,8 @@ class Agent:
         from .llm import load_config, make_client
         self.cfg = load_config()
         self.client = make_client(self.cfg)
-        self.model = self.cfg.get("model", "deepseek-chat")
+        self.model = self.cfg.get("model", "deepseek-v4-flash")
+        self.strict_mode = bool(self.cfg.get("strict_mode"))
         self._system = (Path(__file__).parent / "prompts" / "system.md").read_text(encoding="utf-8")
         self.messages: List[Dict] = [{"role": "system", "content": self._system}]
         # ① 全会话累计用量(跨 reset 保留,方便看整场花了多少)
@@ -211,7 +212,7 @@ class Agent:
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=self.messages,
-                tools=tools.schemas(),
+                tools=tools.schemas(strict=self.strict_mode),
             )
             usage = _extract_usage(resp)  # ①
             self._accumulate(usage)

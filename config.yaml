@@ -1,5 +1,15 @@
-# DeepSeek API 配置
+# DeepSeek API 配置 (对齐 https://api-docs.deepseek.com/guides/tool_calls)
 # api_key 建议不要写在这里,用环境变量:export DEEPSEEK_API_KEY=sk-...
-model: deepseek-chat
+
+# 模型: deepseek-v4-flash(快) / deepseek-v4-pro(强)
+# legacy deepseek-chat 已别名到 v4-flash, 建议直接用新名
+model: deepseek-v4-flash
+
+# 常规模型 endpoint; strict_mode=true 时自动切到 beta endpoint
 base_url: https://api.deepseek.com
+
+# strict mode: 模型严格按 JSON Schema 输出 tool_calls (需 beta endpoint)
+# 详见文档 "strict Mode (Beta)" 一节
+strict_mode: false
+
 api_key: ""

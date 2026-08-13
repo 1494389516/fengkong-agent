@@ -33,7 +33,9 @@ def _fmt_session_usage(agent):
 
 def main():
     agent = Agent()
-    print("风控分析 agent(模型: %s)。" % agent.model)
+    print("风控分析 agent(模型: %s%s)。" % (
+        agent.model, ", strict mode" if agent.strict_mode else "",
+    ))
     print("命令:/reset 开新案例 · /pending 待审批 · /approve|/deny <id> 审批 · exit 退出。")
     print("工具调用与 token 用量会实时打印。")
     while True:
