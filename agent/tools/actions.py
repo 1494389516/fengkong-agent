@@ -14,6 +14,7 @@
   防自动校准被极端数据(或被"养"过的基线)一次带飞。
 """
 import json
+import os
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -233,14 +234,17 @@ def list_pending() -> List[Dict]:
     return _load_pending()
 
 
-def decide(action_id: int, approve: bool) -> Optional[Dict]:
+def decide(action_id: int, approve: bool, operator: Optional[str] = None) -> Optional[Dict]:
     """审批一条申请:按 kind 分派落盘(名单库 / 策略版本表),统一记审计。
-    返回该申请,查无返回 None。"""
+    返回该申请,查无返回 None。
+    审计身份:operator 参数 > FK_OPERATOR 环境变量 > "cli"。接 SSO/飞书后
+    由网关把审批人身份注入 FK_OPERATOR —— 审批必须有可追溯的人。"""
     pending = _load_pending()
     matched = [a for a in pending if a["action_id"] == action_id]
     if not matched:
         return None
     action = matched[0]
+    decided_by = operator or os.environ.get("FK_OPERATOR") or "cli"
     kind = action.get("kind", "blacklist_add")
     applied_version = None
     applied_detail = None
@@ -281,6 +285,7 @@ def decide(action_id: int, approve: bool) -> Optional[Dict]:
     with open(audit_log_path(), "a", encoding="utf-8") as f:
         f.write(json.dumps({
             "ts": _now_iso(),
+            "decided_by": decided_by,
             "decision": "approve" if approve else "deny",
             "kind": kind,
             "applied_policy_version": applied_version,

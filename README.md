@@ -301,6 +301,7 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 | `FK_DATASET=gen` | 切换到生成数据集 |
 | `FK_DATA_DIR=/path` | 直接指定数据目录(优先级最高) |
 | `FK_PRIVACY=1` | 启用脱敏层(公有云部署红线) |
+| `FK_OPERATOR` | 审批人身份标识,写入审计日志 decided_by(接 SSO 后由网关注入,默认 cli) |
 | `FK_TZ_OFFSET_HOURS` | 分桶业务时区偏移,默认 +8(UTC 切日会把凌晨攻击劈进两桶) |
 
 ## 已知边界(诚实声明)

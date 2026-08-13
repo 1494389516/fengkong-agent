@@ -35,12 +35,15 @@ def _load_records() -> List[Dict]:
 
 
 def _matches(rec: Dict[str, Any], kind: Optional[str], decision: Optional[str],
-             dimension: Optional[str], value: Optional[str]) -> bool:
+             dimension: Optional[str], value: Optional[str],
+             decided_by: Optional[str]) -> bool:
     """逐条件过滤。dimension/value 只对名单类记录有意义(藏在 action 里),
     其余 kind(threshold_change/appeal_resolve)不带这两个字段自然不命中。"""
     if kind and rec.get("kind") != kind:
         return False
     if decision and rec.get("decision") != decision:
+        return False
+    if decided_by and rec.get("decided_by") != decided_by:
         return False
     action = rec.get("action") or {}
     if dimension and action.get("dimension") != dimension:
@@ -56,6 +59,7 @@ def _matches(rec: Dict[str, Any], kind: Optional[str], decision: Optional[str],
         "查询审批审计日志:谁在什么时候批准/驳回了什么、依据是什么。"
         "覆盖名单写入/移除(blacklist_add/blacklist_remove)、阈值变更"
         "(threshold_change)、申诉决议(appeal_resolve)四类记录,按时间倒序。"
+        "每条记录带 decided_by(审批人身份,SSO/CLI)。"
         "配合 policy_history 可完整回溯'当时为什么这么判、谁批的'类问题。"
     ),
     parameters={
@@ -69,17 +73,19 @@ def _matches(rec: Dict[str, Any], kind: Optional[str], decision: Optional[str],
                           "description": "可选:名单类记录按维度过滤"},
             "value": {"type": "string",
                       "description": "可选:名单类记录按具体值过滤"},
+            "decided_by": {"type": "string",
+                           "description": "可选:按审批人身份过滤"},
             "limit": {"type": "integer",
                       "description": "最多返回条数,默认 20,最大 100"},
         },
     },
 )
 def audit_query(kind: str = "", decision: str = "", dimension: str = "",
-                value: str = "", limit: int = 20):
+                value: str = "", decided_by: str = "", limit: int = 20):
     limit = max(1, min(int(limit or 20), 100))
     records = [r for r in _load_records()
                if _matches(r, kind or None, decision or None,
-                           dimension or None, value or None)]
+                           dimension or None, value or None, decided_by or None)]
     records.reverse()  # 文件 append-only,倒序即时间倒序(最新在前)
     return {
         "count": len(records),

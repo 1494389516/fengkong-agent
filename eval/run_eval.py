@@ -169,6 +169,7 @@ def run_actions_layer() -> int:
             req2 = {"dimension": "ip", "value": "203.0.113.99", "list": "gray",
                     "reason": "eval:测试驳回"}
             aid2 = registry.dispatch("blacklist_add", dict(req2)).get("action_id", -1)
+            os.environ["FK_OPERATOR"] = "tester1"  # 模拟 SSO 注入审批人身份
             actions.decide(aid2, approve=False)
             with open(Path(td) / "audit.jsonl", "a", encoding="utf-8") as f:
                 f.write("{损坏行,非 JSON}\n")
@@ -179,6 +180,7 @@ def run_actions_layer() -> int:
                                       {"dimension": "uid", "value": "u_evil"})
             q_ip = registry.dispatch("audit_query", {"dimension": "ip"})
             q_kind = registry.dispatch("audit_query", {"kind": "blacklist_add"})
+            q_by = registry.dispatch("audit_query", {"decided_by": "tester1"})
             return _report("处置写流程与审计查询(离线,临时目录)", [
                 ("提交进入待审批", r1.get("status") == "pending_confirmation"),
                 ("重复提交防重", r_dup.get("status") == "already_pending"),
@@ -204,9 +206,16 @@ def run_actions_layer() -> int:
                  all(k in q_all["records"][0]
                      for k in ("ts", "decision", "kind", "action"))),
                 ("时间倒序(最新在前)", q_all["records"][0]["decision"] == "deny"),
+                ("批准记录 decided_by=cli(默认身份)",
+                 q_approve["records"][0].get("decided_by") == "cli"),
+                ("驳回记录 decided_by=tester1(FK_OPERATOR 注入)",
+                 q_deny["records"][0].get("decided_by") == "tester1"),
+                ("decided_by 过滤精确命中", q_by.get("count") == 1
+                 and q_by["records"][0]["decided_by"] == "tester1"),
             ])
         finally:
             os.environ.pop("FK_DATA_DIR", None)
+            os.environ.pop("FK_OPERATOR", None)
 
 
 def run_health_layer() -> int:
