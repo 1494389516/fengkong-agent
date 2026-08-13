@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -271,6 +272,98 @@ def run_health_layer() -> int:
         finally:
             os.environ.pop("FK_DATA_DIR", None)
     return _report("数据体检(离线)", checks)
+
+
+def run_agent_log_layer() -> int:
+    """离线:agent 运行日志落盘与指标聚合 —— 用脚本化假 client 走真实
+    ask() 循环(零网络),断言日志字段与聚合数字。"""
+    from agent.core import Agent
+    from agent_metrics import aggregate
+
+    class _TC:
+        def __init__(self, call_id, name, args):
+            self.id = call_id
+            self.function = types.SimpleNamespace(name=name, arguments=args)
+
+        def model_dump(self):
+            return {"id": self.id, "type": "function",
+                    "function": {"name": self.function.name,
+                                 "arguments": self.function.arguments}}
+
+    class _Resp:
+        def __init__(self, content, tool_calls=None):
+            self.choices = [types.SimpleNamespace(
+                message=types.SimpleNamespace(content=content,
+                                              tool_calls=tool_calls))]
+            self.usage = types.SimpleNamespace(
+                prompt_tokens=100, completion_tokens=50, total_tokens=150,
+                prompt_cache_hit_tokens=80, prompt_cache_miss_tokens=20)
+
+    class _FakeClient:
+        def __init__(self, script):
+            self.script = list(script)
+
+        @property
+        def chat(self):
+            return self
+
+        @property
+        def completions(self):
+            return self
+
+        def create(self, **kw):
+            return self.script.pop(0)
+
+    with tempfile.TemporaryDirectory() as td:
+        log_path = Path(td) / "agent_runs.jsonl"
+
+        def new_agent(client):
+            a = Agent.__new__(Agent)  # 不走 __init__(openai 未装)
+            a._system = "sys"
+            a.messages = [{"role": "system", "content": "sys"}]
+            a.session_usage = {"prompt": 0, "completion": 0, "total": 0,
+                               "cache_hit": 0, "cache_miss": 0, "api_calls": 0}
+            a.model = "fake-model"
+            a.strict_mode = False
+            a._asks_since_ckpt = 0
+            a._privacy = False
+            a._tok = None
+            a.client = client
+            a._run_log_enabled = True
+            a._run_log_path = log_path
+            return a
+
+        a = new_agent(_FakeClient([_Resp("纯回答")]))
+        out1 = a.ask("查一下账号 u_1001")
+        a = new_agent(_FakeClient([
+            _Resp(None, [_TC("call_1", "blacklist_query",
+                             '{"dimension": "uid", "value": "u_1001"}')]),
+            _Resp("查完的回答"),
+        ]))
+        out2 = a.ask("u_1001 在名单里吗")
+
+        lines = [l for l in log_path.read_text(encoding="utf-8").splitlines()
+                 if l.strip()]
+        rec1, rec2 = [json.loads(l) for l in lines]
+        rep = aggregate(log_path)
+        return _report("agent 运行日志与指标聚合(离线,假 client)", [
+            ("两次 ask 落两行日志", len(lines) == 2),
+            ("日志字段完整(ts/model/question/answer/tokens/工具)",
+             all(k in rec1 for k in ("ts", "model", "question", "answer",
+                                     "tokens", "tool_rounds", "tools_used",
+                                     "budget_compacted"))),
+            ("无工具案例:tools_used 空、api_calls=1",
+             rec1["tools_used"] == [] and rec1["api_calls"] == 1),
+            ("工具案例:tools_used 记录 blacklist_query、api_calls=2",
+             rec2["tools_used"] == ["blacklist_query"]
+             and rec2["api_calls"] == 2),
+            ("回答返回正常", out1 == "纯回答" and out2 == "查完的回答"),
+            ("聚合:案例数/调用数/缓存命中率正确",
+             rep["cases"] == 2 and rep["api_calls"] == 3
+             and rep["cache_hit_rate"] == 0.8),
+            ("聚合:高频工具统计正确",
+             dict(rep["top_tools"]) == {"blacklist_query": 1}),
+        ])
 
 
 def run_gen_layer() -> int:
@@ -1382,6 +1475,7 @@ def main() -> int:
     failures += run_graph_layer()
     failures += run_actions_layer()
     failures += run_health_layer()
+    failures += run_agent_log_layer()
     failures += run_whitelist_layer()
     failures += run_graylist_layer()
     failures += run_policy_layer()

@@ -15,6 +15,8 @@ MAX_TOOL_ROUNDS 防止模型陷入无限调工具的循环。
 (② 工具限幅在 tools/dispatch 单点做;③ 案例隔离用 reset(),由 CLI /reset 触发。)
 """
 import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -87,6 +89,13 @@ class Agent:
         # ⑦ 脱敏:token 映射跨轮复用(同值同 token,LLM 才能跨轮关联同一账号)
         self._privacy = privacy_enabled()
         self._tok = Tokenizer() if self._privacy else None
+        # 运行日志(可选):FK_AGENT_RUN_LOG=1 时每次 ask 落一行
+        # out/agent_runs.jsonl,供 eval/agent_metrics.py 聚合 agent 本体的
+        # 运行指标(成本/缓存命中率/工具轮数/兜底触发)——监控体系的空白面。
+        # 日志在本地落盘,失败不影响对话;问题原文会含 uid 等标识符,与
+        # audit.jsonl 同级机密,接生产按同等权限管控。
+        self._run_log_enabled = os.environ.get("FK_AGENT_RUN_LOG") == "1"
+        self._run_log_path = Path(__file__).resolve().parent.parent / "out" / "agent_runs.jsonl"
 
     # ③ 案例隔离:清空对话历史只留 system,让下一个案例在干净上下文里跑。
     #   session_usage 故意不清零 —— 度量要覆盖整场,不因换案例而丢失。
@@ -184,6 +193,30 @@ class Agent:
         self._asks_since_ckpt = 0
         self._checkpoint_now()
 
+    def _log_ask(self, question: str, answer: str, ask_usage: Dict[str, int],
+                 tools_used: List[str], compacted: bool) -> None:
+        """落一行运行日志(仅 FK_AGENT_RUN_LOG=1 时)。日志失败绝不能掀翻对话。"""
+        if not self._run_log_enabled:
+            return
+        try:
+            rec = {
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "model": self.model,
+                "question": question,
+                "answer": (answer or "")[:2000],
+                "tool_rounds": ask_usage["api_calls"],
+                "tools_used": tools_used,
+                "api_calls": ask_usage["api_calls"],
+                "tokens": {k: ask_usage[k] for k in
+                           ("prompt", "completion", "cache_hit", "cache_miss")},
+                "budget_compacted": compacted,
+            }
+            self._run_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._run_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:  # noqa: BLE001
+            pass
+
     def ask(self, user_input: str,
             on_tool: Optional[Callable] = None,
             on_usage: Optional[Callable] = None,
@@ -198,6 +231,10 @@ class Agent:
         self.messages.append({"role": "user", "content":
                               self._tok.tokenize(user_input) if self._privacy else user_input})
         compacted_this_ask = False  # ⑥ 每轮 ask 最多强制压缩一次,防压缩循环
+        ask_usage: Dict[str, int] = {"prompt": 0, "completion": 0,
+                                     "cache_hit": 0, "cache_miss": 0,
+                                     "api_calls": 0}
+        tools_used: List[str] = []
         for _ in range(MAX_TOOL_ROUNDS):
             self._trim_tool_messages()  # ④ 发送前裁剪
             if (CONTEXT_EST_TOKEN_BUDGET > 0 and not compacted_this_ask
@@ -216,6 +253,9 @@ class Agent:
             )
             usage = _extract_usage(resp)  # ①
             self._accumulate(usage)
+            for k in ("prompt", "completion", "cache_hit", "cache_miss"):
+                ask_usage[k] += usage[k]
+            ask_usage["api_calls"] += 1
             if on_usage:
                 on_usage(usage)
             msg = resp.choices[0].message
@@ -224,6 +264,8 @@ class Agent:
                 self.messages.append({"role": "assistant", "content": msg.content})
                 self._maybe_checkpoint()  # ⑤
                 answer = msg.content or ""
+                self._log_ask(user_input, answer, ask_usage, tools_used,
+                              compacted_this_ask)
                 return self._tok.detokenize(answer) if self._privacy else answer
             # assistant 消息(含 tool_calls)必须原样入历史,否则下一轮 API 会拒绝 tool 消息
             self.messages.append({
@@ -243,6 +285,7 @@ class Agent:
                 if on_tool:
                     on_tool(name, args)
                 result = tools.dispatch(name, args)  # ② 限幅在 dispatch 内统一做
+                tools_used.append(name)
                 content = json.dumps(result, ensure_ascii=False, default=str)
                 if self._privacy:  # ⑦ 工具结果回填历史前替换成 token
                     content = self._tok.tokenize(content)
@@ -251,4 +294,6 @@ class Agent:
                     "tool_call_id": tc.id,
                     "content": content,
                 })
-        return "[单轮工具调用已达上限 %d 次,强制停止]" % MAX_TOOL_ROUNDS
+        answer = "[单轮工具调用已达上限 %d 次,强制停止]" % MAX_TOOL_ROUNDS
+        self._log_ask(user_input, answer, ask_usage, tools_used, compacted_this_ask)
+        return answer

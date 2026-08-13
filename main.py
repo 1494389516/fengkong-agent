@@ -36,6 +36,8 @@ def main():
     print("风控分析 agent(模型: %s%s)。" % (
         agent.model, ", strict mode" if agent.strict_mode else "",
     ))
+    if agent._run_log_enabled:
+        print("运行日志已开启: out/agent_runs.jsonl(指标聚合:eval/agent_metrics.py)")
     print("命令:/reset 开新案例 · /pending 待审批 · /approve|/deny <id> 审批 · exit 退出。")
     print("工具调用与 token 用量会实时打印。")
     while True:
