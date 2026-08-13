@@ -165,13 +165,45 @@ def run_actions_layer() -> int:
             actions.decide(aid, approve=True)
             after = blacklist_query("uid", "u_evil")["hit"]
             r_again = registry.dispatch("blacklist_add", dict(req))
-            return _report("处置写流程(离线,临时目录)", [
+            # audit_query 读侧:再走一次驳回,然后对审计日志做过滤与容错断言
+            req2 = {"dimension": "ip", "value": "203.0.113.99", "list": "gray",
+                    "reason": "eval:测试驳回"}
+            aid2 = registry.dispatch("blacklist_add", dict(req2)).get("action_id", -1)
+            actions.decide(aid2, approve=False)
+            with open(Path(td) / "audit.jsonl", "a", encoding="utf-8") as f:
+                f.write("{损坏行,非 JSON}\n")
+            q_all = registry.dispatch("audit_query", {})
+            q_approve = registry.dispatch("audit_query", {"decision": "approve"})
+            q_deny = registry.dispatch("audit_query", {"decision": "deny"})
+            q_uid = registry.dispatch("audit_query",
+                                      {"dimension": "uid", "value": "u_evil"})
+            q_ip = registry.dispatch("audit_query", {"dimension": "ip"})
+            q_kind = registry.dispatch("audit_query", {"kind": "blacklist_add"})
+            return _report("处置写流程与审计查询(离线,临时目录)", [
                 ("提交进入待审批", r1.get("status") == "pending_confirmation"),
                 ("重复提交防重", r_dup.get("status") == "already_pending"),
                 ("批准前名单未生效", before is False),
                 ("批准后名单生效", after is True),
                 ("已在名单的重复申请被拒", r_again.get("status") == "already_listed"),
                 ("审计日志落盘", (Path(td) / "audit.jsonl").exists()),
+                ("audit_query 总条数=2(损坏行跳过)", q_all.get("count") == 2),
+                ("approve 过滤命中批准记录",
+                 q_approve.get("count") == 1
+                 and q_approve["records"][0]["decision"] == "approve"),
+                ("deny 过滤命中驳回记录",
+                 q_deny.get("count") == 1
+                 and q_deny["records"][0]["decision"] == "deny"),
+                ("uid=u_evil 过滤精确命中",
+                 q_uid.get("count") == 1
+                 and q_uid["records"][0]["action"]["value"] == "u_evil"),
+                ("dimension=ip 过滤命中驳回那条",
+                 q_ip.get("count") == 1
+                 and q_ip["records"][0]["action"]["dimension"] == "ip"),
+                ("kind 过滤与全量一致", q_kind.get("count") == 2),
+                ("记录含 ts/decision/kind/action 证据字段",
+                 all(k in q_all["records"][0]
+                     for k in ("ts", "decision", "kind", "action"))),
+                ("时间倒序(最新在前)", q_all["records"][0]["decision"] == "deny"),
             ])
         finally:
             os.environ.pop("FK_DATA_DIR", None)
