@@ -12,4 +12,9 @@ base_url: https://api.deepseek.com
 # 详见文档 "strict Mode (Beta)" 一节
 strict_mode: false
 
+# LLM 客户端加固(生产必配):单次请求超时(秒)与失败重试次数。
+# 超时/重试由 OpenAI SDK 处理;线上值班场景宁早失败重试,不要无限挂起。
+timeout: 60
+max_retries: 3
+
 api_key: ""

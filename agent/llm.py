@@ -27,4 +27,17 @@ def make_client(cfg):
     if cfg.get("strict_mode"):
         # strict mode 要求 beta endpoint —— 见 DeepSeek Tool Calls 文档
         base_url = "https://api.deepseek.com/beta"
-    return OpenAI(api_key=cfg["api_key"], base_url=base_url)
+    # 生产加固:裸调 OpenAI SDK 一次超时/网络抖动就会挂掉整个值班流程,
+    # 超时与重试次数从 config 读、带兜底,不做硬编码。
+    timeout = float(cfg.get("timeout", 60))
+    if timeout <= 0:
+        timeout = 60.0
+    max_retries = int(cfg.get("max_retries", 3))
+    if max_retries < 0:
+        max_retries = 3
+    return OpenAI(
+        api_key=cfg["api_key"],
+        base_url=base_url,
+        timeout=timeout,
+        max_retries=max_retries,
+    )
