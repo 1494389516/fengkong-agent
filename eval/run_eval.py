@@ -343,6 +343,54 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_lineage_layer() -> int:
+    """离线:决策血缘 —— 实时解释字段完整、落库-追踪闭环、未落库显式标注。"""
+    checks = []
+    from agent.tools.featurelib import FEATURE_CATALOG_VERSION
+    from agent.tools.lineage import write_lineage
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "blacklist.json", "thresholds.json",
+                  "device_intel.json", "accounts.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            ev = {"uid": "u_1009", "ip": "203.0.113.66", "device_id": "dev_pixel_z9",
+                  "type": "order", "amount": 4999.0, "ts": 1784106480}
+            ex = registry.dispatch("decision_explain", {"event": ev})
+            checks += [
+                ("实时解释:决策/指纹/版本字段齐全",
+                 ex.get("decision") == "reject"
+                 and ex.get("event_id") == ex.get("input_fingerprint")
+                 and ex.get("policy_version") is not None
+                 and ex.get("feature_snapshot_version") == FEATURE_CATALOG_VERSION
+                 and ex.get("engine_source") in ("local_rules", "remote_engine")),
+                ("实时解释:显式标注未落库",
+                 "未落库" in ex.get("note", "") and ex.get("found") is not True),
+            ]
+            tr0 = registry.dispatch("decision_trace", {"event": ev})
+            checks.append(("未落库时追踪:返回现场解释并标注",
+                           tr0.get("found") is False and "未落库" in tr0["note"]))
+            decision = {"action": "reject", "hits": [{"rule_id": "R001",
+                          "reason": "x", "action": "reject"}],
+                        "policy_version": "v9", "source": "remote_engine",
+                        "degraded": False}
+            did = write_lineage(ev, decision, approver="serve")
+            tr1 = registry.dispatch("decision_trace", {"event": ev})
+            checks += [
+                ("落库后可追踪:命中记录且带审批来源",
+                 tr1.get("found") is True
+                 and tr1["record"]["decision"] == "reject"
+                 and tr1["approver"] == "serve"
+                 and tr1["record"]["input_fingerprint"] == tr0["input_fingerprint"]),
+                ("血缘记录:decision_id 唯一且含时间戳",
+                 bool(did) and len(tr1["decision_id"]) > 16),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("决策血缘(离线,临时目录)", checks)
+
+
 def run_feature_health_layer() -> int:
     """离线:特征健康检查 —— 原始样本全绿;脏数据(负值/未知类型/高缺失)判 fail。"""
     checks = []
@@ -407,7 +455,7 @@ def run_capability_layer() -> int:
                  "blacklist_add" in bl.get("propose", [])
                  and "rule_backtest" in bl.get("simulate", [])
                  and "model_promote" in bl.get("propose", [])
-                 and "feature_catalog" in bl.get("read", [])
+                 and "audit_query" in bl.get("read", [])
                  and "job_submit" in bl.get("execute", [])),
                 ("注册表:approve/admin 标记为人类通道",
                  cr.get("approve_human_only") == ["approve", "deny"]),
@@ -2184,7 +2232,7 @@ def run_cost_layer() -> int:
     # 三件套提示并入后上调至 3700;模型生命周期纪律并入后上调至 3850;
     # 策略生命周期纪律并入后上调至 4050;回放纪律并入后上调至 4150;
     # Job 模型纪律并入后上调至 4300;权限纪律并入后上调至 4450;
-    # 特征健康纪律并入后上调至 4550。
+    # 特征健康纪律并入后上调至 4550;决策血缘纪律并入后上调至 4650。
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
     # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000;
     # Job 四件套后 58 工具上调至 29000(人均 500 纪律不放松,现人均 ~466)。
@@ -2193,8 +2241,8 @@ def run_cost_layer() -> int:
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
          s["schemas_chars"] <= 29000),
-        ("system prompt <= 4550 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 4550),
+        ("system prompt <= 4650 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 4650),
     ])
 
 
@@ -2330,6 +2378,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_job_layer)
     failures += _layer(run_capability_layer)
     failures += _layer(run_feature_health_layer)
+    failures += _layer(run_lineage_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)

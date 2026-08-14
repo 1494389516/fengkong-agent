@@ -41,6 +41,7 @@
   active 唯一,阈值覆盖版本化,与 policy 版本表分离治理)
 - **特征健康**:建模/回测前 feature_health_check(缺失/新鲜度/分布漂移/取值域/
   枚举,ok/warn/fail)
+- **决策血缘**:serve/decide 自动落库,decision_explain/trace 回答"为什么"
 - **上下文工程 ①~⑦**:度量/限幅/隔离/裁剪/checkpoint/硬预算/脱敏
 
 ## 3. 数据面

@@ -100,6 +100,8 @@ def tool_result_sizes():
         ("job_cancel", {"job_id": 1}),
         ("capability_registry", {}),
         ("feature_health_check", {}),
+        ("decision_explain", {"event": {"uid": "u_1009"}}),
+        ("decision_trace", {"event": {"uid": "u_1009"}}),
         ("data_health_check", {}),
         ("mismatch_queue", {}),
         ("mismatch_resolve", {"key": "nonexistent:0", "cause": "other"}),

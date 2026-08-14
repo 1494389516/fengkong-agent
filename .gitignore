@@ -9,3 +9,4 @@ data/audit.jsonl
 data/mismatch_queue.json
 data/model_registry.json
 data/security_audit.jsonl
+data/decision_lineage.jsonl

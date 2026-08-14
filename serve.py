@@ -44,8 +44,12 @@ def _decide(event: dict) -> dict:
         "action": r["action"],
         "rules": sorted({h["rule_id"] for h in r["hits"]}),
         "policy_version": r["policy_version"],
+        "source": r.get("source"),
+        "degraded": bool(r.get("degraded")),
         "latency_ms": round(1000 * (time.time() - t0), 1),
     }
+    from agent.tools.lineage import write_lineage  # 决策血缘:为什么
+    write_lineage(event, decision, approver="serve")
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _log_lock:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
