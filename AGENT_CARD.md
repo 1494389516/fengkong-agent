@@ -39,6 +39,8 @@
   +人审批+champion 唯一+回滚审计,只管理不训练)
 - **策略注册表**:draft→validated→shadow→active 状态机(校验门禁+人审批+同名
   active 唯一,阈值覆盖版本化,与 policy 版本表分离治理)
+- **特征健康**:建模/回测前 feature_health_check(缺失/新鲜度/分布漂移/取值域/
+  枚举,ok/warn/fail)
 - **上下文工程 ①~⑦**:度量/限幅/隔离/裁剪/checkpoint/硬预算/脱敏
 
 ## 3. 数据面

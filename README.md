@@ -342,6 +342,13 @@ pending/audit/mismatch 队列、不触碰策略;shadow 结果落盘 out/shadow/ 
 - `capability_registry` 按等级分组查询 + 审计统计。
 审计文件 data/security_audit.jsonl(运行时文件)。
 
+### 15. 特征健康检查
+
+建模/回测/策略分析前的健康门槛(`feature_health_check`):缺失率、新鲜度
+(最后事件距今)、分布漂移(当前分位数 vs 策略基线快照)、取值域(负值)、
+枚举漂移(未知事件类型),输出 ok/warn/fail + 数据集指纹。fail 级问题
+(负值/枚举)会让规则与特征静默失真,必须先修数据面。
+
 ## 环境变量
 
 | 变量 | 作用 |

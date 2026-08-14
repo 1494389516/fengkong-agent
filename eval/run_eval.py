@@ -343,6 +343,53 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_feature_health_layer() -> int:
+    """离线:特征健康检查 —— 原始样本全绿;脏数据(负值/未知类型/高缺失)判 fail。"""
+    checks = []
+    r = registry.dispatch("feature_health_check", {})
+    checks += [
+        ("原始样本:summary=ok 且 5 维全绿",
+         r.get("summary") == "ok"
+         and all(c["level"] == "ok" for c in r["checks"].values())),
+        ("健康报告:带指纹与账号覆盖数",
+         bool(r.get("dataset_fingerprint")) and r.get("accounts_checked") >= 6),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        evs = json.loads((ROOT / "data" / "events_sample.json").read_text(
+            encoding="utf-8"))
+        evs = [
+            {"uid": "u_neg", "ip": "1.1.1.1", "device_id": "d1",
+             "type": "order", "amount": -5.0, "ts": 1000},   # 负值订单
+            {"uid": "u_1002", "ip": "2.2.2.2", "device_id": "d2",
+             "type": "lottery", "ts": 2000},                 # 未知类型
+            {"uid": "u_1001", "ip": "3.3.3.3", "device_id": "d3",
+             "type": "login", "ts": 3000},                   # 无订单账号
+        ]
+        (base / "events_sample.json").write_text(json.dumps(evs, ensure_ascii=False),
+                                                 encoding="utf-8")
+        (base / "blacklist.json").write_text("[]", encoding="utf-8")
+        (base / "labels.json").write_text("{}", encoding="utf-8")
+        (base / "thresholds.json").write_text("[]", encoding="utf-8")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            r2 = registry.dispatch("feature_health_check", {})
+            vc = r2["checks"]["value_range"]
+            ec = r2["checks"]["enum_drift"]
+            mc = r2["checks"]["missingness"]["features"]
+            checks += [
+                ("脏数据:summary=fail", r2.get("summary") == "fail"),
+                ("脏数据:负值被取值域检出", vc["level"] == "fail" and vc["issues"]),
+                ("脏数据:未知类型被枚举检出", ec["level"] == "fail"
+                 and "lottery" in ec["unknown_types"]),
+                ("脏数据:高缺失被缺失率检出",
+                 mc.get("order_amount_max", {}).get("level") == "fail"),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("特征健康检查(离线)", checks)
+
+
 def run_capability_layer() -> int:
     """离线:Capability 注册表 —— 越权拒绝+审计、未知工具枚举审计、
     执行级留痕、读级零审计。"""
@@ -2136,7 +2183,8 @@ def run_cost_layer() -> int:
     # 审计查询/数据体检/差异工单/唯一引擎纪律并入后上调至 3600;算法人
     # 三件套提示并入后上调至 3700;模型生命周期纪律并入后上调至 3850;
     # 策略生命周期纪律并入后上调至 4050;回放纪律并入后上调至 4150;
-    # Job 模型纪律并入后上调至 4300;权限纪律并入后上调至 4450。
+    # Job 模型纪律并入后上调至 4300;权限纪律并入后上调至 4450;
+    # 特征健康纪律并入后上调至 4550。
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
     # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000;
     # Job 四件套后 58 工具上调至 29000(人均 500 纪律不放松,现人均 ~466)。
@@ -2145,8 +2193,8 @@ def run_cost_layer() -> int:
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
          s["schemas_chars"] <= 29000),
-        ("system prompt <= 4450 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 4450),
+        ("system prompt <= 4550 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 4550),
     ])
 
 
@@ -2281,6 +2329,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_replay_engine_layer)
     failures += _layer(run_job_layer)
     failures += _layer(run_capability_layer)
+    failures += _layer(run_feature_health_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)

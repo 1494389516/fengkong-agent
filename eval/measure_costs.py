@@ -99,6 +99,7 @@ def tool_result_sizes():
         ("job_result", {"job_id": 1}),
         ("job_cancel", {"job_id": 1}),
         ("capability_registry", {}),
+        ("feature_health_check", {}),
         ("data_health_check", {}),
         ("mismatch_queue", {}),
         ("mismatch_resolve", {"key": "nonexistent:0", "cause": "other"}),
