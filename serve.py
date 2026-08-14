@@ -74,8 +74,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             from agent.engine import engine_status
             from agent.tools.policy import active_policy
+            from agent.tools.readiness import _readiness
             self._json(200, {"ok": True, "policy_version": active_policy()["_version"],
-                             "engine": engine_status()["mode"]})
+                             "engine": engine_status()["mode"],
+                             "readiness": _readiness()["overall"]})
         elif self.path == "/brief":
             from agent.tools.brief import daily_brief
             self._json(200, daily_brief())
