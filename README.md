@@ -331,6 +331,17 @@ pending/audit/mismatch 队列、不触碰策略;shadow 结果落盘 out/shadow/ 
 取消。实现是线程 + 磁盘 job store(out/jobs/,含参数指纹),同步 API
 全部保留;切 Celery/Redis/Kafka 时只换调度层,工具接口与 job 契约不动。
 
+### 14. Capability / 权限注册表
+
+工具从"存在"升级为"有能力等级":`read / simulate / propose / execute`,
+`approve / admin` 为人类专用(不注册为工具)。三层防线:
+提示词纪律 + 不注册审批工具 + **dispatch 单点代码级强制**:
+- approve/admin 通道经 dispatch 调用 → 拒绝并写 security audit;
+- 未知工具调用(枚举攻击面)→ 拒绝并审计;
+- execute 级(登记/销单/任务)调用 → 全部留痕;
+- `capability_registry` 按等级分组查询 + 审计统计。
+审计文件 data/security_audit.jsonl(运行时文件)。
+
 ## 环境变量
 
 | 变量 | 作用 |

@@ -98,9 +98,13 @@ def schemas(*, strict: bool = False) -> List[Dict[str, Any]]:
 
 
 def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
-    """执行工具。异常不上抛,包成 error 返回给模型,让它自行调整。"""
-    if name not in _REGISTRY:
-        return {"error": "unknown tool: %s" % name}
+    """执行工具。异常不上抛,包成 error 返回给模型,让它自行调整。
+    权限纪律(P0-7):capability 检查在代码层先于一切 —— approve/admin
+    通道与未知工具拒绝并写 security audit,execute 级调用留痕。"""
+    from . import capability  # 惰性:capability 注册工具时依赖本模块
+    denied = capability.enforce(name, name in _REGISTRY)
+    if denied:
+        return {"error": denied}
     try:
         return _cap(_REGISTRY[name]["fn"](**arguments))  # ② 结果回填前统一限幅
     except Exception as e:  # noqa: BLE001
@@ -116,5 +120,5 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
 # 只依赖 datasource 或 engine;dataset 依赖 featurelib;model_registry 依赖
 # dataset;strategy_registry 依赖 policy/featurelib/rules/model_registry
 # —— 三者放最后,顺序无关)
-from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, drift, calibrate, risk, adversary, draft, reports, feedback, ops, brief, profile, reconcile, graylist, audit, health, engine_status, dataset, model_registry, strategy_registry, jobs  # noqa: E402,F401
+from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, drift, calibrate, risk, adversary, draft, reports, feedback, ops, brief, profile, reconcile, graylist, audit, health, engine_status, dataset, model_registry, strategy_registry, jobs, capability  # noqa: E402,F401
 # intel 由 monitor/profile 传递导入即完成注册,无需在上一行重复列出

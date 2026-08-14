@@ -343,6 +343,57 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_capability_layer() -> int:
+    """离线:Capability 注册表 —— 越权拒绝+审计、未知工具枚举审计、
+    执行级留痕、读级零审计。"""
+    checks = []
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        shutil.copy(ROOT / "data" / "events_sample.json",
+                    base / "events_sample.json")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            cr = registry.dispatch("capability_registry", {})
+            bl = cr.get("by_level", {})
+            checks += [
+                ("注册表:核心工具等级正确",
+                 "blacklist_add" in bl.get("propose", [])
+                 and "rule_backtest" in bl.get("simulate", [])
+                 and "model_promote" in bl.get("propose", [])
+                 and "feature_catalog" in bl.get("read", [])
+                 and "job_submit" in bl.get("execute", [])),
+                ("注册表:approve/admin 标记为人类通道",
+                 cr.get("approve_human_only") == ["approve", "deny"]),
+            ]
+            r_deny = registry.dispatch("approve", {"id": 1})
+            r_unknown = registry.dispatch("not_a_tool", {})
+            r_exec = registry.dispatch("mismatch_resolve", {
+                "key": "u_x:1", "cause": "other"})
+            r_read = registry.dispatch("feature_catalog", {})
+            audit_path = base / "security_audit.jsonl"
+            lines = audit_path.read_text(encoding="utf-8").splitlines() \
+                if audit_path.exists() else []
+            kinds = [__import__("json").loads(l)["kind"] for l in lines]
+            checks += [
+                ("越权:approve 通道被拒且审计",
+                 "capability denied" in r_deny.get("error", "")
+                 and kinds.count("denied") == 1),
+                ("未知工具:拒绝且写枚举审计",
+                 "unknown tool" in r_unknown.get("error", "")
+                 and kinds.count("unknown") == 1),
+                ("执行级调用:结果照常但留痕",
+                 "工单不存在" in r_exec.get("error", "")
+                 and kinds.count("executed") == 1),
+                ("读级调用:零审计记录",
+                 r_read.get("feature_count", 0) >= 14
+                 and kinds.count("executed") == 1  # 只有 mismatch_resolve 一条
+                 and len(kinds) == 3),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("Capability 注册表(离线,临时目录)", checks)
+
+
 def run_job_layer() -> int:
     """离线:Job 模型 —— 提交/轮询/取产物/取消,线程执行零网络。"""
     checks = []
@@ -2085,7 +2136,7 @@ def run_cost_layer() -> int:
     # 审计查询/数据体检/差异工单/唯一引擎纪律并入后上调至 3600;算法人
     # 三件套提示并入后上调至 3700;模型生命周期纪律并入后上调至 3850;
     # 策略生命周期纪律并入后上调至 4050;回放纪律并入后上调至 4150;
-    # Job 模型纪律并入后上调至 4300。
+    # Job 模型纪律并入后上调至 4300;权限纪律并入后上调至 4450。
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
     # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000;
     # Job 四件套后 58 工具上调至 29000(人均 500 纪律不放松,现人均 ~466)。
@@ -2094,8 +2145,8 @@ def run_cost_layer() -> int:
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
          s["schemas_chars"] <= 29000),
-        ("system prompt <= 4300 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 4300),
+        ("system prompt <= 4450 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 4450),
     ])
 
 
@@ -2229,6 +2280,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_strategy_shadow_layer)
     failures += _layer(run_replay_engine_layer)
     failures += _layer(run_job_layer)
+    failures += _layer(run_capability_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)

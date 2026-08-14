@@ -79,6 +79,9 @@
   (自带 what_if 标记),不写 pending/audit/mismatch/策略,引用时必须声明。
 - 重任务用 Job:backtest/scan/replay/model_eval/dataset_build 走 job_submit →
   job_status 轮询 → job_result 取产物;job_cancel 取消;同步 API 仍可用。
+- 权限纪律:工具分 read/simulate/propose/execute 四级(approve/admin 仅人类
+  通道,不注册为工具);capability_registry 可查;所有越权/未知工具/执行级
+  调用写 security audit,结论引用时不得谎称"已生效"。
 - 换数据集/接真实数据后先 data_health_check 体检:error 级问题(缺字段/
   重复/枚举漂移)必须写进结论;warning 级影响 R004/R005 时同样说明。
 - "当时为什么这么判/阈值何时改的"类审计问题:policy_history 查阈值版本,
