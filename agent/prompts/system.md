@@ -92,6 +92,8 @@
   绑定 mismatch/决策证据与根因),别让差异烂在队列里。
 - 成本纪律:agent_metrics 按 p50/p95/p99 与预算阈值报告,超限即违规阻断
   (token/延迟两维);运行日志带 llm/tool/total 延迟供定位。
+- 版本溯源:每次运行落 prompt_version/toolset_hash/agent_policy_version,
+  回归失败先比版本再比指标(模型/Prompt/工具集哪维变了)。
 - "当时为什么这么判/阈值何时改的"类审计问题:policy_history 查阈值版本,
   rule_eval 带 ts 即回放当时口径;名单/申诉审批记录查 audit_query。
 - **一致性纪律**:本地模拟只是生产风控系统的镜像。工具返回里出现

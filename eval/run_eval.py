@@ -355,6 +355,50 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_versioning_layer() -> int:
+    """离线:版本化 —— 三指纹确定性 + 运行日志携带版本字段。"""
+    from agent.versioning import (agent_policy_version, snapshot, system_hash,
+                                  toolset_hash)
+    checks = [
+        ("版本指纹:确定性(两次计算一致)",
+         snapshot() == snapshot() and system_hash() == system_hash()
+         and toolset_hash() == toolset_hash()
+         and agent_policy_version() == agent_policy_version()),
+        ("版本指纹:三指纹互不相同且为 12 位 hex",
+         len({system_hash(), toolset_hash(), agent_policy_version()}) == 3
+         and len(system_hash()) == 12),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        log_path = Path(td) / "runs.jsonl"
+        from agent.core import Agent
+        a = Agent.__new__(Agent)
+        a._system = "sys"
+        a.messages = [{"role": "system", "content": "sys"}]
+        a.session_usage = {"prompt": 0, "completion": 0, "total": 0,
+                           "cache_hit": 0, "cache_miss": 0, "api_calls": 0}
+        a.model = "fake-model"
+        a.strict_mode = False
+        a._asks_since_ckpt = 0
+        a._privacy = False
+        a._tok = None
+        a._run_log_enabled = True
+        a._run_log_path = log_path
+        from agent.versioning import snapshot as _snap
+        a._versions = _snap()
+        a._log_ask("q", "a", {"prompt": 1, "completion": 1, "cache_hit": 0,
+                              "cache_miss": 1, "api_calls": 1}, ["t"], False,
+                   {"total_ms": 1.0, "llm_ms": 0.5, "tool_ms": 0.2},
+                   [("t", 0.2)])
+        rec = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+        v = rec.get("versioning", {})
+        checks.append(("运行日志携带版本指纹且与现算一致",
+                       v.get("prompt_version") == system_hash()
+                       and v.get("toolset_hash") == toolset_hash()
+                       and v.get("agent_policy_version") == agent_policy_version()
+                       and rec.get("model") == "fake-model"))
+    return _report("Agent 版本化(离线)", checks)
+
+
 def run_cost_budget_layer() -> int:
     """离线:成本/延迟预算 —— 百分位统计正确 + budget violation 检出(阻断语义)。"""
     from agent_metrics import aggregate
@@ -2373,7 +2417,8 @@ def run_cost_layer() -> int:
     # 策略生命周期纪律并入后上调至 4050;回放纪律并入后上调至 4150;
     # Job 模型纪律并入后上调至 4300;权限纪律并入后上调至 4450;
     # 特征健康纪律并入后上调至 4550;决策血缘纪律并入后上调至 4650;
-    # 事故治理纪律并入后上调至 4750;成本纪律并入后上调至 4800。
+    # 事故治理纪律并入后上调至 4750;成本纪律并入后上调至 4800;
+    # 版本溯源纪律并入后上调至 4900。
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
     # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000;
     # Job 四件套后 58 工具上调至 29000;特征健康/血缘/事故后 66 工具上调
@@ -2383,8 +2428,8 @@ def run_cost_layer() -> int:
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
          s["schemas_chars"] <= 33000),
-        ("system prompt <= 4800 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 4800),
+        ("system prompt <= 4900 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 4900),
     ])
 
 
@@ -2530,6 +2575,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_incident_layer)
     failures += _layer(run_scenario_matrix_layer)
     failures += _layer(run_cost_budget_layer)
+    failures += _layer(run_versioning_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)

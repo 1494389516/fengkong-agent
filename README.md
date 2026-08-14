@@ -380,6 +380,13 @@ agent 运行日志新增延迟计量(llm/tool/total,ms)与按工具聚合;`agent
 延迟两维,默认 60k tokens/案例、120s/案例,可参数化)—— 违规不是只监控,
 CLI 退出码 2 阻断(CI 门禁)。上下文 ⑥ 硬预算仍是上下文爆炸的最后保险。
 
+### 20. Prompt / 工具集版本化
+
+每次 agent 运行落 `prompt_version`(system.md 哈希)/ `toolset_hash`(工具
+schema 集哈希)/ `agent_policy_version`(system + 上下文工程参数哈希)+ 模型
+名。回归失败先比版本再比指标 —— "AG-017 失败到底是模型变了、Prompt 变了,
+还是工具集变了"从此有答案。
+
 ## 环境变量
 
 | 变量 | 作用 |

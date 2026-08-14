@@ -97,6 +97,9 @@ class Agent:
         # audit.jsonl 同级机密,接生产按同等权限管控。
         self._run_log_enabled = os.environ.get("FK_AGENT_RUN_LOG") == "1"
         self._run_log_path = Path(__file__).resolve().parent.parent / "out" / "agent_runs.jsonl"
+        # P1-8:版本指纹(prompt/工具集/agent 策略),随运行日志落盘
+        from .versioning import snapshot as _ver_snapshot
+        self._versions = _ver_snapshot()
 
     # ③ 案例隔离:清空对话历史只留 system,让下一个案例在干净上下文里跑。
     #   session_usage 故意不清零 —— 度量要覆盖整场,不因换案例而丢失。
@@ -205,6 +208,7 @@ class Agent:
             rec = {
                 "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "model": self.model,
+                "versioning": getattr(self, "_versions", {}),
                 "question": question,
                 "answer": (answer or "")[:2000],
                 "tool_rounds": ask_usage["api_calls"],
