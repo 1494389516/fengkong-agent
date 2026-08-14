@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """漂移监控工具:按时间分桶看特征与规则输出的分布稳定性(PSI)。
 
-监控分两层(借鉴 MARS 前端/后端监控的分层):
+监控分两层(前端/后端监控的分层):
   feature_drift  前端 —— 规则入参特征的质量(缺失率)与分布漂移;
   rule_drift     后端 —— 规则输出(处置分布/逐规则命中率)的漂移。
 前端稳、后端动 = 规则或阈值的问题;前端动、后端跟着动 = 流量真变了。
 两层都不需要标签,全量样本可算 —— 这正是它们比回测指标灵敏的原因:
 标签要等人工审核回填,漂移当天就能看见。
 
-口径设计借鉴评分卡工具库 MARS 的数据画像模块,四条约定都是踩过坑的:
+口径设计借鉴业界监控画像模块的成熟做法,四条约定都是踩过坑的:
 - 缺失显式化:业务缺失码(如数仓的 -999)必须显式配置,不自动猜。缺失
   单独算 missing_rate,不混进均值/分位数 —— 否则一个缺失码就把均值拖飞。
 - 缺失默认不进 PSI:缺失率要单独观察(它自己就是质量信号),混进 PSI 会
@@ -35,7 +35,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from . import tool
 from .datasource import load_events
 
-# PSI 经验阈值(信贷风控通行口径)
+# PSI 经验阈值(业界通行口径)
 PSI_WATCH = 0.1
 PSI_ALARM = 0.25
 PSI_EPS = 1e-4  # 空箱占比下限:防 log(0),也给"新出现的箱"一个有限惩罚
@@ -243,7 +243,7 @@ def _head_partial(buckets: Dict[str, List[Dict]], labels: List[str]) -> bool:
 
 
 def drift_alert_text(report: Dict) -> Optional[str]:
-    """从已有漂移报告生成一行报警摘要(借鉴 MARS generate_monitoring_alert
+    """从已有漂移报告生成一行报警摘要(参考业界监控告警生成的做法
     的职责分离:只读 report、缺字段跳过,不重算指标)。日报/巡检直接引用;
     无告警返回 None —— 调用方据此决定要不要在日报里占一行。"""
     if not report.get("alarm"):
@@ -281,7 +281,7 @@ def _bucket_account_features(evs: List[Dict]) -> List[Dict]:
 
 def _grouped_profile(feats: List[str], group_col: str, psi_bins: int,
                      min_bin_frac: float, missing_set: set) -> Dict:
-    """分群画像(MARS group_col 口径的转译):各组账号特征分布 vs 全体的 PSI。
+    """分群画像(业界 group-by 分群口径):各组账号特征分布 vs 全体的 PSI。
     时间分桶答"什么时候开始变",分群答"是谁在变" —— 某渠道新号的行为分布
     突然和大盘不一样,就是渠道拉新作弊的样子。expected = 全体(含该组自身,
     大组会稀释自己,小组对比更锐利 —— 这是保守方向,不放大告警)。"""
@@ -385,7 +385,7 @@ def feature_drift(time_grain: str = "day",
     benchmark_buckets = max(1, min(benchmark_buckets, len(labels) - 1))
     bench_labels = labels[:benchmark_buckets]
 
-    # 逐桶账号特征;命中业务缺失码的值归入缺失(MARS 口径:缺失码不进统计)
+    # 逐桶账号特征;命中业务缺失码的值归入缺失(缺失码不进统计)
     def _split(rows: List[Dict], feat: str) -> Tuple[List[float], int]:
         vals, miss = [], 0
         for r in rows:

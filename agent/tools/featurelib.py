@@ -136,7 +136,7 @@ def behavior_paths(uid: str, as_of_ts: Optional[float] = None,
 
 def accounts_per(dimension: str, value: str, as_of_ts: Optional[float] = None) -> Dict:
     """反向基数特征:一个 ip / device_id 上出现过多少账号(含查询账号自身)。
-    真实反欺诈里最强的单特征之一 —— 资源被多账号共用是团伙的直接证据。"""
+    真实电商风控里最强的单特征之一 —— 资源被多账号共用是团伙的直接证据。"""
     assert dimension in ("ip", "device_id")
     accounts = sorted({e["uid"] for e in load_events()
                        if e[dimension] == value and (as_of_ts is None or e["ts"] < as_of_ts)})

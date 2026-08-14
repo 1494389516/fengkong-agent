@@ -1,11 +1,11 @@
-# 风控分析 Agent · Fengkong Agent
+# 电商风控分析 Agent · Fengkong Agent
 
-> An LLM-powered risk-control analyst agent for e-commerce anti-fraud — rules engine,
+> An LLM-powered e-commerce risk-control analyst agent (marketing-abuse / account-security / transaction-risk) — rules engine,
 > drift/adversary monitoring, feature risk evaluation (IV/KS/AUC/PSI), appeal loop,
 > two-phase human approval, and 170+ offline eval assertions. A production-disciplined
 > reference skeleton, not a demo.
 >
-> Keywords: anti-fraud · risk-control · llm-agent · fraud-detection · scorecard ·
+> Keywords: ecommerce-risk-control · risk-control · llm-agent · anti-abuse ·
 > drift-monitoring · PSI · rules-engine · function-calling
 
 基于 DeepSeek function calling 的风控分析 agent:协助风控研究员调查账号、排查团伙、
@@ -202,7 +202,7 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
   清单,切换前必经。R006 的误伤(root 真机极客用户)被故意注入标注数据,
   强拒的代价从注释变成指标,才有了 v2 的数据化决策。
 
-### 6. 监控与策略生命周期(口径借鉴评分卡工具库 MARS,语义全部转译为反欺诈)
+### 6. 监控与策略生命周期(统计口径借鉴业界监控实践,语义全部转译为电商风控)
 
 **监控三层,全部不依赖标签(比回测灵敏 —— 标签要等人工回填,漂移当天可见):**
 

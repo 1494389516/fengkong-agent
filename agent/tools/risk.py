@@ -152,7 +152,7 @@ def _feature_risk_one(feat: str, rows: List[Dict], labels: Dict[str, str],
             if lift is not None and (best_lift is None or lift > best_lift):
                 best_lift, best_bin = lift, labels_txt[i]
         if include_bins and (f + n or labels_txt[i] == "missing" and (fm or nm)):
-            # 分箱明细(MarsBinEvaluator 的分箱评估表):逐箱看风险在哪一段,
+            # 分箱明细:逐箱看风险在哪一段,
             # WOE 符号即方向,阈值应该切在 WOE 变号/跳变的地方
             bins_detail.append({
                 "bin": labels_txt[i], "n": f + n,
@@ -186,8 +186,8 @@ IV_DECAY_RATIO = 0.5  # 末桶有效 IV 跌破历史最高的一半即报衰减
 
 def _risk_trend(feats: List[str], labels: Dict[str, str],
                 time_grain: str, n_bins: int) -> Optional[Dict]:
-    """逐时间桶的欺诈率与特征 IV(MarsBinEvaluator 的风险趋势,转译到
-    反欺诈语义):区分度衰减 = 对手在适应这个特征,比整体指标掉得早。
+    """逐时间桶的欺诈率与特征 IV(风险趋势,转译到
+    电商风控语义):区分度衰减 = 对手在适应这个特征,比整体指标掉得早。
     桶内任一类样本不足时该桶 IV 记 null(小样本纪律,同全局口径)。"""
     from .drift import _bucket_account_features, _bucket_events, _tail_partial
     buckets = _bucket_events(time_grain)
