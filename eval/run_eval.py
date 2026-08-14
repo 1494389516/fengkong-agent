@@ -342,6 +342,88 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_replay_engine_layer() -> int:
+    """离线:统一回放引擎 —— 确定性/版本溯源/策略版本与注册表回放/无副作用。"""
+    checks = []
+    from agent.replay import event_fingerprint, replay_batch, replay_event
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "labels.json", "blacklist.json",
+                  "thresholds.json", "device_intel.json", "accounts.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            ev = {"uid": "u_1009", "ip": "203.0.113.66", "device_id": "dev_pixel_z9",
+                  "type": "order", "amount": 4999.0, "ts": 1784106480}
+            r1 = replay_event(ev)
+            r2 = replay_event(ev)
+            checks += [
+                ("回放:确定性(同输入同输出)",
+                 r1["action"] == r2["action"] and r1["hits"] == r2["hits"]),
+                ("回放:带 replay 标记与输入指纹",
+                 r1.get("replay") is True
+                 and r1["input_fingerprint"] == event_fingerprint(ev)),
+                ("回放:默认 as-of 口径与 rule_eval 一致",
+                 r1["action"] == "reject"),
+                ("回放:无副作用(未写任何生产文件)",
+                 not (base / "pending_actions.json").exists()
+                 and not (base / "audit.jsonl").exists()
+                 and not (base / "mismatch_queue.json").exists()),
+            ]
+            registry.dispatch("strategy_register", {
+                "strategy_name": "rep_s", "version": "1.0",
+                "thresholds": {"r006_reject_emulator": 0,
+                               "r006_reject_rooted": 0}})
+            registry.dispatch("strategy_promote", {
+                "strategy_name": "rep_s", "version": "1.0", "to": "validated"})
+            ev_emu = {"uid": "u_1003", "ip": "198.51.100.20",
+                      "device_id": "dev_emu_9f3a", "type": "coupon_claim",
+                      "ts": 1784109840}
+            r3 = replay_event(ev_emu, strategy_version="rep_s:1.0")
+            r4 = replay_event(ev, policy_version=1)
+            checks += [
+                ("回放:策略注册表版本生效且溯源",
+                 r3["action"] == "review" and r3["strategy_version"] == "rep_s:1.0"
+                 and r3["threshold_sources"] == ["strategy:rep_s:1.0"]),
+                ("回放:策略版本表生效且溯源",
+                 r4["action"] == "reject" and r4["policy_version_used"] == 1
+                 and r4["threshold_sources"] == ["policy:v1"]),
+            ]
+            try:
+                replay_event(ev, policy_version=1, strategy_version="rep_s:1.0")
+                two_src = False
+            except ValueError:
+                two_src = True
+            checks.append(("回放:双阈值源显式拒绝(口径事故)",
+                           two_src))
+            registry.dispatch("model_register", {
+                "name": "rp_m", "version": "1.0", "train_fingerprint": "x"})
+            r5 = replay_event(ev, model_version="rp_m:1.0")
+            try:
+                replay_event(ev, model_version="ghost:1.0")
+                bad_model = False
+            except ValueError:
+                bad_model = True
+            checks += [
+                ("回放:模型血缘记录", r5["model_version"] == "rp_m:1.0"),
+                ("回放:未登记模型显式拒绝", bad_model),
+            ]
+            batch = replay_batch([ev, {"uid": "u_1001", "ip": "1.1.1.1",
+                                       "device_id": "d1", "type": "login",
+                                       "ts": 1783929600}])
+            checks.append(("回放:batch 与输入对齐且逐条带指纹",
+                           len(batch) == 2
+                           and batch[0]["input_fingerprint"] == event_fingerprint(ev)
+                           and batch[1]["input_fingerprint"]
+                           == event_fingerprint(batch[1].get("input_fingerprint")
+                                                and {"uid": "u_1001", "ip": "1.1.1.1",
+                                                     "device_id": "d1", "type": "login",
+                                                     "ts": 1783929600})))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("统一回放引擎(离线,临时目录)", checks)
+
+
 def run_strategy_shadow_layer() -> int:
     """离线:策略反事实回放/影子 —— 改变清单/误伤·漏放·成本增量,且
     绝不污染 pending/audit/mismatch(what-if != 生产)。"""
@@ -2069,6 +2151,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_model_lifecycle_layer)
     failures += _layer(run_strategy_registry_layer)
     failures += _layer(run_strategy_shadow_layer)
+    failures += _layer(run_replay_engine_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)
