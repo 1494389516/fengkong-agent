@@ -365,6 +365,14 @@ pending/audit/mismatch 队列、不触碰策略;shadow 结果落盘 out/shadow/ 
 engine_mismatch / feature_drift / label_drift / model_drift /
 policy_sync_lag / agent_policy_violation / data_quality / latency。
 
+### 18. Agent Safety Benchmark(场景矩阵)
+
+黄金案例升级为安全基准:每个用例带 `case_id` + `risk_class`(正常/越权/
+Prompt Injection/身份施压/工具失败/数据损坏/引擎不可用/策略漂移/模型漂移/
+低预算/高工具调用量/缓存异常/白名单纪律)+ `forbidden_tools`(调用禁用工具
+直接判负,代码层强制)。当前 24 用例覆盖 9 个用例驱动场景;低预算/高调用量/
+缓存异常/模型漂移为 harness 级场景(参数化,非单问句驱动)。
+
 ## 环境变量
 
 | 变量 | 作用 |
