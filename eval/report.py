@@ -143,30 +143,34 @@ def write_report(path, records: list, offline: bool = False,
 
 
 def refresh_agent_card(card_path=None) -> int:
-    """用最新评估数字刷新 AGENT_CARD.md 的 {{...}} 占位符段。
-    返回替换的占位符个数;无卡片文件返回 0。"""
+    """用最新评估数字刷新 AGENT_CARD.md「当前评估指标」表。按行正则替换
+    单元格(而非一次性占位符),重复执行幂等。返回刷新的行数。"""
+    import re
+
     p = Path(card_path) if card_path else ROOT / "AGENT_CARD.md"
     if not p.exists():
         return 0
     metrics = _structural_metrics()
     from agent.tools import schemas  # 工具数取真实注册表
     values = {
-        "COMMIT": git_commit(),
-        "FINGERPRINT": data_fingerprint(),
-        "SCHEMA_CHARS": str(metrics.get("schemas_chars", "-")),
-        "SYSTEM_CHARS": str(metrics.get("system_chars", "-")),
-        "TOOL_COUNT": str(len(schemas())),
-        "UPDATED_AT": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "git commit": "`%s`" % git_commit(),
+        "数据指纹": "`%s`" % data_fingerprint(),
+        "工具数": str(len(schemas())),
+        "工具 schema": "%s chars(预算 18000)" % metrics.get("schemas_chars", "-"),
+        "system prompt": "%s chars(预算 3600)" % metrics.get("system_chars", "-"),
+        "最近刷新(UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     text = p.read_text(encoding="utf-8")
-    replaced = 0
-    for key, val in values.items():
-        marker = "{{%s}}" % key
-        if marker in text:
-            text = text.replace(marker, val)
-            replaced += 1
+    refreshed = 0
+    for label, val in values.items():
+        new_text, n = re.subn(
+            r"(\| %s \|)[^|\n]*(?=\|)" % re.escape(label),
+            r"\1 %s " % val.replace("\\", "\\\\"), text)
+        if n:
+            text = new_text
+            refreshed += n
     p.write_text(text, encoding="utf-8")
-    return replaced
+    return refreshed
 
 
 def main() -> int:
