@@ -18,20 +18,23 @@ R001-R006 实现只是"接真实引擎之前"的骨架替身与"引擎不可用"
 远程契约:POST {"event": {...}, "use_current_policy": bool},期望返回
 {"action": "pass|review|reject", "hits": [...], "policy_version": ...,
  "rule_count_evaluated": ...};返回结构与本项目 rule_eval 兼容,并附
-source 字段供结论溯源。
+source 字段供结论溯源。鉴权:FK_ENGINE_DRYRUN_TOKEN 配置时注入
+Authorization: Bearer 头。
 
-部署注意:远程 dry-run 是逐事件 HTTP。reconcile 用它是对账所需(与决策
-日志同源比对);但 backtest/scan 这类全量工具会在配置引擎后放大为每账号
-一次调用(250 账号 = 250 次 HTTP),真实环境应提供批量 dry-run 接口或
-由调度平台承接,勿让同步工具循环逐条打在线网关。
+批量契约(evaluate_batch,全量工具专用):POST {"events": [...],
+"use_current_policy": bool} -> {"decisions": [每事件一个结果]},顺序与
+请求对齐。backtest/scan 的 account_verdicts 在远程模式下走这条批量
+路径 —— 全量工具绝不逐事件打在线网关(250 账号 = 1 次 POST 而非
+N×M 次 HTTP)。
 """
 import json
 import os
 import urllib.request
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 DRYRUN_URL_ENV = "FK_ENGINE_DRYRUN_URL"
 DRYRUN_TIMEOUT_ENV = "FK_ENGINE_DRYRUN_TIMEOUT"
+DRYRUN_TOKEN_ENV = "FK_ENGINE_DRYRUN_TOKEN"
 
 
 def _overridden() -> bool:
@@ -39,12 +42,19 @@ def _overridden() -> bool:
     return bool(active_policy()["_overridden"])
 
 
-def _post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _post_json(url: str, payload: Dict[str, Any],
+               headers: Dict[str, str] = None) -> Dict[str, Any]:
     """HTTP POST 传输(拆成独立函数,便于离线测试打桩,不依赖真实网络)。"""
+    hdrs = {"Content-Type": "application/json"}
+    if headers:
+        hdrs.update(headers)
+    token = os.environ.get(DRYRUN_TOKEN_ENV)
+    if token:
+        hdrs["Authorization"] = "Bearer " + token
     req = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=hdrs,
         method="POST",
     )
     timeout = float(os.environ.get(DRYRUN_TIMEOUT_ENV, "10") or 10)
@@ -101,6 +111,38 @@ def evaluate_event(event: Dict[str, Any],
         r["degraded"] = True
         r["engine_error"] = "%s: %s" % (type(e).__name__, e)
         return r
+
+
+def evaluate_batch(events: List[Dict[str, Any]],
+                   use_current_policy: bool = False) -> List[Dict[str, Any]]:
+    """批量判定:全量工具(backtest/scan 的 account_verdicts)在远程模式下
+    的唯一形态 —— 一次 POST 覆盖全部事件,顺序与请求对齐。覆盖生效/未配置
+    引擎时逐条走本地;远程失败逐条显式降级(degraded,不静默)。"""
+    from .tools.rules import _local_rule_eval  # 惰性:防导入环
+
+    if not events:
+        return []
+    if _overridden() or not os.environ.get(DRYRUN_URL_ENV):
+        return [{**_local_rule_eval(e, use_current_policy=use_current_policy),
+                 "source": "local_rules"} for e in events]
+    try:
+        raw = _post_json(os.environ[DRYRUN_URL_ENV], {
+            "events": events,
+            "use_current_policy": bool(use_current_policy),
+        })
+        decisions = raw.get("decisions")
+        if not isinstance(decisions, list) or len(decisions) != len(events):
+            raise ValueError("批量 dry-run 返回与请求不齐(期望 %d 条,得 %r)"
+                             % (len(events), type(decisions).__name__))
+        return [_map_remote(d) for d in decisions]
+    except Exception as e:  # noqa: BLE001
+        out = []
+        for ev in events:
+            r = _local_rule_eval(ev, use_current_policy=use_current_policy)
+            r.update({"source": "local_rules_fallback", "degraded": True,
+                      "engine_error": "%s: %s" % (type(e).__name__, e)})
+            out.append(r)
+        return out
 
 
 def engine_status() -> Dict[str, Any]:
