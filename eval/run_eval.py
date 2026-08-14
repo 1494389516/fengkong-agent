@@ -355,6 +355,59 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_online_drift_layer() -> int:
+    """离线:P2-1 漂移升级 —— 决策/agent 行为两路窗口对比,零标签依赖。"""
+    checks = []
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            # 决策漂移:前 5 条全 pass,后 5 条全 reject -> 率剧变告警
+            dec = {"decisions": [{"uid": "u%d" % i, "ts": 1000 + i,
+                                  "action": "pass" if i < 5 else "reject",
+                                  "rules": [], "policy_version": "v"}
+                                 for i in range(10)]}
+            (base / "decisions_log.json").write_text(
+                json.dumps(dec, ensure_ascii=False), encoding="utf-8")
+            d = registry.dispatch("decision_drift", {})
+            checks += [
+                ("决策漂移:窗口切分与率对比正确",
+                 d["baseline_window"] == 5 and d["current_window"] == 5
+                 and d["baseline_rates"]["pass"] == 1.0
+                 and d["current_rates"]["reject"] == 1.0),
+                ("决策漂移:率剧变告警且点名维度",
+                 d["level"] == "warn" and "reject" in d["alerts"]),
+            ]
+            # agent 行为漂移:前 5 条用 feature_catalog,后 5 条用 rule_eval
+            lines = []
+            for i in range(10):
+                lines.append(json.dumps({
+                    "ts": "t%d" % i, "model": "m", "question": "q", "answer": "a",
+                    "tool_rounds": 1, "api_calls": 1,
+                    "tools_used": ["feature_catalog" if i < 5 else "rule_eval"],
+                    "tokens": {"prompt": 100, "completion": 10, "cache_hit": 0,
+                               "cache_miss": 10},
+                    "latency_ms": {"total_ms": 1.0, "llm_ms": 0.5,
+                                   "tool_ms": 0.2},
+                    "tool_latency_ms": [], "budget_compacted": False}))
+            (Path(ROOT) / "out").mkdir(parents=True, exist_ok=True)
+            (Path(ROOT) / "out" / "agent_runs.jsonl").write_text(
+                "\n".join(lines) + "\n", encoding="utf-8")
+            ab = registry.dispatch("agent_behavior_drift", {})
+            checks += [
+                ("agent 行为漂移:工具分布 PSI 告警(两半完全不同)",
+                 ab["level"] == "warn"
+                 and any("tool_distribution" in a for a in ab["alerts"])),
+                ("agent 行为漂移:窗口与均值口径可用",
+                 ab["baseline_window"] == 5 and ab["current_window"] == 5
+                 and ab["avg_tokens"]["baseline"] == 100.0),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    (Path(ROOT) / "out" / "agent_runs.jsonl").unlink(missing_ok=True)
+    return _report("在线漂移升级(离线,临时目录)", checks)
+
+
 def run_label_lifecycle_layer() -> int:
     """离线:标签生命周期 —— 快照/差异/血缘/回测指纹绑定。"""
     checks = []
@@ -2533,19 +2586,20 @@ def run_cost_layer() -> int:
     # 特征健康纪律并入后上调至 4550;决策血缘纪律并入后上调至 4650;
     # 事故治理纪律并入后上调至 4750;成本纪律并入后上调至 4800;
     # 版本溯源纪律并入后上调至 4900;特征版本化纪律并入后上调至 5000;
-    # 标签生命周期纪律并入后上调至 5150。
+    # 标签生命周期纪律并入后上调至 5150;在线漂移纪律并入后上调至 5250。
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
     # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000;
     # Job 四件套后 58 工具上调至 29000;特征健康/血缘/事故后 66 工具上调
     # 至 33000;特征版本化三件套后 69 工具上调至 34500;标签生命周期三件套
-    # 后 72 工具上调至 36000(人均 500 纪律不放松)。
+    # 后 72 工具上调至 36000;在线漂移三件套后 75 工具上调至 37500
+    # (人均 500 纪律不放松)。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 36000 chars(现 %d,%d 个工具,人均 %.0f)"
+        ("工具 schema 总量 <= 37500 chars(现 %d,%d 个工具,人均 %.0f)"
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
-         s["schemas_chars"] <= 36000),
-        ("system prompt <= 5150 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 5150),
+         s["schemas_chars"] <= 37500),
+        ("system prompt <= 5250 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 5250),
     ])
 
 
@@ -2694,6 +2748,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_versioning_layer)
     failures += _layer(run_feature_version_layer)
     failures += _layer(run_label_lifecycle_layer)
+    failures += _layer(run_online_drift_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)

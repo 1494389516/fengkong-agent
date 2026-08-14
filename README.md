@@ -402,6 +402,13 @@ consumers);`feature_diff` 对比任意两版本。**特征语义变更必须产�
 含工单/旧新标签/审批人)——不允许静默修改历史标签。回测结果携带
 `label_fingerprint`,评估血缘 = event + label + feature 三指纹。
 
+### 23. 在线漂移升级(decision / agent / model)
+
+当前窗口 vs 基线窗口三路对比,零标签依赖:`decision_drift`(生产决策的
+reject/review/pass 率变化)、`agent_behavior_drift`(agent 运行日志的工具
+分布 PSI / 平均轮数 / 平均 tokens / 缓存命中率 —— agent 自身行为漂移的
+早期信号)、`model_drift`(champion 评估指标留痕与趋势)。
+
 ## 环境变量
 
 | 变量 | 作用 |

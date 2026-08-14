@@ -120,5 +120,5 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
 # 只依赖 datasource 或 engine;dataset 依赖 featurelib;model_registry 依赖
 # dataset;strategy_registry 依赖 policy/featurelib/rules/model_registry
 # —— 三者放最后,顺序无关)
-from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, drift, calibrate, risk, adversary, draft, reports, feedback, ops, brief, profile, reconcile, graylist, audit, health, engine_status, dataset, model_registry, strategy_registry, jobs, capability, feature_health, lineage, incidents, label_lifecycle  # noqa: E402,F401
+from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, drift, calibrate, risk, adversary, draft, reports, feedback, ops, brief, profile, reconcile, graylist, audit, health, engine_status, dataset, model_registry, strategy_registry, jobs, capability, feature_health, lineage, incidents, label_lifecycle, agent_drift  # noqa: E402,F401
 # intel 由 monitor/profile 传递导入即完成注册,无需在上一行重复列出
