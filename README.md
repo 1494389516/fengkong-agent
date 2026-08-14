@@ -304,6 +304,20 @@ challenger→champion 必须人审批(approval_id 进记录,champion 同时只�
 `agent/metrics.py` 纯 stdlib(AUC/KS/Precision@K/Recall/FPR/FNR/混淆矩阵),
 `model_compare` 输出 champion vs challenger 对比表(delta 方向注明)。
 
+### 12. 策略注册表(Strategy Registry)
+
+策略 = 规则集 + 阈值覆盖 + 特征/模型依赖 的版本化声明,状态机
+`draft → validated → shadow → active → deprecated / rollback`:
+- 校验门禁(strategy_validate):规则 id / 阈值键与取值 / 特征依赖 /
+  模型依赖四类检查,未过不得离开 draft;
+- validated→shadow 自动,shadow→active 必须人审批(approval_id 进记录);
+- 同名策略同时只有一个 active(新上线旧自动 deprecated);
+- Agent 不能直接修改 active 策略 —— 变更只能走"新版本 → 审批"路径;
+- strategy_diff 输出版本间阈值/规则/依赖差异,演进审计用;
+- 每个版本记录 dataset_fingerprint,回放口径有据。
+策略注册表是治理元数据,不参与判定 —— 判定仍由 policy 版本表 + 引擎
+适配器负责。
+
 ## 环境变量
 
 | 变量 | 作用 |

@@ -262,6 +262,12 @@ def decide(action_id: int, approve: bool, operator: Optional[str] = None) -> Opt
         elif kind == "model_rollback":
             from .model_registry import apply_rollback  # 惰性
             applied_detail = apply_rollback(action, decided_by)
+        elif kind == "strategy_promote":
+            from .strategy_registry import apply_active  # 惰性
+            applied_detail = apply_active(action, decided_by)
+        elif kind == "strategy_rollback":
+            from .strategy_registry import apply_strategy_rollback  # 惰性
+            applied_detail = apply_strategy_rollback(action, decided_by)
         elif kind == "blacklist_remove":
             records = [r for r in load_blacklist()
                        if not (r["dimension"] == action["dimension"]

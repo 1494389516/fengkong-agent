@@ -78,6 +78,10 @@ def main():
                     print("  [待审批] #%d 模型%s %s %s | %s" % (
                         a["action_id"], "晋升" if kind == "model_promote" else "回滚",
                         a["name"], a["version"], a.get("reason", "")))
+                elif kind in ("strategy_promote", "strategy_rollback"):
+                    print("  [待审批] #%d 策略%s %s %s | %s" % (
+                        a["action_id"], "晋升" if kind == "strategy_promote" else "回滚",
+                        a["strategy_name"], a["version"], a.get("reason", "")))
                 elif kind == "blacklist_add":
                     print("  [待审批] #%d %s=%s -> %s名单%s | %s" % (
                         a["action_id"], a["dimension"], a["value"], a["list"],
@@ -118,6 +122,11 @@ def main():
                     "已批准并生效" if approve else "已驳回",
                     a["action_id"], "晋升" if a["kind"] == "model_promote" else "回滚",
                     a["name"], a["version"]))
+            elif a.get("kind") in ("strategy_promote", "strategy_rollback"):
+                print("  [%s] #%d 策略%s %s %s(已记审计日志)" % (
+                    "已批准并生效" if approve else "已驳回",
+                    a["action_id"], "晋升" if a["kind"] == "strategy_promote" else "回滚",
+                    a["strategy_name"], a["version"]))
             elif a.get("kind", "blacklist_add") == "blacklist_add":
                 print("  [%s] #%d %s=%s -> %s名单(已记审计日志)" % (
                     "已批准并写入" if approve else "已驳回",

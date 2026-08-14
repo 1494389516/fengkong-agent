@@ -72,6 +72,9 @@
 - 模型生命周期:model_register → model_eval(评估门禁:数据集指纹须=训练
   指纹)→ model_promote(candidate→shadow 自动,shadow→challenger 过评估
   门禁,challenger→champion 必须人审批,champion 唯一);回滚走审批并写审计。
+- 策略生命周期:strategy_register → strategy_validate(门禁)→ strategy_promote
+  (validated→shadow 自动,shadow→active 人审批,同名 active 唯一);diff 用
+  strategy_diff,回滚走审批;Agent 不能直接改 active 策略,变更走新版本。
 - 换数据集/接真实数据后先 data_health_check 体检:error 级问题(缺字段/
   重复/枚举漂移)必须写进结论;warning 级影响 R004/R005 时同样说明。
 - "当时为什么这么判/阈值何时改的"类审计问题:policy_history 查阈值版本,

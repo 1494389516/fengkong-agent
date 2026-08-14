@@ -37,6 +37,8 @@
 - **两阶段处置**:agent 只提交,人在 CLI 审批,全程审计
 - **模型生命周期**:candidate→shadow→challenger→champion 状态机(评估门禁
   +人审批+champion 唯一+回滚审计,只管理不训练)
+- **策略注册表**:draft→validated→shadow→active 状态机(校验门禁+人审批+同名
+  active 唯一,阈值覆盖版本化,与 policy 版本表分离治理)
 - **上下文工程 ①~⑦**:度量/限幅/隔离/裁剪/checkpoint/硬预算/脱敏
 
 ## 3. 数据面

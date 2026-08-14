@@ -342,6 +342,123 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_strategy_registry_layer() -> int:
+    """离线:策略注册表 —— 校验门禁/状态机/审批/同名 active 唯一/非法回滚。"""
+    checks = []
+    from agent.tools import actions
+    from agent.tools.dataset import dataset_fingerprint
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "labels.json", "blacklist.json",
+                  "thresholds.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            fp = dataset_fingerprint()
+            reg = registry.dispatch("model_register", {
+                "name": "strat_m", "version": "1.0", "train_fingerprint": fp})
+            assert reg.get("status") == "registered"
+            r0 = registry.dispatch("strategy_register", {
+                "strategy_name": "coupon_v1", "version": "1.0",
+                "rules": ["R001", "R002"],
+                "thresholds": {"r002_max_gap_seconds": 15},
+                "feature_dependencies": ["coupon_claims", "coupon_min_gap_seconds"],
+                "model_dependencies": ["strat_m:1.0"],
+                "note": "eval"})
+            checks += [
+                ("登记:draft + 数据集指纹落盘",
+                 r0["entry"]["status"] == "draft"
+                 and r0["entry"]["dataset_fingerprint"] == fp),
+                ("同名同版本覆盖被拒",
+                 registry.dispatch("strategy_register", {
+                     "strategy_name": "coupon_v1", "version": "1.0"})
+                 .get("status") == "already_registered"),
+            ]
+            r_bad = registry.dispatch("strategy_register", {
+                "strategy_name": "bad_v1", "version": "1.0",
+                "thresholds": {"r999_unknown": 1},
+                "model_dependencies": ["ghost:9.9"]})
+            p_bad = registry.dispatch("strategy_promote", {
+                "strategy_name": "bad_v1", "version": "1.0", "to": "validated"})
+            checks += [
+                ("未验证策略禁止离开 draft",
+                 "校验门禁未过" in p_bad.get("error", "")
+                 and "r999_unknown" in p_bad["error"]
+                 and "ghost:9.9" in p_bad["error"]),
+            ]
+            r_v = registry.dispatch("strategy_validate", {
+                "strategy_name": "coupon_v1", "version": "1.0"})
+            checks.append(("校验通过且问题清单为空",
+                           r_v.get("valid") is True and r_v["problems"] == []))
+            p1 = registry.dispatch("strategy_promote", {
+                "strategy_name": "coupon_v1", "version": "1.0", "to": "validated"})
+            p2 = registry.dispatch("strategy_promote", {
+                "strategy_name": "coupon_v1", "version": "1.0", "to": "shadow"})
+            checks += [
+                ("draft->validated->shadow 两段晋升",
+                 p1.get("status") == "promoted"
+                 and p2.get("status") == "promoted"
+                 and p2.get("to") == "shadow"),
+            ]
+            p3 = registry.dispatch("strategy_promote", {
+                "strategy_name": "coupon_v1", "version": "1.0", "to": "active"})
+            st = registry.dispatch("strategy_list", {"strategy_name": "coupon_v1"})
+            checks += [
+                ("shadow->active 须审批且未生效",
+                 p3.get("status") == "pending_confirmation"
+                 and st["strategies"][0]["status"] == "shadow"),
+            ]
+            actions.decide(p3["action_id"], approve=True, operator="eval_op")
+            st = registry.dispatch("strategy_list", {"strategy_name": "coupon_v1"})
+            checks.append(("批准后 active 且带审批人/上线时间",
+                           st["strategies"][0]["status"] == "active"
+                           and st["strategies"][0]["approved_by"] == "eval_op"
+                           and bool(st["strategies"][0]["deployed_at"])))
+            registry.dispatch("strategy_register", {
+                "strategy_name": "coupon_v1", "version": "2.0",
+                "thresholds": {"r002_max_gap_seconds": 20}})
+            registry.dispatch("strategy_promote", {
+                "strategy_name": "coupon_v1", "version": "2.0", "to": "validated"})
+            registry.dispatch("strategy_promote", {
+                "strategy_name": "coupon_v1", "version": "2.0", "to": "shadow"})
+            p4 = registry.dispatch("strategy_promote", {
+                "strategy_name": "coupon_v1", "version": "2.0", "to": "active"})
+            actions.decide(p4["action_id"], approve=True)
+            st = registry.dispatch("strategy_list", {"strategy_name": "coupon_v1"})
+            by = {x["version"]: x for x in st["strategies"]}
+            checks += [
+                ("同名 active 唯一:新上线旧 deprecated",
+                 by["2.0"]["status"] == "active"
+                 and by["1.0"]["status"] == "deprecated"
+                 and len(st["active"]) == 1),
+            ]
+            d = registry.dispatch("strategy_diff", {
+                "strategy_name": "coupon_v1", "version_a": "1.0", "version_b": "2.0"})
+            checks.append(("strategy_diff 检出阈值差异",
+                           d["threshold_diff"] == [{"param": "r002_max_gap_seconds",
+                                                    "a": 15, "b": 20}]))
+            rb1 = registry.dispatch("strategy_rollback", {
+                "strategy_name": "coupon_v1", "version": "1.0", "reason": "x"})
+            checks.append(("非法回滚被拒(非 active)",
+                           "非法回滚" in rb1.get("error", "")))
+            rb2 = registry.dispatch("strategy_rollback", {
+                "strategy_name": "coupon_v1", "version": "2.0", "reason": "指标恶化"})
+            actions.decide(rb2["action_id"], approve=True, operator="eval_op")
+            st = registry.dispatch("strategy_list", {"strategy_name": "coupon_v1"})
+            by = {x["version"]: x for x in st["strategies"]}
+            audit_lines = (base / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+            checks += [
+                ("回滚批准后状态 rollback + 审计带审批人",
+                 by["2.0"]["status"] == "rollback"
+                 and bool(by["2.0"]["retired_at"])
+                 and any('"decided_by": "eval_op"' in ln
+                         and '"strategy_rollback"' in ln for ln in audit_lines)),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("策略注册表(离线,临时目录)", checks)
+
+
 def run_model_lifecycle_layer() -> int:
     """离线:模型生命周期状态机 —— 转移门禁/审批/champion 唯一/指纹绑定/
     非法回滚/重复晋升,全流程在临时目录走完。"""
@@ -1750,16 +1867,17 @@ def run_cost_layer() -> int:
     # 抬预算的纪律仍然有效,duty_ops 本身就是三合一的产物。
     # system prompt 同理:三色名单纪律 + 漂移/申诉纪律并集后上调至 3300;
     # 审计查询/数据体检/差异工单/唯一引擎纪律并入后上调至 3600;算法人
-    # 三件套提示并入后上调至 3700;模型生命周期纪律并入后上调至 3850。
-    # schema:模型生命周期五件套后 46 工具上调至 23000(人均 500 纪律
-    # 不放松,现人均 ~475)。
+    # 三件套提示并入后上调至 3700;模型生命周期纪律并入后上调至 3850;
+    # 策略生命周期纪律并入后上调至 4050。
+    # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
+    # 后 52 工具上调至 26000(人均 500 纪律不放松,现人均 ~475)。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 23000 chars(现 %d,%d 个工具,人均 %.0f)"
+        ("工具 schema 总量 <= 26000 chars(现 %d,%d 个工具,人均 %.0f)"
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
-         s["schemas_chars"] <= 23000),
-        ("system prompt <= 3850 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 3850),
+         s["schemas_chars"] <= 26000),
+        ("system prompt <= 4050 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 4050),
     ])
 
 
@@ -1889,6 +2007,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_label_quality_layer)
     failures += _layer(run_ml_tools_layer)
     failures += _layer(run_model_lifecycle_layer)
+    failures += _layer(run_strategy_registry_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)
