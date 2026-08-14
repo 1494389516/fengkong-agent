@@ -342,6 +342,118 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_model_lifecycle_layer() -> int:
+    """离线:模型生命周期状态机 —— 转移门禁/审批/champion 唯一/指纹绑定/
+    非法回滚/重复晋升,全流程在临时目录走完。"""
+    checks = []
+    from agent.tools import actions
+    from agent.tools.dataset import dataset_fingerprint
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "labels.json", "blacklist.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            fp = dataset_fingerprint()
+            scores = {"u_1001": 0.1, "u_1002": 0.9, "u_1003": 0.85,
+                      "u_1004": 0.8, "u_1005": 0.75, "u_1009": 0.95}
+            r0 = registry.dispatch("model_register", {
+                "name": "xgb_demo", "version": "0.1", "train_fingerprint": fp})
+            checks.append(("登记:状态 candidate 且绑定特征目录指纹",
+                           r0["entry"]["status"] == "candidate"
+                           and len(r0["entry"]["feature_catalog_version"]) == 16))
+            r1 = registry.dispatch("model_promote", {
+                "name": "xgb_demo", "version": "0.1", "to": "shadow"})
+            checks.append(("candidate->shadow 自动", r1.get("status") == "promoted"))
+            r2 = registry.dispatch("model_promote", {
+                "name": "xgb_demo", "version": "0.1", "to": "challenger"})
+            checks.append(("评估门禁:无评估结果拒绝晋升",
+                           "评估门禁" in r2.get("error", "")))
+            re_ = registry.dispatch("model_eval", {
+                "name": "xgb_demo", "version": "0.1", "scores": scores})
+            checks += [
+                ("评估:指标写入且指纹绑定",
+                 re_.get("status") == "evaluated"
+                 and re_["metrics"]["auc"] == 1.0
+                 and re_["metrics"]["sample_count"] == 6
+                 and re_["metrics"]["eval_fingerprint"] == fp),
+                ("评估:混淆矩阵阈值 0.5 全对",
+                 re_["metrics"]["confusion_matrix"] == {"tp": 5, "fp": 0,
+                                                        "tn": 1, "fn": 0}),
+            ]
+            r3 = registry.dispatch("model_promote", {
+                "name": "xgb_demo", "version": "0.1", "to": "challenger"})
+            checks.append(("过门禁后 shadow->challenger",
+                           r3.get("status") == "promoted"))
+            r4 = registry.dispatch("model_promote", {
+                "name": "xgb_demo", "version": "0.1", "to": "champion"})
+            st = registry.dispatch("model_status", {"name": "xgb_demo"})
+            checks.append(("challenger->champion 须审批:提交待审批且未生效",
+                           r4.get("status") == "pending_confirmation"
+                           and st["models"][0]["status"] == "challenger"))
+            actions.decide(r4["action_id"], approve=True, operator="eval_op")
+            st = registry.dispatch("model_status", {"name": "xgb_demo"})
+            checks.append(("批准后 champion 上线且带 approval_id/deployed_at",
+                           st["models"][0]["status"] == "champion"
+                           and bool(st["models"][0]["approval_id"])
+                           and bool(st["models"][0]["deployed_at"])))
+            registry.dispatch("model_register", {
+                "name": "xgb_bad", "version": "0.1",
+                "train_fingerprint": "deadbeef"})
+            re_bad = registry.dispatch("model_eval", {
+                "name": "xgb_bad", "version": "0.1", "scores": scores})
+            checks.append(("fingerprint 不匹配拒绝评估",
+                           "不匹配" in re_bad.get("error", "")))
+            r_dup = registry.dispatch("model_promote", {
+                "name": "xgb_demo", "version": "0.1", "to": "shadow"})
+            checks.append(("重复晋升被拒(已在更远状态)",
+                           "非法转移" in r_dup.get("error", "")))
+            registry.dispatch("model_register", {
+                "name": "xgb_v2", "version": "0.2", "train_fingerprint": fp})
+            for to in ("shadow", "challenger"):
+                registry.dispatch("model_promote", {
+                    "name": "xgb_v2", "version": "0.2", "to": to})
+                if to == "shadow":
+                    registry.dispatch("model_eval", {
+                        "name": "xgb_v2", "version": "0.2", "scores": scores})
+            r5p = registry.dispatch("model_promote", {
+                "name": "xgb_v2", "version": "0.2", "to": "champion"})
+            actions.decide(r5p["action_id"], approve=True)
+            st_all = registry.dispatch("model_status", {})
+            by = {m["name"]: m for m in st_all["models"]}
+            checks.append(("champion 唯一:新上线旧自动退役",
+                           by["xgb_v2"]["status"] == "champion"
+                           and by["xgb_demo"]["status"] == "deprecated"
+                           and len(st_all["champions"]) == 1))
+            r_illegal = registry.dispatch("model_rollback", {
+                "name": "xgb_bad", "version": "0.1", "reason": "x"})
+            checks.append(("非法回滚被拒(非 champion)",
+                           "非法回滚" in r_illegal.get("error", "")))
+            r_rb = registry.dispatch("model_rollback", {
+                "name": "xgb_v2", "version": "0.2", "reason": "指标恶化"})
+            actions.decide(r_rb["action_id"], approve=False)
+            st2 = registry.dispatch("model_status", {"name": "xgb_v2"})
+            still_champ = st2["models"][0]["status"] == "champion"
+            r_rb2 = registry.dispatch("model_rollback", {
+                "name": "xgb_v2", "version": "0.2", "reason": "指标恶化"})
+            actions.decide(r_rb2["action_id"], approve=True, operator="eval_op")
+            st3 = registry.dispatch("model_status", {"name": "xgb_v2"})
+            audit_lines = (base / "audit.jsonl").read_text(
+                encoding="utf-8").splitlines()
+            checks += [
+                ("回滚驳回后状态不变", still_champ),
+                ("回滚批准后状态 rollback 且 retired_at 落盘",
+                 st3["models"][0]["status"] == "rollback"
+                 and bool(st3["models"][0]["retired_at"])),
+                ("回滚写审计且带审批人", any(
+                    '"decided_by": "eval_op"' in ln
+                    and '"model_rollback"' in ln for ln in audit_lines)),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("模型生命周期(离线,临时目录)", checks)
+
+
 def run_ml_tools_layer() -> int:
     """离线:算法人三件套 —— 特征清单自检、建模样本导出(PIT+指纹)、模型登记簿。"""
     checks = []
@@ -1614,16 +1726,16 @@ def run_cost_layer() -> int:
     # 抬预算的纪律仍然有效,duty_ops 本身就是三合一的产物。
     # system prompt 同理:三色名单纪律 + 漂移/申诉纪律并集后上调至 3300;
     # 审计查询/数据体检/差异工单/唯一引擎纪律并入后上调至 3600;算法人
-    # 三件套(feature_catalog/build_dataset/model_registry)提示并入后
-    # 上调至 3700。schema:算法人三件套后 41 工具上调至 20500(人均 500
-    # 纪律不放松,现人均 ~470)。
+    # 三件套提示并入后上调至 3700;模型生命周期纪律并入后上调至 3850。
+    # schema:模型生命周期五件套后 46 工具上调至 23000(人均 500 纪律
+    # 不放松,现人均 ~475)。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 20500 chars(现 %d,%d 个工具,人均 %.0f)"
+        ("工具 schema 总量 <= 23000 chars(现 %d,%d 个工具,人均 %.0f)"
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
-         s["schemas_chars"] <= 20500),
-        ("system prompt <= 3700 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 3700),
+         s["schemas_chars"] <= 23000),
+        ("system prompt <= 3850 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 3850),
     ])
 
 
@@ -1752,6 +1864,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_health_layer)
     failures += _layer(run_label_quality_layer)
     failures += _layer(run_ml_tools_layer)
+    failures += _layer(run_model_lifecycle_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)

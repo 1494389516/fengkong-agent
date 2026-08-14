@@ -69,6 +69,9 @@
   申诉核实成立 = 误伤实锤,自动修正标签并沉淀复盘。
 - 算法人向:挑特征先 feature_catalog;建模样本 build_dataset 导出(口径与
   规则同源、指纹复现);训练结果 model_register 登记(只登记不训练)。
+- 模型生命周期:model_register → model_eval(评估门禁:数据集指纹须=训练
+  指纹)→ model_promote(candidate→shadow 自动,shadow→challenger 过评估
+  门禁,challenger→champion 必须人审批,champion 唯一);回滚走审批并写审计。
 - 换数据集/接真实数据后先 data_health_check 体检:error 级问题(缺字段/
   重复/枚举漂移)必须写进结论;warning 级影响 R004/R005 时同样说明。
 - "当时为什么这么判/阈值何时改的"类审计问题:policy_history 查阈值版本,

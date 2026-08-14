@@ -74,6 +74,10 @@ def main():
                 elif kind == "appeal_resolve":
                     print("  [待审批] #%d 申诉决议 appeal#%d uid=%s -> %s | %s" % (
                         a["action_id"], a["appeal_id"], a["uid"], a["decision"], a["reason"]))
+                elif kind in ("model_promote", "model_rollback"):
+                    print("  [待审批] #%d 模型%s %s %s | %s" % (
+                        a["action_id"], "晋升" if kind == "model_promote" else "回滚",
+                        a["name"], a["version"], a.get("reason", "")))
                 elif kind == "blacklist_add":
                     print("  [待审批] #%d %s=%s -> %s名单%s | %s" % (
                         a["action_id"], a["dimension"], a["value"], a["list"],
@@ -109,6 +113,11 @@ def main():
                 print("  [%s] #%d 申诉决议 appeal#%d uid=%s -> %s(已记审计日志)" % (
                     "已批准并落盘" if approve else "已驳回",
                     a["action_id"], a["appeal_id"], a["uid"], a["decision"]))
+            elif a.get("kind") in ("model_promote", "model_rollback"):
+                print("  [%s] #%d 模型%s %s %s(已记审计日志)" % (
+                    "已批准并生效" if approve else "已驳回",
+                    a["action_id"], "晋升" if a["kind"] == "model_promote" else "回滚",
+                    a["name"], a["version"]))
             elif a.get("kind", "blacklist_add") == "blacklist_add":
                 print("  [%s] #%d %s=%s -> %s名单(已记审计日志)" % (
                     "已批准并写入" if approve else "已驳回",

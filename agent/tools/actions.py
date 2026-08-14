@@ -256,6 +256,12 @@ def decide(action_id: int, approve: bool, operator: Optional[str] = None) -> Opt
         elif kind == "appeal_resolve":
             from .feedback import apply_appeal_decision  # 惰性:防导入环
             applied_detail = apply_appeal_decision(action)
+        elif kind == "model_promote":
+            from .model_registry import apply_champion_promote  # 惰性
+            applied_detail = apply_champion_promote(action, decided_by)
+        elif kind == "model_rollback":
+            from .model_registry import apply_rollback  # 惰性
+            applied_detail = apply_rollback(action, decided_by)
         elif kind == "blacklist_remove":
             records = [r for r in load_blacklist()
                        if not (r["dimension"] == action["dimension"]

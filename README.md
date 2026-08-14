@@ -293,6 +293,17 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 - 轨迹效率:入口须是聚合工具、调用次数上限、同参重复检测;
 - 成本:每案例 token 预算 + 缓存命中率实报。
 
+### 11. 模型生命周期与 Champion-Challenger
+
+**只管理不训练**:模型登记簿是元数据账本,状态机
+`candidate → shadow → challenger → champion → deprecated / rollback`。
+转移门禁全部在代码层:shadow→challenger 必须过 `model_eval`(评估数据集
+指纹必须等于训练指纹,换数据集评出的指标不能冒充训练集表现);
+challenger→champion 必须人审批(approval_id 进记录,champion 同时只有
+一个,新上线旧自动退役);回滚走审批并写审计(decided_by)。指标库
+`agent/metrics.py` 纯 stdlib(AUC/KS/Precision@K/Recall/FPR/FNR/混淆矩阵),
+`model_compare` 输出 champion vs challenger 对比表(delta 方向注明)。
+
 ## 环境变量
 
 | 变量 | 作用 |

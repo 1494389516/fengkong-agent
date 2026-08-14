@@ -35,6 +35,8 @@
 - **规则集 R001-R006**(阈值全部版本化,point-in-time 回放 + what-if 覆盖)
 - **名单三色**:black 硬拦 / gray 观察(生命周期裁决)/ white 误伤抑制(降档不留免检)
 - **两阶段处置**:agent 只提交,人在 CLI 审批,全程审计
+- **模型生命周期**:candidate→shadow→challenger→champion 状态机(评估门禁
+  +人审批+champion 唯一+回滚审计,只管理不训练)
 - **上下文工程 ①~⑦**:度量/限幅/隔离/裁剪/checkpoint/硬预算/脱敏
 
 ## 3. 数据面

@@ -298,6 +298,11 @@ FEATURE_CATALOG = [
 ]
 
 
+FEATURE_CATALOG_VERSION = __import__("hashlib").sha256(
+    __import__("json").dumps(FEATURE_CATALOG, ensure_ascii=False,
+                             sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
 @tool(
     name="feature_catalog",
     description=(
