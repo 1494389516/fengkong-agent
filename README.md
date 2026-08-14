@@ -394,6 +394,14 @@ schema 集哈希)/ `agent_policy_version`(system + 上下文工程参数哈希)+
 consumers);`feature_diff` 对比任意两版本。**特征语义变更必须产生新版本**,
 漂移未出版本前,回测/建模口径与历史不一致,不可信。
 
+### 22. 标签生命周期
+
+标签数据可版本化:`label_version` 快照(内容指纹 + 逐 uid 标签,同指纹不
+重复打)、`label_diff` 追踪新增/删除/变更(含旧新标签)、`label_refresh`
+在申诉修正后再快照。**申诉导致的标签修正自动落血缘**(label_lineage,
+含工单/旧新标签/审批人)——不允许静默修改历史标签。回测结果携带
+`label_fingerprint`,评估血缘 = event + label + feature 三指纹。
+
 ## 环境变量
 
 | 变量 | 作用 |
