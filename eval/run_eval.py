@@ -449,9 +449,33 @@ def run_model_lifecycle_layer() -> int:
                     '"decided_by": "eval_op"' in ln
                     and '"model_rollback"' in ln for ln in audit_lines)),
             ]
+            cmp_ = registry.dispatch("model_compare", {
+                "challenger_name": "xgb_v2", "challenger_version": "0.2",
+                "champion_name": "xgb_demo", "champion_version": "0.1"})
+            row_auc = [r for r in cmp_.get("rows", []) if r["metric"] == "auc"]
+            checks += [
+                ("Champion-Challenger 对比表结构完整",
+                 cmp_["champion"] == "xgb_demo 0.1"
+                 and cmp_["challenger"] == "xgb_v2 0.2"
+                 and cmp_["dataset_fingerprint"] == fp
+                 and row_auc and row_auc[0]["delta"] == 0.0
+                 and cmp_["champion_sample_count"] == 6
+                 and cmp_["challenger_sample_count"] == 6),
+            ]
+            from agent.metrics import champion_beats_challenger
+            m_better = {"auc": 0.8, "ks": 0.6, "precision": 0.7, "recall": 0.7,
+                        "fpr": 0.1, "fnr": 0.3}
+            m_worse_recall = dict(m_better, recall=0.4)
+            ok1, bad1 = champion_beats_challenger(m_better, m_worse_recall)
+            ok2, bad2 = champion_beats_challenger(m_better, m_better)
+            checks += [
+                ("评估门禁:recall 劣化被拒且点名指标",
+                 ok1 is False and bad1 == ["recall"]),
+                ("评估门禁:全等指标通过", ok2 is True and bad2 == []),
+            ]
         finally:
             os.environ.pop("FK_DATA_DIR", None)
-    return _report("模型生命周期(离线,临时目录)", checks)
+    return _report("模型生命周期与 Champion-Challenger(离线,临时目录)", checks)
 
 
 def run_ml_tools_layer() -> int:

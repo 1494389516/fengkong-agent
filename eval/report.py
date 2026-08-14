@@ -56,6 +56,31 @@ def _structural_metrics() -> dict:
         return {}
 
 
+def _champion_model() -> dict:
+    """当前 champion 模型摘要(默认数据集登记簿),供报告/档案展示。"""
+    try:
+        from agent.tools.dataset import dataset_fingerprint
+        from agent.tools.datasource import data_dir
+        import json as _json
+        p = data_dir() / "model_registry.json"
+        if not p.exists():
+            return {}
+        items = _json.loads(p.read_text(encoding="utf-8"))
+        ch = [m for m in items if m.get("status") == "champion"]
+        if not ch:
+            return {}
+        m = ch[0]
+        met = m.get("metrics") or {}
+        return {"name": m["name"], "version": m["version"],
+                "auc": met.get("auc"), "ks": met.get("ks"),
+                "sample_count": met.get("sample_count"),
+                "train_fingerprint": m.get("train_fingerprint"),
+                "deployed_at": m.get("deployed_at"),
+                "dataset_fingerprint": dataset_fingerprint()}
+    except Exception:  # noqa: BLE001 报告生成失败不该掀翻评估
+        return {}
+
+
 def _totals(records) -> tuple:
     total = sum(r["total"] for r in records)
     fails = sum(r["failures"] for r in records)
@@ -127,6 +152,20 @@ def render_report(records: list, offline: bool = False,
     else:
         lines.append("> 见逐案例打印;四维指标待 agent_runs.jsonl 聚合"
                      "(eval/agent_metrics.py)。")
+    ch = _champion_model()
+    lines += ["", "## 模型评估(champion)", ""]
+    if ch:
+        lines += [
+            "| 指标 | 值 |",
+            "|---|---|",
+            "| champion | `%s %s` |" % (ch["name"], ch["version"]),
+            "| auc / ks | %s / %s |" % (ch.get("auc"), ch.get("ks")),
+            "| 评估样本数 | %s |" % ch.get("sample_count"),
+            "| 训练集指纹 | `%s` |" % ch.get("train_fingerprint"),
+            "| 上线时间 | %s |" % ch.get("deployed_at"),
+        ]
+    else:
+        lines.append("> 无 champion 登记(模型生命周期未走到上线)。")
     lines += ["", "## 已知边界提醒", "",
               "- 数据为合成样本,指标绝对值无外推意义;",
               "- 本报告仅描述评估本身,不构成上线结论;对账未通过时模拟类"
@@ -152,6 +191,7 @@ def refresh_agent_card(card_path=None) -> int:
         return 0
     metrics = _structural_metrics()
     from agent.tools import schemas  # 工具数取真实注册表
+    ch = _champion_model()
     values = {
         "git commit": "`%s`" % git_commit(),
         "数据指纹": "`%s`" % data_fingerprint(),
@@ -159,6 +199,10 @@ def refresh_agent_card(card_path=None) -> int:
         "工具 schema": "%s chars(预算 18000)" % metrics.get("schemas_chars", "-"),
         "system prompt": "%s chars(预算 3600)" % metrics.get("system_chars", "-"),
         "最近刷新(UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "MODEL_CHAMPION": ("无" if not ch else "%s %s" % (ch["name"], ch["version"])),
+        "MODEL_AUC": "-" if not ch else ch.get("auc"),
+        "MODEL_KS": "-" if not ch else ch.get("ks"),
+        "MODEL_SAMPLE": "-" if not ch else ch.get("sample_count"),
     }
     text = p.read_text(encoding="utf-8")
     refreshed = 0

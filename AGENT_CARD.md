@@ -59,6 +59,14 @@
 6. **注入防线**:用户内容 `⟦⟧` 标记 + 安全纪律,越权话术在评估判负
 7. **成本预算**:schema / system / 单工具结果 / 每案例 token 四级硬预算
 
+## 4.1 模型评估(champion,自动刷新)
+
+| 指标 | 值 |
+|---|---|
+| champion | `{{MODEL_CHAMPION}}` |
+| auc / ks | {{MODEL_AUC}} / {{MODEL_KS}} |
+| 评估样本数 | {{MODEL_SAMPLE}} |
+
 ## 5. 当前评估指标(自动刷新)
 
 | 指标 | 值 |
