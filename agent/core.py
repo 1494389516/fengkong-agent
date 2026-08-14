@@ -16,9 +16,10 @@ MAX_TOOL_ROUNDS 防止模型陷入无限调工具的循环。
 """
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from . import tools
 from .privacy import Tokenizer, privacy_enabled
@@ -194,8 +195,10 @@ class Agent:
         self._checkpoint_now()
 
     def _log_ask(self, question: str, answer: str, ask_usage: Dict[str, int],
-                 tools_used: List[str], compacted: bool) -> None:
-        """落一行运行日志(仅 FK_AGENT_RUN_LOG=1 时)。日志失败绝不能掀翻对话。"""
+                 tools_used: List[str], compacted: bool,
+                 latency: Dict[str, Any], tool_times: List[tuple]) -> None:
+        """落一行运行日志(仅 FK_AGENT_RUN_LOG=1 时)。日志失败绝不能掀翻对话。
+        latency: {total_ms, llm_ms, tool_ms};tool_times: [(工具名, 毫秒)]。"""
         if not self._run_log_enabled:
             return
         try:
@@ -209,6 +212,8 @@ class Agent:
                 "api_calls": ask_usage["api_calls"],
                 "tokens": {k: ask_usage[k] for k in
                            ("prompt", "completion", "cache_hit", "cache_miss")},
+                "latency_ms": {k: round(v, 1) for k, v in latency.items()},
+                "tool_latency_ms": [[n, round(t, 1)] for n, t in tool_times],
                 "budget_compacted": compacted,
             }
             self._run_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,6 +240,9 @@ class Agent:
                                      "cache_hit": 0, "cache_miss": 0,
                                      "api_calls": 0}
         tools_used: List[str] = []
+        tool_times: List[tuple] = []
+        latency = {"total_ms": 0.0, "llm_ms": 0.0, "tool_ms": 0.0}
+        _t0 = time.monotonic()  # P1-7:延迟预算的计量起点
         for _ in range(MAX_TOOL_ROUNDS):
             self._trim_tool_messages()  # ④ 发送前裁剪
             if (CONTEXT_EST_TOKEN_BUDGET > 0 and not compacted_this_ask
@@ -246,11 +254,13 @@ class Agent:
                 if did and on_notice:
                     on_notice("上下文估算超 %d tokens,已强制压缩(⑥ 兜底)"
                               % CONTEXT_EST_TOKEN_BUDGET)
+            _llm_t0 = time.monotonic()
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=self.messages,
                 tools=tools.schemas(strict=self.strict_mode),
             )
+            latency["llm_ms"] += (time.monotonic() - _llm_t0) * 1000
             usage = _extract_usage(resp)  # ①
             self._accumulate(usage)
             for k in ("prompt", "completion", "cache_hit", "cache_miss"):
@@ -264,8 +274,9 @@ class Agent:
                 self.messages.append({"role": "assistant", "content": msg.content})
                 self._maybe_checkpoint()  # ⑤
                 answer = msg.content or ""
+                latency["total_ms"] = (time.monotonic() - _t0) * 1000
                 self._log_ask(user_input, answer, ask_usage, tools_used,
-                              compacted_this_ask)
+                              compacted_this_ask, latency, tool_times)
                 return self._tok.detokenize(answer) if self._privacy else answer
             # assistant 消息(含 tool_calls)必须原样入历史,否则下一轮 API 会拒绝 tool 消息
             self.messages.append({
@@ -284,7 +295,11 @@ class Agent:
                     args = {}
                 if on_tool:
                     on_tool(name, args)
+                _tool_t0 = time.monotonic()
                 result = tools.dispatch(name, args)  # ② 限幅在 dispatch 内统一做
+                tool_ms = (time.monotonic() - _tool_t0) * 1000
+                latency["tool_ms"] += tool_ms
+                tool_times.append((name, tool_ms))
                 tools_used.append(name)
                 content = json.dumps(result, ensure_ascii=False, default=str)
                 if self._privacy:  # ⑦ 工具结果回填历史前替换成 token
@@ -295,5 +310,7 @@ class Agent:
                     "content": content,
                 })
         answer = "[单轮工具调用已达上限 %d 次,强制停止]" % MAX_TOOL_ROUNDS
-        self._log_ask(user_input, answer, ask_usage, tools_used, compacted_this_ask)
+        latency["total_ms"] = (time.monotonic() - _t0) * 1000
+        self._log_ask(user_input, answer, ask_usage, tools_used,
+                      compacted_this_ask, latency, tool_times)
         return answer

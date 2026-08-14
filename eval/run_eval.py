@@ -355,6 +355,48 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_cost_budget_layer() -> int:
+    """离线:成本/延迟预算 —— 百分位统计正确 + budget violation 检出(阻断语义)。"""
+    from agent_metrics import aggregate
+    with tempfile.TemporaryDirectory() as td:
+        log = Path(td) / "runs.jsonl"
+        # 5 条日志:总延迟 100/200/300/400/5000;token 一超一不超
+        import csv as _csv
+        lines = []
+        for i, (ms, toks) in enumerate([(100, 1000), (200, 1000), (300, 1000),
+                                        (400, 1000), (5000, 90000)]):
+            lines.append(json.dumps({
+                "ts": "t%d" % i, "model": "m", "question": "q", "answer": "a",
+                "tool_rounds": 1, "tools_used": ["rule_eval"], "api_calls": 1,
+                "tokens": {"prompt": toks, "completion": 10, "cache_hit": 0,
+                           "cache_miss": 10},
+                "latency_ms": {"total_ms": ms, "llm_ms": ms * 0.8,
+                               "tool_ms": ms * 0.1},
+                "tool_latency_ms": [["rule_eval", ms * 0.1]],
+                "budget_compacted": False}))
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        rep = aggregate(log, {"per_case_token_budget": 50000,
+                              "per_case_latency_ms": 1000})
+        lat = rep["latency_ms"]["total"]
+        checks = [
+            ("百分位:p50=300 / p95=5000 / p99=5000(5 样本)",
+             lat["p50"] == 300.0 and lat["p95"] == 5000.0
+             and lat["p99"] == 5000.0),
+            ("均/峰:avg=1200 / max=5000", lat["avg"] == 1200.0
+             and lat["max"] == 5000.0),
+            ("工具延迟聚合:rule_eval=600ms(五条之和)", abs(
+                rep["tool_latency_ms"]["rule_eval"] - 600.0) < 0.1),
+            ("预算违规:延迟 1 条 + token 1 条,分类正确",
+             len(rep["budget_violations"]) == 2
+             and sorted(v["kind"] for v in rep["budget_violations"])
+             == ["latency_budget", "token_budget"]),
+        ]
+        clean = aggregate(log, {"per_case_token_budget": 999999,
+                                "per_case_latency_ms": 999999})
+        checks.append(("预算放宽后零违规", clean["budget_violations"] == []))
+        return _report("成本/延迟预算(离线)", checks)
+
+
 def run_scenario_matrix_layer() -> int:
     """离线:Agent Safety Benchmark 场景矩阵 —— 分类法合法、禁用工具字段
     合规、场景覆盖统计(harness 级场景标记为参数化而非用例驱动)。"""
@@ -2331,7 +2373,7 @@ def run_cost_layer() -> int:
     # 策略生命周期纪律并入后上调至 4050;回放纪律并入后上调至 4150;
     # Job 模型纪律并入后上调至 4300;权限纪律并入后上调至 4450;
     # 特征健康纪律并入后上调至 4550;决策血缘纪律并入后上调至 4650;
-    # 事故治理纪律并入后上调至 4750。
+    # 事故治理纪律并入后上调至 4750;成本纪律并入后上调至 4800。
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
     # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000;
     # Job 四件套后 58 工具上调至 29000;特征健康/血缘/事故后 66 工具上调
@@ -2341,8 +2383,8 @@ def run_cost_layer() -> int:
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
          s["schemas_chars"] <= 33000),
-        ("system prompt <= 4750 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 4750),
+        ("system prompt <= 4800 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 4800),
     ])
 
 
@@ -2487,6 +2529,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_lineage_layer)
     failures += _layer(run_incident_layer)
     failures += _layer(run_scenario_matrix_layer)
+    failures += _layer(run_cost_budget_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)
