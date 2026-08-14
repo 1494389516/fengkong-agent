@@ -92,6 +92,8 @@ def tool_result_sizes():
                               "to": "validated"}),
         ("strategy_rollback", {"strategy_name": "s", "version": "1",
                                "reason": "x"}),
+        ("strategy_replay", {"strategy_name": "s", "version": "1"}),
+        ("strategy_shadow", {"strategy_name": "s", "version": "1"}),
         ("data_health_check", {}),
         ("mismatch_queue", {}),
         ("mismatch_resolve", {"key": "nonexistent:0", "cause": "other"}),

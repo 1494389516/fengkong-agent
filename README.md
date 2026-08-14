@@ -318,6 +318,12 @@ challenger→champion 必须人审批(approval_id 进记录,champion 同时只�
 策略注册表是治理元数据,不参与判定 —— 判定仍由 policy 版本表 + 引擎
 适配器负责。
 
+**反事实回放(strategy_replay / strategy_shadow)**:把历史事件在候选策略
+的阈值覆盖下重跑,与当前策略对比(改变数/误伤·漏放·成本增量)。明确
+`what-if != 生产决策`:回放只在本函数内覆盖阈值并必然恢复,不写
+pending/audit/mismatch 队列、不触碰策略;shadow 结果落盘 out/shadow/ 供
+离线评审。这是事故复盘与调参论证的反事实底座。
+
 ## 环境变量
 
 | 变量 | 作用 |

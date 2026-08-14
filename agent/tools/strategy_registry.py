@@ -379,3 +379,150 @@ def apply_strategy_rollback(action: Dict, decided_by: str) -> Dict:
     _save(items)
     return {"strategy_name": entry["strategy_name"], "version": entry["version"],
             "status": "rollback"}
+
+
+# ---------------------------------------------------------------------------
+# 策略回放 / 影子演练(反事实):历史事件在"候选策略阈值"下重跑一遍,
+# 与当前策略对比。铁律:what-if != 生产决策 —— 覆盖只在本函数内生效并
+# 必然恢复,不写 pending/audit/mismatch 队列,不触碰策略与名单。
+# ---------------------------------------------------------------------------
+
+def _replay_against(entry: Dict, uids: List[str]) -> Dict:
+    """在 entry 的阈值覆盖下重放全部事件,返回与当前策略的对比。"""
+    from . import policy
+    from .backtest import account_verdicts
+    from .datasource import load_events, load_labels
+
+    events = load_events()
+    labels = load_labels()
+    target = uids or sorted(labels.keys())
+    prev = policy.set_overrides(entry["thresholds"])
+    try:
+        new_v = account_verdicts(target, events, use_current_policy=True)
+    finally:
+        policy.restore_overrides(prev)
+    base_v = account_verdicts(target, events, use_current_policy=True)
+
+    order_sum: Dict[str, float] = {}
+    for e in events:
+        if e["type"] == "order" and e.get("amount") is not None and e["uid"] in target:
+            order_sum[e["uid"]] = order_sum.get(e["uid"], 0.0) + e["amount"]
+
+    def flagged(v: Dict[str, Dict]) -> set:
+        return {u for u, x in v.items() if x["predicted"] in ("review", "reject")}
+
+    def fp_fn(v: Dict[str, Dict]):
+        f = flagged(v)
+        fp = sum(1 for u in f if labels.get(u, {}).get("label") == "normal")
+        fn = sum(1 for u in target
+                 if u not in f and labels.get(u, {}).get("label") == "fraud")
+        return fp, fn
+
+    base_flag, new_flag = flagged(base_v), flagged(new_v)
+    fp_base, fn_base = fp_fn(base_v)
+    fp_new, fn_new = fp_fn(new_v)
+    changes = [{"uid": u, "old_action": base_v[u]["predicted"],
+                "new_action": new_v[u]["predicted"]}
+               for u in target if base_v[u]["predicted"] != new_v[u]["predicted"]]
+    cost_delta = (sum(order_sum.get(u, 0.0) for u in new_flag - base_flag)
+                  - sum(order_sum.get(u, 0.0) for u in base_flag - new_flag))
+    return {
+        "what_if": True,
+        "note": "反事实回放:what-if != 生产决策;未写 pending/audit/mismatch/策略",
+        "compared": len(target),
+        "changed_count": len(changes),
+        "change_rate": round(len(changes) / len(target), 4) if target else 0.0,
+        "false_positive_delta": fp_new - fp_base,
+        "false_negative_delta": fn_new - fn_base,
+        "cost_delta": round(cost_delta, 2),
+        "changes": changes[:20],
+        "dataset_fingerprint": entry.get("dataset_fingerprint"),
+        "thresholds_used": entry["thresholds"],
+    }
+
+
+def _require_replayable(name: str, version: str) -> Dict:
+    """取可回放的策略(validated/shadow/active),draft 拒绝。"""
+    entry = _find(_load(), name, version)
+    if entry is None:
+        return {"error": "策略未登记: %s %s" % (name, version)}
+    if entry["status"] == "draft":
+        return {"error": "draft 未过校验门禁,不可回放(先 strategy_validate)"}
+    return entry
+
+
+@tool(
+    name="strategy_replay",
+    description=(
+        "反事实回放:把历史事件在候选策略版本的阈值覆盖下重跑,与当前策略"
+        "对比(改变数/改变率/误伤增量/漏放增量/成本增量)。明确:what-if 不"
+        "等于生产决策,不写 pending/audit/mismatch/策略。可传 uids 限定账号"
+        "范围;model_version 仅作血缘记录(骨架中模型未接入判定)。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "strategy_name": {"type": "string", "description": "策略名"},
+            "version": {"type": "string", "description": "版本号"},
+            "uids": {"type": "array", "items": {"type": "string"},
+                     "description": "限定账号(可空=全部已标注账号)"},
+            "model_version": {"type": "string",
+                              "description": "模型血缘记录 \"name:version\"(可空)"},
+        },
+        "required": ["strategy_name", "version"],
+    },
+)
+def strategy_replay(strategy_name: str, version: str,
+                    uids: List[str] = None, model_version: str = ""):
+    entry = _require_replayable(strategy_name, version)
+    if "error" in entry:
+        return entry
+    if model_version:
+        items = _load_model_registry()
+        if ":" not in model_version or tuple(model_version.rsplit(":", 1)) \
+                not in {(m["name"], m["version"]) for m in items}:
+            return {"error": "model_version 未登记: %s" % model_version}
+    out = _replay_against(entry, list(uids) if uids else [])
+    out["strategy"] = "%s %s" % (strategy_name, version)
+    out["model_version"] = model_version or None
+    return out
+
+
+@tool(
+    name="strategy_shadow",
+    description=(
+        "影子演练:同 strategy_replay(反事实对比),并把结果落盘到 out/shadow/"
+        "(带指纹与时间戳),返回路径与摘要 —— 供离线评审与归档,绝不进生产。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "strategy_name": {"type": "string", "description": "策略名"},
+            "version": {"type": "string", "description": "版本号"},
+            "uids": {"type": "array", "items": {"type": "string"},
+                     "description": "限定账号(可空)"},
+            "model_version": {"type": "string",
+                              "description": "模型血缘记录(可空)"},
+        },
+        "required": ["strategy_name", "version"],
+    },
+)
+def strategy_shadow(strategy_name: str, version: str,
+                    uids: List[str] = None, model_version: str = ""):
+    entry = _require_replayable(strategy_name, version)
+    if "error" in entry:
+        return entry
+    out = _replay_against(entry, list(uids) if uids else [])
+    out["strategy"] = "%s %s" % (strategy_name, version)
+    out["model_version"] = model_version or None
+    out["created_at"] = _now_iso()
+    from pathlib import Path
+    shadow_dir = (Path(__file__).resolve().parent.parent.parent
+                  / "out" / "shadow")
+    shadow_dir.mkdir(parents=True, exist_ok=True)
+    path = shadow_dir / ("%s-%s.json" % (strategy_name, version))
+    path.write_text(json.dumps(out, ensure_ascii=False, indent=1),
+                    encoding="utf-8")
+    return {"shadow_path": str(path), **{k: out[k] for k in
+            ("what_if", "changed_count", "change_rate", "cost_delta",
+             "compared", "created_at")}}

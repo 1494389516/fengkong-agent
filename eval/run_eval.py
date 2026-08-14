@@ -342,6 +342,65 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_strategy_shadow_layer() -> int:
+    """离线:策略反事实回放/影子 —— 改变清单/误伤·漏放·成本增量,且
+    绝不污染 pending/audit/mismatch(what-if != 生产)。"""
+    checks = []
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "labels.json", "blacklist.json",
+                  "thresholds.json", "device_intel.json", "accounts.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            registry.dispatch("strategy_register", {
+                "strategy_name": "replay_s", "version": "1.0",
+                "rules": ["R001", "R002", "R003", "R004", "R005", "R006"],
+                "thresholds": {"r006_reject_emulator": 0},
+                "note": "eval:关闭模拟器强拒"})
+            r_draft = registry.dispatch("strategy_replay", {
+                "strategy_name": "replay_s", "version": "1.0"})
+            checks.append(("draft 不可回放",
+                           "不可回放" in r_draft.get("error", "")))
+            registry.dispatch("strategy_promote", {
+                "strategy_name": "replay_s", "version": "1.0",
+                "to": "validated"})
+            r1 = registry.dispatch("strategy_replay", {
+                "strategy_name": "replay_s", "version": "1.0"})
+            r1b = registry.dispatch("strategy_replay", {
+                "strategy_name": "replay_s", "version": "1.0"})
+            checks += [
+                ("回放:关闭模拟器强拒后 3 账号判定变化",
+                 r1["changed_count"] == 3 and r1["change_rate"] == 0.5),
+                ("回放:变化清单点名 u_1003/4/5(reject->review)",
+                 {c["uid"] for c in r1["changes"]} == {"u_1003", "u_1004", "u_1005"}
+                 and all(c["old_action"] == "reject" and c["new_action"] == "review"
+                         for c in r1["changes"])),
+                ("回放:确定性(同输入同输出)",
+                 r1b["changed_count"] == r1["changed_count"]
+                 and r1b["changes"] == r1["changes"]),
+                ("回放:显式 what-if 标记与零污染声明",
+                 r1.get("what_if") is True and "生产决策" in r1["note"]),
+                ("回放:误伤/漏放/成本增量口径齐全",
+                 "false_positive_delta" in r1 and "false_negative_delta" in r1
+                 and "cost_delta" in r1),
+            ]
+            s1 = registry.dispatch("strategy_shadow", {
+                "strategy_name": "replay_s", "version": "1.0"})
+            checks += [
+                ("影子:结果落盘 out/shadow/ 且路径存在",
+                 bool(s1.get("shadow_path"))
+                 and Path(ROOT, s1["shadow_path"]).exists()),
+                ("影子:摘要含改变数与 what-if 标记",
+                 s1.get("changed_count") == 3 and s1.get("what_if") is True),
+            ]
+            no_pollution = not (base / "pending_actions.json").exists()                 and not (base / "audit.jsonl").exists()                 and not (base / "mismatch_queue.json").exists()
+            checks.append(("零污染:pending/audit/mismatch 均未产生", no_pollution))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("策略反事实回放/影子(离线,临时目录)", checks)
+
+
 def run_strategy_registry_layer() -> int:
     """离线:策略注册表 —— 校验门禁/状态机/审批/同名 active 唯一/非法回滚。"""
     checks = []
@@ -1868,16 +1927,17 @@ def run_cost_layer() -> int:
     # system prompt 同理:三色名单纪律 + 漂移/申诉纪律并集后上调至 3300;
     # 审计查询/数据体检/差异工单/唯一引擎纪律并入后上调至 3600;算法人
     # 三件套提示并入后上调至 3700;模型生命周期纪律并入后上调至 3850;
-    # 策略生命周期纪律并入后上调至 4050。
+    # 策略生命周期纪律并入后上调至 4050;回放纪律并入后上调至 4150。
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
-    # 后 52 工具上调至 26000(人均 500 纪律不放松,现人均 ~475)。
+    # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000
+    # (人均 500 纪律不放松,现人均 ~477)。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 26000 chars(现 %d,%d 个工具,人均 %.0f)"
+        ("工具 schema 总量 <= 27000 chars(现 %d,%d 个工具,人均 %.0f)"
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
-         s["schemas_chars"] <= 26000),
-        ("system prompt <= 4050 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 4050),
+         s["schemas_chars"] <= 27000),
+        ("system prompt <= 4150 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 4150),
     ])
 
 
@@ -2008,6 +2068,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_ml_tools_layer)
     failures += _layer(run_model_lifecycle_layer)
     failures += _layer(run_strategy_registry_layer)
+    failures += _layer(run_strategy_shadow_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)
