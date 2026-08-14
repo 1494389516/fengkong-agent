@@ -39,9 +39,14 @@ _STATE_FILES = ("events_sample.json", "decisions_log.json", "thresholds.json",
 
 def _state_key():
     # 键必须含数据集路径:FK_DATA_DIR 切换后若各文件 mtime 恰好相同,
-    # 纯 mtime 元组会把另一个数据集的对账结果当缓存命中吐回来
+    # 纯 mtime 元组会把另一个数据集的对账结果当缓存命中吐回来;
+    # 还必须含引擎模式:FK_ENGINE_DRYRUN_URL 的切换会改变 rule_eval 的
+    # 判定来源(引擎 vs 本地备份),数据没动但结论源变了,陈旧缓存会吐出
+    # 与当前通道不符的信任判定。
+    import os
+    from ..engine import DRYRUN_URL_ENV
     base = data_dir()
-    out = [str(base)]
+    out = [str(base), "engine:" + (os.environ.get(DRYRUN_URL_ENV) or "local")]
     for name in _STATE_FILES:
         p = base / name
         out.append(p.stat().st_mtime_ns if p.exists() else 0)
@@ -212,16 +217,15 @@ def _update_mismatch_queue(mismatches) -> Dict[str, int]:
 @tool(
     name="mismatch_queue",
     description=(
-        "查询对账差异工单(consistency_check 的闭环):open=待排查,resolved=已销单"
-        "(带根因分类),stale=对账恢复自动销单。返回统计与明细,按开单时间倒序。"
-        "销单用 mismatch_resolve。"
+        "查询对账差异工单:open=待排查 / resolved=已销单(带根因分类)/ "
+        "stale=对账恢复自动销单。返回统计与明细,销单用 mismatch_resolve。"
     ),
     parameters={
         "type": "object",
         "properties": {
             "status": {"type": "string", "enum": list(QUEUE_STATES) + [""],
-                       "description": "可选:只列某状态,空=全部"},
-            "limit": {"type": "integer", "description": "最多返回条数,默认 20,最大 100"},
+                       "description": "可选:按状态过滤"},
+            "limit": {"type": "integer", "description": "最多返回条数"},
         },
     },
 )
@@ -239,15 +243,13 @@ def mismatch_queue(status: str = "", limit: int = 20):
 @tool(
     name="mismatch_resolve",
     description=(
-        "销单:对一条对账差异工单记录根因分类与处置说明,状态置 resolved。"
-        "cause 取值:policy_sync_lag(阈值未同步)/ sim_bug(本地模拟实现差异)/ "
-        "data_lag(数据时间错位)/ known_diff(已知可接受差异)/ other。"
-        "若修复无效、差异复发,对账会自动把工单重开为 open。"
+        "销单:给一条对账差异工单记根因分类与说明。cause 取 policy_sync_lag/"
+        "sim_bug/data_lag/known_diff/other;修复无效复发时对账会自动重开。"
     ),
     parameters={
         "type": "object",
         "properties": {
-            "key": {"type": "string", "description": "工单键 uid:ts(见 mismatch_queue 返回)"},
+            "key": {"type": "string", "description": "工单键 uid:ts"},
             "cause": {"type": "string", "enum": list(QUEUE_CAUSES),
                       "description": "差异根因分类"},
             "note": {"type": "string", "description": "处置说明,写入工单"},

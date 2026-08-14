@@ -72,6 +72,11 @@ def tool_result_sizes():
         ("chart_account_timeline", {"uid": uid_hot}),
         ("chart_cohort_features", {}),
         ("chart_threshold_sweep", {"param": "r002_min_events"}),
+        ("audit_query", {"kind": "blacklist_add"}),
+        ("data_health_check", {}),
+        ("mismatch_queue", {}),
+        ("mismatch_resolve", {"key": "nonexistent:0", "cause": "other"}),
+        ("engine_status", {}),
     ]
     rows = []
     for name, call_args in calls:

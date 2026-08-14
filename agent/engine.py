@@ -19,6 +19,11 @@ R001-R006 实现只是"接真实引擎之前"的骨架替身与"引擎不可用"
 {"action": "pass|review|reject", "hits": [...], "policy_version": ...,
  "rule_count_evaluated": ...};返回结构与本项目 rule_eval 兼容,并附
 source 字段供结论溯源。
+
+部署注意:远程 dry-run 是逐事件 HTTP。reconcile 用它是对账所需(与决策
+日志同源比对);但 backtest/scan 这类全量工具会在配置引擎后放大为每账号
+一次调用(250 账号 = 250 次 HTTP),真实环境应提供批量 dry-run 接口或
+由调度平台承接,勿让同步工具循环逐条打在线网关。
 """
 import json
 import os

@@ -318,10 +318,9 @@ def _check_jsonl(path: Path, f: _File) -> None:
 @tool(
     name="data_health_check",
     description=(
-        "对当前数据集做一次体检:各 JSON 文件的解析/必填字段/枚举合法性/重复记录/"
-        "时间乱序/主档与标签覆盖率,以及 jsonl 的损坏行。issue 分 error(硬伤,"
-        "会让规则静默失真)与 warning(软伤,需人工确认)两档。换数据集或接真实"
-        "数据后应先跑本工具再下任何结论。"
+        "对当前数据集做体检:JSON 解析/必填字段/枚举/重复/乱序/主档覆盖率/"
+        "jsonl 损坏行。issue 分 error(硬伤,让规则静默失真)/warning(软伤)。"
+        "换数据集/接真实数据后应先跑本工具再下结论。"
     ),
     parameters={"type": "object", "properties": {}},
 )

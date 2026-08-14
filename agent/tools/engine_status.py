@@ -14,9 +14,8 @@ from ..engine import engine_status as _engine_status
 @tool(
     name="engine_status",
     description=(
-        "查询当前规则判定的来源通道:remote_engine(生产引擎 dry-run,本地实现"
-        "仅为降级备份)/ local_rules(未接引擎,骨架本地实现)。下结论前应确认"
-        "判定来源;rule_eval 返回带 source 字段与之对应。"
+        "查询规则判定的来源通道:remote_engine(生产引擎 dry-run)/ "
+        "local_rules(本地备份)。rule_eval 返回的 source 字段与之对应。"
     ),
     parameters={"type": "object", "properties": {}},
 )

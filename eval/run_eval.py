@@ -1427,12 +1427,16 @@ def run_cost_layer() -> int:
     # 预算随工具数走但人均 500 不放松:31 工具期 15600;值班台(duty_ops,
     # 三操作合一)加入后 32 工具上调至 16000,当前人均 ~491 —— 合并优先于
     # 抬预算的纪律仍然有效,duty_ops 本身就是三合一的产物。
-    # system prompt 同理:三色名单纪律 + 漂移/申诉纪律并集后上调至 3300。
+    # system prompt 同理:三色名单纪律 + 漂移/申诉纪律并集后上调至 3300;
+    # 审计查询/数据体检/差异工单/唯一引擎纪律并入后上调至 3600(四块都是
+    # 结论溯源纪律,砍它们省的 token 会以错误结论的形式翻倍还给业务)。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 16000 chars(现 %d,%d 个工具)"
-         % (s["schemas_chars"], s["tool_count"]), s["schemas_chars"] <= 16000),
-        ("system prompt <= 3300 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 3300),
+        ("工具 schema 总量 <= 18000 chars(现 %d,%d 个工具,人均 %.0f)"
+         % (s["schemas_chars"], s["tool_count"],
+            s["schemas_chars"] / max(s["tool_count"], 1)),
+         s["schemas_chars"] <= 18000),
+        ("system prompt <= 3600 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 3600),
     ])
 
 

@@ -56,27 +56,25 @@ def _matches(rec: Dict[str, Any], kind: Optional[str], decision: Optional[str],
 @tool(
     name="audit_query",
     description=(
-        "查询审批审计日志:谁在什么时候批准/驳回了什么、依据是什么。"
-        "覆盖名单写入/移除(blacklist_add/blacklist_remove)、阈值变更"
-        "(threshold_change)、申诉决议(appeal_resolve)四类记录,按时间倒序。"
-        "每条记录带 decided_by(审批人身份,SSO/CLI)。"
-        "配合 policy_history 可完整回溯'当时为什么这么判、谁批的'类问题。"
+        "查询审批审计日志(谁、何时、批了什么),按时间倒序。可按 kind/"
+        "decision/dimension/value/decided_by 过滤。配合 policy_history 回溯"
+        "'当时为什么这么判'。"
     ),
     parameters={
         "type": "object",
         "properties": {
             "kind": {"type": "string", "enum": list(KINDS),
-                     "description": "可选:只看某一类审批"},
+                     "description": "可选:只看某类审批"},
             "decision": {"type": "string", "enum": list(DECISIONS),
                          "description": "可选:只看批准(approve)或驳回(deny)"},
             "dimension": {"type": "string", "enum": ["uid", "ip", "device_id"],
-                          "description": "可选:名单类记录按维度过滤"},
+                          "description": "可选:名单记录按维度过滤"},
             "value": {"type": "string",
-                      "description": "可选:名单类记录按具体值过滤"},
+                      "description": "可选:名单记录按值过滤"},
             "decided_by": {"type": "string",
-                           "description": "可选:按审批人身份过滤"},
+                           "description": "可选:按审批人过滤"},
             "limit": {"type": "integer",
-                      "description": "最多返回条数,默认 20,最大 100"},
+                      "description": "最多返回条数"},
         },
     },
 )

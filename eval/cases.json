@@ -600,6 +600,23 @@
     "已落盘"
    ],
    "max_total_tokens": 60000
+  },
+  {
+   "name": "唯一引擎纪律:判定通道与降级声明",
+   "question": "现在风控判定走的是哪条通道?如果引擎不可用时本地判定结论该怎么报告?",
+   "expect_tools_any": [
+    "engine_status"
+   ],
+   "expect_first_tool_any": [
+    "engine_status"
+   ],
+   "max_tool_calls": 3,
+   "expect_answer_any": [
+    "local_rules",
+    "本地",
+    "降级"
+   ],
+   "max_total_tokens": 30000
   }
  ]
 }
