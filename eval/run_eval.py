@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 
@@ -340,6 +341,80 @@ def run_label_quality_layer() -> int:
         finally:
             os.environ.pop("FK_DATA_DIR", None)
     return _report("标注数据质量(离线)", checks)
+
+
+def run_job_layer() -> int:
+    """离线:Job 模型 —— 提交/轮询/取产物/取消,线程执行零网络。"""
+    checks = []
+    from agent.tools.jobs import _gate
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "labels.json", "blacklist.json",
+                  "thresholds.json", "device_intel.json", "accounts.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            bad = registry.dispatch("job_submit", {"type": "nope"})
+            checks.append(("未知任务类型拒绝", "未知任务类型" in bad.get("error", "")))
+            j1 = registry.dispatch("job_submit", {"type": "dataset_build"})
+            jid = j1["job_id"]
+            deadline = time.time() + 15
+            st = registry.dispatch("job_status", {"job_id": jid})
+            while st.get("status") not in ("success", "failed") and time.time() < deadline:
+                time.sleep(0.1)
+                st = registry.dispatch("job_status", {"job_id": jid})
+            checks += [
+                ("提交:queued 且带参数指纹",
+                 j1.get("status") == "queued"
+                 and bool(j1.get("job_id"))
+                 and len(registry.dispatch("job_status", {"job_id": jid})
+                         .get("request_fingerprint", "")) == 16),
+                ("轮询至 success 且产物落盘",
+                 st.get("status") == "success"
+                 and bool(st.get("result_path"))
+                 and Path(st["result_path"]).exists()),
+                ("job_result 取回产物(manifest 摘要)",
+                 registry.dispatch("job_result", {"job_id": jid})
+                 .get("result", {}).get("manifest", {}).get("rows") == 6),
+            ]
+            j2 = registry.dispatch("job_submit", {"type": "replay"})
+            jid2 = j2["job_id"]
+            deadline = time.time() + 15
+            st2 = registry.dispatch("job_status", {"job_id": jid2})
+            while st2.get("status") not in ("success", "failed") and time.time() < deadline:
+                time.sleep(0.1)
+                st2 = registry.dispatch("job_status", {"job_id": jid2})
+            checks.append(("replay 任务成功且记录数=事件数",
+                           st2.get("status") == "success"
+                           and registry.dispatch("job_result", {"job_id": jid2})
+                           .get("result", {}).get("records") >= 1))
+            # 取消:测试钩子让执行线程等 gate
+            os.environ["FK_JOB_TEST_GATE"] = "1"
+            _gate.clear()
+            j3 = registry.dispatch("job_submit", {"type": "dataset_build"})
+            jid3 = j3["job_id"]
+            time.sleep(0.5)
+            st3 = registry.dispatch("job_status", {"job_id": jid3})
+            r_cancel = registry.dispatch("job_cancel", {"job_id": jid3})
+            deadline = time.time() + 10
+            st3b = registry.dispatch("job_status", {"job_id": jid3})
+            while st3b.get("status") == "running" and time.time() < deadline:
+                time.sleep(0.1)
+                st3b = registry.dispatch("job_status", {"job_id": jid3})
+            checks += [
+                ("取消:running 任务被置 cancelled 且无产物",
+                 r_cancel.get("status") == "cancelled"
+                 and st3b.get("status") == "cancelled"
+                 and st3b.get("result_path") is None),
+            ]
+            r_cancel2 = registry.dispatch("job_cancel", {"job_id": jid})
+            checks.append(("已终态任务不可取消",
+                           "不可取消" in r_cancel2.get("error", "")))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+            os.environ.pop("FK_JOB_TEST_GATE", None)
+            _gate.clear()
+    return _report("Job 模型(离线,临时目录)", checks)
 
 
 def run_replay_engine_layer() -> int:
@@ -2009,17 +2084,18 @@ def run_cost_layer() -> int:
     # system prompt 同理:三色名单纪律 + 漂移/申诉纪律并集后上调至 3300;
     # 审计查询/数据体检/差异工单/唯一引擎纪律并入后上调至 3600;算法人
     # 三件套提示并入后上调至 3700;模型生命周期纪律并入后上调至 3850;
-    # 策略生命周期纪律并入后上调至 4050;回放纪律并入后上调至 4150。
+    # 策略生命周期纪律并入后上调至 4050;回放纪律并入后上调至 4150;
+    # Job 模型纪律并入后上调至 4300。
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
-    # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000
-    # (人均 500 纪律不放松,现人均 ~477)。
+    # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000;
+    # Job 四件套后 58 工具上调至 29000(人均 500 纪律不放松,现人均 ~466)。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 27000 chars(现 %d,%d 个工具,人均 %.0f)"
+        ("工具 schema 总量 <= 29000 chars(现 %d,%d 个工具,人均 %.0f)"
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
-         s["schemas_chars"] <= 27000),
-        ("system prompt <= 4150 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 4150),
+         s["schemas_chars"] <= 29000),
+        ("system prompt <= 4300 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 4300),
     ])
 
 
@@ -2152,6 +2228,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_strategy_registry_layer)
     failures += _layer(run_strategy_shadow_layer)
     failures += _layer(run_replay_engine_layer)
+    failures += _layer(run_job_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)

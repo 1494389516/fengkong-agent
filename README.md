@@ -324,6 +324,13 @@ challenger→champion 必须人审批(approval_id 进记录,champion 同时只�
 pending/audit/mismatch 队列、不触碰策略;shadow 结果落盘 out/shadow/ 供
 离线评审。这是事故复盘与调参论证的反事实底座。
 
+### 13. 异步任务模型(Job)
+
+重任务(backtest/scan/replay/model_eval/dataset_build)包上异步壳:
+`job_submit` → `job_status` 轮询 → `job_result` 取产物,`job_cancel`
+取消。实现是线程 + 磁盘 job store(out/jobs/,含参数指纹),同步 API
+全部保留;切 Celery/Redis/Kafka 时只换调度层,工具接口与 job 契约不动。
+
 ## 环境变量
 
 | 变量 | 作用 |
