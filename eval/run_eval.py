@@ -70,7 +70,18 @@ def _report(title: str, checks) -> int:
 
 def load_cases():
     with open(Path(__file__).parent / "cases.json", encoding="utf-8") as f:
-        return json.load(f)
+        cases = json.load(f)
+    # 案例库版本纪律:agent 用例必须有稳定唯一 case_id(改内容不换 id,
+    # 删除只置状态不物理删,变更记录进 cases_changelog.md)
+    seen = set()
+    for c in cases.get("agent_cases", []):
+        cid = c.get("case_id")
+        if not cid or not isinstance(cid, str):
+            raise ValueError("agent 用例缺 case_id: %r" % c.get("name"))
+        if cid in seen:
+            raise ValueError("agent 用例 case_id 重复: %s" % cid)
+        seen.add(cid)
+    return cases
 
 
 def run_rule_layer(cases) -> int:
