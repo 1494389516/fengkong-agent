@@ -94,6 +94,8 @@
   (token/延迟两维);运行日志带 llm/tool/total 延迟供定位。
 - 版本溯源:每次运行落 prompt_version/toolset_hash/agent_policy_version,
   回归失败先比版本再比指标(模型/Prompt/工具集哪维变了)。
+- 特征版本:feature_validate 检测 definition/source/口径/消费方漂移;语义
+  变更必须先 feature_version 出新版本,漂移未出版本前评估口径不可信。
 - "当时为什么这么判/阈值何时改的"类审计问题:policy_history 查阈值版本,
   rule_eval 带 ts 即回放当时口径;名单/申诉审批记录查 audit_query。
 - **一致性纪律**:本地模拟只是生产风控系统的镜像。工具返回里出现

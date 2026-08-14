@@ -13,8 +13,11 @@
                   ("领券后短时下单")必须用窗口口径,全历史计数会把一周前
                   的正常行为算进来造成误伤 —— R003 曾在生成大样本上实锤过。
 """
+import hashlib
+import json
 import statistics
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from . import tool
@@ -332,3 +335,141 @@ def feature_catalog():
         "stale_keys": stale,
         "checked_against_uid": hot,
     }
+
+
+# ---------------------------------------------------------------------------
+# 特征版本化(P1-1):语义变更必须产生新版本。
+# definition_hash = 目录条目内容哈希;feature_validate 检测四类漂移
+# (definition / source / point_in_time / consumers),漂移未出新版本前,
+# 评估与建模的口径一致性不可信。
+# ---------------------------------------------------------------------------
+
+FEATURE_VERSIONS_FILE = "feature_versions.json"
+
+
+def _feature_definition_hash(entry: Dict) -> str:
+    blob = json.dumps(entry, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _version_path():
+    return data_dir() / FEATURE_VERSIONS_FILE
+
+
+def _load_versions() -> List[Dict]:
+    p = _version_path()
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+
+
+def _save_versions(items: List[Dict]) -> None:
+    _version_path().write_text(json.dumps(items, ensure_ascii=False, indent=1),
+                               encoding="utf-8")
+
+
+def _entry_meta(c: Dict) -> Dict:
+    return {"definition_hash": _feature_definition_hash(c),
+            "source": c["source"], "point_in_time": c["point_in_time"],
+            "consumers": c["consumers"], "group": c["group"]}
+
+
+def _diff_entries(old_entries: Dict, new_entries: Dict) -> Dict:
+    drift = {"definition": [], "source": [], "pit": [], "consumers": []}
+    for key, c in new_entries.items():
+        o = old_entries.get(key)
+        if o is None:
+            drift["definition"].append(key + "(新增)")
+            continue
+        if c["definition_hash"] != o["definition_hash"]:
+            drift["definition"].append(key)
+        if c["source"] != o["source"]:
+            drift["source"].append(key)
+        if c["point_in_time"] != o["point_in_time"]:
+            drift["pit"].append(key)
+        if c["consumers"] != o["consumers"]:
+            drift["consumers"].append(key)
+    for key in old_entries:
+        if key not in new_entries:
+            drift["definition"].append(key + "(删除)")
+    return drift
+
+
+@tool(
+    name="feature_version",
+    description=(
+        "给当前特征目录打版本快照:每条特征带 definition_hash/来源/口径/消费方。"
+        "特征语义变更必须先出新版本(feature_validate 会指出漂移),否则回测/"
+        "建模口径与历史不一致。"
+    ),
+    parameters={"type": "object", "properties": {}},
+)
+def feature_version():
+    versions = _load_versions()
+    snap = {"version": FEATURE_CATALOG_VERSION,
+            "taken_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "entries": {c["key"]: _entry_meta(c) for c in FEATURE_CATALOG}}
+    dup = [v for v in versions if v["version"] == snap["version"]]
+    if dup:
+        return {"status": "already_snapshotted", "version": snap["version"],
+                "entry_count": len(snap["entries"]),
+                "note": "该版本已有快照(同版本不重复打)"}
+    versions.append(snap)
+    _save_versions(versions)
+    return {"status": "snapshotted", "version": snap["version"],
+            "entry_count": len(snap["entries"])}
+
+
+@tool(
+    name="feature_validate",
+    description=(
+        "当前特征目录 vs 最近快照:四类漂移检测(definition/source/point_in_time/"
+        "consumers)。valid=false 表示语义已变但未出新版本 —— 必须先 "
+        "feature_version。无快照时返回 valid=true 并提示先建基线。"
+    ),
+    parameters={"type": "object", "properties": {}},
+)
+def feature_validate():
+    versions = _load_versions()
+    if not versions:
+        return {"valid": True, "note": "无快照(首次):先 feature_version 建立基线",
+                "drift": {"definition": [], "source": [], "pit": [], "consumers": []},
+                "latest_version": None, "current_version": FEATURE_CATALOG_VERSION}
+    latest = versions[-1]
+    drift = _diff_entries(latest["entries"],
+                          {c["key"]: _entry_meta(c) for c in FEATURE_CATALOG})
+    return {"valid": not any(drift.values()), "drift": drift,
+            "latest_version": latest["version"],
+            "current_version": FEATURE_CATALOG_VERSION,
+            "note": "漂移未出新版本前,评估/建模口径与历史不一致;先 feature_version"}
+
+
+@tool(
+    name="feature_diff",
+    description=(
+        "对比两个特征版本快照(version_b 缺省=当前目录):输出四类漂移明细。"
+        "特征演进审计用。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "version_a": {"type": "string", "description": "旧版本号(快照 version)"},
+            "version_b": {"type": "string",
+                          "description": "新版本号(可空=当前目录)"},
+        },
+        "required": ["version_a"],
+    },
+)
+def feature_diff(version_a: str, version_b: str = ""):
+    versions = _load_versions()
+    a = next((v for v in versions if v["version"] == version_a), None)
+    if a is None:
+        return {"error": "版本不存在: %s(可用: %s)" % (
+            version_a, [v["version"] for v in versions] or "无,先 feature_version")}
+    if version_b:
+        b = next((v for v in versions if v["version"] == version_b), None)
+        if b is None:
+            return {"error": "版本不存在: %s" % version_b}
+        entries_b = b["entries"]
+    else:
+        entries_b = {c["key"]: _entry_meta(c) for c in FEATURE_CATALOG}
+    return {"version_a": version_a, "version_b": version_b or "(当前)",
+            "drift": _diff_entries(a["entries"], entries_b)}

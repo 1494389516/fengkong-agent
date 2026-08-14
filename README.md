@@ -387,6 +387,13 @@ schema 集哈希)/ `agent_policy_version`(system + 上下文工程参数哈希)+
 名。回归失败先比版本再比指标 —— "AG-017 失败到底是模型变了、Prompt 变了,
 还是工具集变了"从此有答案。
 
+### 21. 特征版本化
+
+特征目录每条带 `definition_hash`(内容哈希)。`feature_version` 打版本
+快照;`feature_validate` 检测四类漂移(definition / source / point_in_time /
+consumers);`feature_diff` 对比任意两版本。**特征语义变更必须产生新版本**,
+漂移未出版本前,回测/建模口径与历史不一致,不可信。
+
 ## 环境变量
 
 | 变量 | 作用 |

@@ -355,6 +355,64 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_feature_version_layer() -> int:
+    """离线:特征版本化 —— 快照/漂移检测/版本对比,篡改快照必须被抓出。"""
+    checks = []
+    from agent.tools.featurelib import (FEATURE_CATALOG_VERSION,
+                                        _entry_meta, _feature_definition_hash)
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        (base / "events_sample.json").write_text("[]", encoding="utf-8")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            v0 = registry.dispatch("feature_validate", {})
+            checks.append(("无快照:提示先建基线且不误报漂移",
+                           v0.get("valid") is True and "首次" in v0["note"]))
+            r1 = registry.dispatch("feature_version", {})
+            checks += [
+                ("快照:版本=当前目录指纹",
+                 r1.get("status") == "snapshotted"
+                 and r1.get("version") == FEATURE_CATALOG_VERSION),
+                ("快照:同版本重复打被拒",
+                 registry.dispatch("feature_version", {})
+                 .get("status") == "already_snapshotted"),
+            ]
+            v1 = registry.dispatch("feature_validate", {})
+            checks.append(("未漂移:valid=true 且四类漂移全空",
+                           v1.get("valid") is True
+                           and all(not x for x in v1["drift"].values())))
+            # 篡改快照:把 coupon_claims 的 consumers 改掉 → consumers 漂移
+            vp = base / "feature_versions.json"
+            versions = json.loads(vp.read_text(encoding="utf-8"))
+            versions[0]["entries"]["coupon_claims"]["consumers"] = "被篡改"
+            versions[0]["entries"]["coupon_claims"]["definition_hash"] = "tampered"
+            vp.write_text(json.dumps(versions, ensure_ascii=False), encoding="utf-8")
+            v2 = registry.dispatch("feature_validate", {})
+            checks += [
+                ("篡改快照:definition+consumers 漂移被抓出",
+                 v2.get("valid") is False
+                 and "coupon_claims" in v2["drift"]["definition"]
+                 and "coupon_claims" in v2["drift"]["consumers"]),
+            ]
+            # 修回定义哈希 → 只剩 consumers 漂移(definition 恢复)
+            versions[0]["entries"]["coupon_claims"]["definition_hash"] = \
+                _feature_definition_hash(
+                    [c for c in __import__("agent.tools.featurelib",
+                                           fromlist=["FEATURE_CATALOG"])
+                     .FEATURE_CATALOG if c["key"] == "coupon_claims"][0])
+            vp.write_text(json.dumps(versions, ensure_ascii=False), encoding="utf-8")
+            v3 = registry.dispatch("feature_validate", {})
+            checks.append(("修复定义后:仅 consumers 漂移",
+                           "coupon_claims" in v3["drift"]["consumers"]
+                           and "coupon_claims" not in v3["drift"]["definition"]))
+            d = registry.dispatch("feature_diff", {"version_a": FEATURE_CATALOG_VERSION})
+            checks.append(("feature_diff 检出与当前目录的差异",
+                           "coupon_claims" in d["drift"]["consumers"]))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("特征版本化(离线,临时目录)", checks)
+
+
 def run_versioning_layer() -> int:
     """离线:版本化 —— 三指纹确定性 + 运行日志携带版本字段。"""
     from agent.versioning import (agent_policy_version, snapshot, system_hash,
@@ -2418,18 +2476,18 @@ def run_cost_layer() -> int:
     # Job 模型纪律并入后上调至 4300;权限纪律并入后上调至 4450;
     # 特征健康纪律并入后上调至 4550;决策血缘纪律并入后上调至 4650;
     # 事故治理纪律并入后上调至 4750;成本纪律并入后上调至 4800;
-    # 版本溯源纪律并入后上调至 4900。
+    # 版本溯源纪律并入后上调至 4900;特征版本化纪律并入后上调至 5000。
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
     # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000;
     # Job 四件套后 58 工具上调至 29000;特征健康/血缘/事故后 66 工具上调
-    # 至 33000(人均 500 纪律不放松,现人均 ~464)。
+    # 至 33000;特征版本化三件套后 69 工具上调至 34500(人均 500 纪律不放松)。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 33000 chars(现 %d,%d 个工具,人均 %.0f)"
+        ("工具 schema 总量 <= 34500 chars(现 %d,%d 个工具,人均 %.0f)"
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
-         s["schemas_chars"] <= 33000),
-        ("system prompt <= 4900 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 4900),
+         s["schemas_chars"] <= 34500),
+        ("system prompt <= 5000 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 5000),
     ])
 
 
@@ -2576,6 +2634,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_scenario_matrix_layer)
     failures += _layer(run_cost_budget_layer)
     failures += _layer(run_versioning_layer)
+    failures += _layer(run_feature_version_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)
