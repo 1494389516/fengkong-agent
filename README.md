@@ -357,6 +357,14 @@ pending/audit/mismatch 队列、不触碰策略;shadow 结果落盘 out/shadow/ 
 `decision_explain` 实时解释(只读不落库),`decision_trace` 查已落库记录,
 查不到显式标注"未落库"。回放不写血缘(反事实零副作用纪律)。
 
+### 17. 事故工作流(Incident)
+
+对账差异/漂移/数据问题从"队列"升级为"事故治理":`incident_open`(类型 +
+证据绑定:decision_ids / mismatch_ids 必须存在于对账工单)→
+`incident_update`(进展)→ `incident_resolve`(根因 + 处置)。事故类型:
+engine_mismatch / feature_drift / label_drift / model_drift /
+policy_sync_lag / agent_policy_violation / data_quality / latency。
+
 ## 环境变量
 
 | 变量 | 作用 |

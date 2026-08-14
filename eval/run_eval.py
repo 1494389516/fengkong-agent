@@ -343,6 +343,67 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_incident_layer() -> int:
+    """离线:事故工作流 —— 开单/绑定证据/进展/结案/过滤/非法操作。"""
+    checks = []
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            # 造一个对账工单,验证 incident 的证据绑定
+            (base / "mismatch_queue.json").write_text(json.dumps([
+                {"key": "u_1009:1784106480", "status": "open",
+                 "opened_at": "2026-08-01T00:00:00Z"}], ensure_ascii=False))
+            r_bad = registry.dispatch("incident_open", {
+                "incident_type": "engine_mismatch", "summary": "x",
+                "mismatch_ids": ["ghost:1"]})
+            checks.append(("证据绑定:不存在的 mismatch 键拒绝开单",
+                           "不在对账工单" in r_bad.get("error", "")))
+            r1 = registry.dispatch("incident_open", {
+                "incident_type": "engine_mismatch", "summary": "对账差异 3 条",
+                "mismatch_ids": ["u_1009:1784106480"],
+                "decision_ids": ["dec_1"], "owner": "ops"})
+            checks += [
+                ("开单:返回 id 且绑定证据",
+                 r1.get("status") == "open" and r1.get("incident_id") == 1),
+                ("非法类型拒绝",
+                 "未知事故类型" in registry.dispatch("incident_open", {
+                     "incident_type": "nope", "summary": "x"}).get("error", "")),
+            ]
+            iid = r1["incident_id"]
+            r2 = registry.dispatch("incident_update", {
+                "incident_id": iid, "note": "定位到阈值同步滞后"})
+            lst = registry.dispatch("incident_list", {})
+            checks += [
+                ("进展追加", r2.get("status") == "updated"
+                 and lst["incidents"][0]["notes"][0]["note"] == "定位到阈值同步滞后"),
+                ("列表:状态/类型过滤",
+                 registry.dispatch("incident_list", {"status": "open"})["count"] == 1
+                 and registry.dispatch("incident_list", {
+                     "incident_type": "latency"})["count"] == 0),
+            ]
+            r3 = registry.dispatch("incident_resolve", {
+                "incident_id": iid, "root_cause": "policy_sync_lag",
+                "resolution": "已同步阈值", "owner": "ops"})
+            lst2 = registry.dispatch("incident_list", {"status": "resolved"})
+            checks += [
+                ("结案:记录根因/处置/时间",
+                 r3.get("status") == "resolved"
+                 and lst2["incidents"][0]["root_cause"] == "policy_sync_lag"
+                 and bool(lst2["incidents"][0]["resolved_at"])),
+                ("重复结案拒绝",
+                 "不可重复结案" in registry.dispatch("incident_resolve", {
+                     "incident_id": iid, "root_cause": "x", "resolution": "y"})
+                 .get("error", "")),
+                ("结案后不可追加",
+                 "已结案" in registry.dispatch("incident_update", {
+                     "incident_id": iid, "note": "x"}).get("error", "")),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("事故工作流(离线,临时目录)", checks)
+
+
 def run_lineage_layer() -> int:
     """离线:决策血缘 —— 实时解释字段完整、落库-追踪闭环、未落库显式标注。"""
     checks = []
@@ -2232,17 +2293,19 @@ def run_cost_layer() -> int:
     # 三件套提示并入后上调至 3700;模型生命周期纪律并入后上调至 3850;
     # 策略生命周期纪律并入后上调至 4050;回放纪律并入后上调至 4150;
     # Job 模型纪律并入后上调至 4300;权限纪律并入后上调至 4450;
-    # 特征健康纪律并入后上调至 4550;决策血缘纪律并入后上调至 4650。
+    # 特征健康纪律并入后上调至 4550;决策血缘纪律并入后上调至 4650;
+    # 事故治理纪律并入后上调至 4750。
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
     # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000;
-    # Job 四件套后 58 工具上调至 29000(人均 500 纪律不放松,现人均 ~466)。
+    # Job 四件套后 58 工具上调至 29000;特征健康/血缘/事故后 66 工具上调
+    # 至 33000(人均 500 纪律不放松,现人均 ~464)。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 29000 chars(现 %d,%d 个工具,人均 %.0f)"
+        ("工具 schema 总量 <= 33000 chars(现 %d,%d 个工具,人均 %.0f)"
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
-         s["schemas_chars"] <= 29000),
-        ("system prompt <= 4650 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 4650),
+         s["schemas_chars"] <= 33000),
+        ("system prompt <= 4750 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 4750),
     ])
 
 
@@ -2379,6 +2442,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_capability_layer)
     failures += _layer(run_feature_health_layer)
     failures += _layer(run_lineage_layer)
+    failures += _layer(run_incident_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)

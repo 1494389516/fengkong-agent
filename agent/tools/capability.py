@@ -52,6 +52,9 @@ CAPABILITY = {
     "mismatch_resolve": "execute",
     "job_submit": "execute",
     "job_cancel": "execute",
+    "incident_open": "execute",
+    "incident_update": "execute",
+    "incident_resolve": "execute",
     # 模拟/回放(零写)
     "rule_backtest": "simulate",
     "shadow_backtest": "simulate",
