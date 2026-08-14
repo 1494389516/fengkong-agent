@@ -17,6 +17,7 @@ import statistics
 from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
+from . import tool
 from .datasource import data_dir, load_events
 
 
@@ -243,3 +244,86 @@ def batch_features():
     feats["shared_device_accounts"] = (
         df["device_id"].map(dev_accounts).groupby(df["uid"]).max().astype(int))
     return feats
+
+
+# ---------------------------------------------------------------------------
+# 特征目录:把"系统里已经有什么特征"从代码散落信息变成可查询的声明式清单。
+# 算法人挑建模特征的第一步是看现成特征 —— 每个条目声明:键、口径、来源函数、
+# 消费方。目录与真实输出的一致性由 feature_catalog 工具自检(防目录腐化)。
+# ---------------------------------------------------------------------------
+
+FEATURE_CATALOG = [
+    {"key": "event_count", "group": "活跃度", "source": "account_features",
+     "definition": "事件总数(可加窗口)", "point_in_time": "是",
+     "consumers": "人群基线/百分位/群体对比"},
+    {"key": "distinct_ip", "group": "资源", "source": "account_features",
+     "definition": "去重 IP 数(轮换信号)", "point_in_time": "是",
+     "consumers": "R002 升级条件/基线"},
+    {"key": "distinct_device", "group": "资源", "source": "account_features",
+     "definition": "去重设备数(多开信号)", "point_in_time": "是",
+     "consumers": "基线/群体对比"},
+    {"key": "coupon_claims", "group": "行为", "source": "account_features",
+     "definition": "领券次数(可加窗口)", "point_in_time": "是",
+     "consumers": "R002/R003(套现窗口)/基线"},
+    {"key": "order_count", "group": "行为", "source": "account_features",
+     "definition": "下单次数(可加窗口)", "point_in_time": "是",
+     "consumers": "监控"},
+    {"key": "order_amount_max", "group": "金额", "source": "account_features",
+     "definition": "最大订单金额", "point_in_time": "是",
+     "consumers": "基线/特征区分度(risk)"},
+    {"key": "order_amount_sum", "group": "金额", "source": "account_features",
+     "definition": "订单金额合计", "point_in_time": "是",
+     "consumers": "决策经济学(止损/漏放口径)"},
+    {"key": "min_gap_seconds", "group": "节奏", "source": "account_features",
+     "definition": "全事件最短间隔(秒)", "point_in_time": "是",
+     "consumers": "基线/百分位"},
+    {"key": "coupon_min_gap_seconds", "group": "节奏", "source": "account_features",
+     "definition": "领券最短间隔(秒)", "point_in_time": "是",
+     "consumers": "R002 核心条件"},
+    {"key": "span_seconds", "group": "节奏", "source": "account_features",
+     "definition": "首末事件跨度(秒)", "point_in_time": "是",
+     "consumers": "监控(账龄内活跃周期)"},
+    {"key": "sessions", "group": "路径", "source": "behavior_paths",
+     "definition": "会话数(相邻事件间隔 > session_gap 切分)", "point_in_time": "是",
+     "consumers": "监控(路径信号)"},
+    {"key": "login_to_order_min_seconds", "group": "路径", "source": "behavior_paths",
+     "definition": "登录到下单最短间隔(盗号'直奔下单'信号)", "point_in_time": "是",
+     "consumers": "监控(盗号信号)"},
+    {"key": "shared_device_accounts", "group": "团伙", "source": "accounts_per(device_id)",
+     "definition": "其设备中被最多账号共用的那台的账号数", "point_in_time": "是",
+     "consumers": "关联图谱/群体对比"},
+    {"key": "shared_ip_accounts", "group": "团伙", "source": "accounts_per(ip)",
+     "definition": "其 IP 中被最多账号共用的那个的账号数", "point_in_time": "是",
+     "consumers": "关联图谱(强边判定)"},
+]
+
+
+@tool(
+    name="feature_catalog",
+    description=(
+        "特征清单:列出系统里已实现的全部特征(键/口径/来源函数/消费方),"
+        "并自检目录与真实输出的一致性。算法人挑建模特征、查'现在有什么特征"
+        "可用'的第一入口。"
+    ),
+    parameters={"type": "object", "properties": {}},
+)
+def feature_catalog():
+    # 一致性自检:每个 account_features 来源的条目,其键必须出现在最活跃
+    # 账号的真实输出里 —— 目录腐化(改了实现没改目录)在这里暴露。
+    uids = sorted({e["uid"] for e in load_events()})
+    hot = max(uids, key=lambda u: sum(1 for e in load_events() if e["uid"] == u),
+              default=None)
+    real = account_features(hot) if hot else {}
+    stale = [c["key"] for c in FEATURE_CATALOG if c["source"] == "account_features"
+             and hot and c["key"] not in real]
+    groups = {}
+    for c in FEATURE_CATALOG:
+        groups.setdefault(c["group"], []).append(c["key"])
+    return {
+        "feature_count": len(FEATURE_CATALOG),
+        "groups": groups,
+        "features": FEATURE_CATALOG,
+        "consistency_ok": not stale,
+        "stale_keys": stale,
+        "checked_against_uid": hot,
+    }
