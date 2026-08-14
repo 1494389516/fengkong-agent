@@ -409,6 +409,18 @@ reject/review/pass 率变化)、`agent_behavior_drift`(agent 运行日志的工�
 分布 PSI / 平均轮数 / 平均 tokens / 缓存命中率 —— agent 自身行为漂移的
 早期信号)、`model_drift`(champion 评估指标留痕与趋势)。
 
+### 24. 反馈管道 / 实验注册表 / 生产就绪门禁(P2)
+
+- **反馈管道 feedback_pipeline**:申诉/对账差异/事故/标签冲突统一聚合为治理
+  候选清单 —— 自动产 candidate 可以,自动进生产不行,候选必须人审;
+- **实验注册表 experiments**:策略/模型/阈值/prompt/工具裁剪 A/B 的登记与
+  报告(control/treatment/人群/指标/决策标准/数据集指纹),内置
+  `tool_pruning_ab` 预设(TOOL_KEEP_TURNS=2 vs 不裁剪,README 已知边界的
+  待实测项从此有实验载体);
+- **生产就绪门禁 production_readiness_check**:11 项检查(data/feature/label
+  健康、模型与策略状态、引擎通道、评估报告、审计、安全、降级、预算)输出
+  READY / BLOCKED / DEGRADED,已接入 `/health`。
+
 ## 环境变量
 
 | 变量 | 作用 |

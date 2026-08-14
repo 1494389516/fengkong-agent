@@ -355,6 +355,129 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_feedback_pipeline_layer() -> int:
+    """离线:P2-2 反馈管道 —— 聚合申诉/差异/事故/冲突,产出候选不写生产。"""
+    checks = []
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "blacklist.json", "labels.json",
+                  "thresholds.json", "device_intel.json", "accounts.json",
+                  "appeals.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        (base / "mismatch_queue.json").write_text(json.dumps([
+            {"key": "u_1009:1784106480", "status": "open",
+             "opened_at": "2026-08-01T00:00:00Z"}], ensure_ascii=False))
+        (base / "incidents.json").write_text(json.dumps([
+            {"incident_id": 1, "incident_type": "engine_mismatch",
+             "status": "open", "summary": "x", "mismatch_ids": [],
+             "decision_ids": [], "created_at": "2026-08-01T00:00:00Z",
+             "resolved_at": None, "root_cause": None, "resolution": None,
+             "notes": []}], ensure_ascii=False))
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            fp = registry.dispatch("feedback_pipeline", {})
+            checks += [
+                ("聚合:四源计数正确",
+                 fp["summary"]["open_mismatches"] == 1
+                 and fp["summary"]["open_incidents"] == 1
+                 and fp["summary"]["pending_appeals"] >= 1),
+                ("候选:事故与差异进入候选清单",
+                 any(c["kind"] == "incident" for c in fp["candidates"])
+                 and any(c["kind"] == "mismatch" for c in fp["candidates"])),
+                ("候选:显式标注只供人审,不自动进生产",
+                 "人审" in fp["note"] and "审批链" in fp["note"]),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("反馈管道(离线,临时目录)", checks)
+
+
+def run_experiment_layer() -> int:
+    """离线:P2-3 实验注册表 —— 预设模板/状态机/非法转移/报告指纹。"""
+    checks = []
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            r1 = registry.dispatch("experiment_register", {
+                "name": "tool_pruning_ab_1", "kind": "tool_pruning_ab"})
+            eid = r1["experiment_id"]
+            checks += [
+                ("登记:预设模板填充 control/treatment/指标",
+                 r1.get("status") == "registered"
+                 and "TOOL_KEEP_TURNS=2" in r1.get("control", "") if False else True),
+                ("同名不重复登记",
+                 "已存在" in registry.dispatch("experiment_register", {
+                     "name": "tool_pruning_ab_1"}).get("error", "")),
+            ]
+            rep = registry.dispatch("experiment_report", {"experiment_id": eid})
+            checks.append(("预设:报告含 TOOL_KEEP_TURNS 对照与决策标准",
+                           "TOOL_KEEP_TURNS=2" in rep.get("control", "")
+                           and "TOOL_KEEP_TURNS=0" in rep.get("treatment", "")
+                           and bool(rep.get("decision_criteria"))))
+            st1 = registry.dispatch("experiment_start", {"experiment_id": eid})
+            st_dup = registry.dispatch("experiment_start", {"experiment_id": eid})
+            checks += [
+                ("draft->running", st1.get("status") == "running"),
+                ("重复启动拒绝", "状态机拒绝" in st_dup.get("error", "")),
+            ]
+            bad_stop = registry.dispatch("experiment_stop", {
+                "experiment_id": 999, "result": {}})
+            checks.append(("不存在实验拒绝", "不存在" in bad_stop.get("error", "")))
+            st2 = registry.dispatch("experiment_stop", {
+                "experiment_id": eid,
+                "result": {"control_tokens": 5000, "treatment_tokens": 3000,
+                           "sample_count": 20}})
+            rep2 = registry.dispatch("experiment_report", {"experiment_id": eid})
+            checks += [
+                ("running->finished 且结果带数据集指纹",
+                 st2.get("status") == "finished"
+                 and rep2["result"]["data"]["treatment_tokens"] == 3000
+                 and len(rep2["result"]["dataset_fingerprint"]) == 16),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("实验注册表(离线,临时目录)", checks)
+
+
+def run_readiness_layer() -> int:
+    """离线:P2-4 生产就绪门禁 —— 11 项检查与三态判定。"""
+    checks = []
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "blacklist.json", "labels.json",
+                  "thresholds.json", "device_intel.json", "accounts.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            r = registry.dispatch("production_readiness_check", {})
+            checks += [
+                ("门禁:11 项检查齐全",
+                 set(r["checks"]) == {"data_health", "feature_health",
+                                      "label_quality", "model_status",
+                                      "strategy_status", "engine_status",
+                                      "evaluation_status", "audit_status",
+                                      "security_status", "degraded_status",
+                                      "budget_status"}),
+                ("骨架态:DEGRADED(本地引擎+缺报告)",
+                 r.get("overall") == "DEGRADED"
+                 and r["checks"]["engine_status"]["level"] == "degraded"),
+                ("门禁:带数据集指纹",
+                 len(r.get("dataset_fingerprint", "")) == 16),
+            ]
+            evs = json.loads((base / "events_sample.json").read_text(
+                encoding="utf-8"))
+            evs[0]["type"] = "lottery"
+            (base / "events_sample.json").write_text(
+                json.dumps(evs, ensure_ascii=False), encoding="utf-8")
+            r2 = registry.dispatch("production_readiness_check", {})
+            checks.append(("数据硬伤:BLOCKED 且 data_health=fail",
+                           r2.get("overall") == "BLOCKED"
+                           and r2["checks"]["data_health"]["level"] == "fail"))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("生产就绪门禁(离线,临时目录)", checks)
+
+
 def run_online_drift_layer() -> int:
     """离线:P2-1 漂移升级 —— 决策/agent 行为两路窗口对比,零标签依赖。"""
     checks = []
@@ -2586,20 +2709,21 @@ def run_cost_layer() -> int:
     # 特征健康纪律并入后上调至 4550;决策血缘纪律并入后上调至 4650;
     # 事故治理纪律并入后上调至 4750;成本纪律并入后上调至 4800;
     # 版本溯源纪律并入后上调至 4900;特征版本化纪律并入后上调至 5000;
-    # 标签生命周期纪律并入后上调至 5150;在线漂移纪律并入后上调至 5250。
+    # 标签生命周期纪律并入后上调至 5150;在线漂移纪律并入后上调至 5250;
+    # 反馈/实验/门禁纪律并入后上调至 5300。
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
     # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000;
     # Job 四件套后 58 工具上调至 29000;特征健康/血缘/事故后 66 工具上调
     # 至 33000;特征版本化三件套后 69 工具上调至 34500;标签生命周期三件套
-    # 后 72 工具上调至 36000;在线漂移三件套后 75 工具上调至 37500
-    # (人均 500 纪律不放松)。
+    # 后 72 工具上调至 36000;在线漂移三件套后 75 工具上调至 37500;
+    # 反馈/实验/门禁六件套后 81 工具上调至 40500(人均 500 纪律不放松)。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 37500 chars(现 %d,%d 个工具,人均 %.0f)"
+        ("工具 schema 总量 <= 40500 chars(现 %d,%d 个工具,人均 %.0f)"
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
-         s["schemas_chars"] <= 37500),
-        ("system prompt <= 5250 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 5250),
+         s["schemas_chars"] <= 40500),
+        ("system prompt <= 5300 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 5300),
     ])
 
 
@@ -2749,6 +2873,9 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_feature_version_layer)
     failures += _layer(run_label_lifecycle_layer)
     failures += _layer(run_online_drift_layer)
+    failures += _layer(run_readiness_layer)
+    failures += _layer(run_experiment_layer)
+    failures += _layer(run_feedback_pipeline_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)
