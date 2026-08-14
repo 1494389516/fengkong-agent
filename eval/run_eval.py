@@ -295,6 +295,52 @@ def run_health_layer() -> int:
     return _report("数据体检(离线)", checks)
 
 
+def run_label_quality_layer() -> int:
+    """离线:标注数据质量 —— 枚举规范性硬校验 + 规则-标签冲突清单只报不改。"""
+    from label_quality import check_labels
+
+    r = check_labels()
+    checks = [
+        ("现有标注无枚举违规", r["violations"] == [] and r["ok"] is True),
+        ("现有标注与规则判定无冲突(基线干净)", r["conflicts"] == []),
+        ("覆盖率口径可用(未标注清单为 uid 列表)",
+         isinstance(r["unlabeled"], list) and r["labels"] >= 1),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        (base / "events_sample.json").write_text(json.dumps([]),
+                                                 encoding="utf-8")
+        (base / "blacklist.json").write_text("[]", encoding="utf-8")
+        (base / "labels.json").write_text(
+            json.dumps({"u_bad": {"label": "suspicious"}}, ensure_ascii=False),
+            encoding="utf-8")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            r2 = check_labels()
+            checks.append(("坏枚举标签被检出并判硬错误",
+                           r2["violations"] == ["u_bad"] and r2["ok"] is False))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "blacklist.json", "accounts.json",
+                  "device_intel.json", "thresholds.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        (base / "labels.json").write_text(
+            json.dumps({"u_1002": {"label": "normal", "note": "eval:注入冲突"}},
+                       ensure_ascii=False), encoding="utf-8")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            r3 = check_labels()
+            checks.append(("规则-标签冲突被列出且不自动改",
+                           any(c["uid"] == "u_1002"
+                               and c["type"] == "label_normal_but_flagged"
+                               for c in r3["conflicts"])))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("标注数据质量(离线)", checks)
+
+
 def run_agent_log_layer() -> int:
     """离线:agent 运行日志落盘与指标聚合 —— 用脚本化假 client 走真实
     ask() 循环(零网络),断言日志字段与聚合数字。"""
@@ -1584,6 +1630,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_graph_layer)
     failures += _layer(run_actions_layer)
     failures += _layer(run_health_layer)
+    failures += _layer(run_label_quality_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)
