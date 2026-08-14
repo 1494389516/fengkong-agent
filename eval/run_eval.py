@@ -47,14 +47,24 @@ from agent.tools.rules import rule_eval  # noqa: E402
 from agent.tools.scan import scan_all  # noqa: E402
 
 
+_RECORDS: list = []
+
+
 def _report(title: str, checks) -> int:
-    """打印一组 (名称, 是否通过) 检查,返回失败数。"""
+    """打印一组 (名称, 是否通过) 检查,返回失败数;同时把结构化结果
+    收进 _RECORDS 供报告生成器(report.py)沉淀 —— 评估结果不能只活在
+    终端里,要能追溯"哪版代码 + 哪批数据 + 哪些断言"。
+    """
     print("\n== %s ==" % title)
     failures = 0
+    detail = []
     for name, ok in checks:
         if not ok:
             failures += 1
         print("  [%s] %s" % ("PASS" if ok else "FAIL", name))
+        detail.append({"name": name, "ok": bool(ok)})
+    _RECORDS.append({"layer": title, "checks": detail,
+                     "failures": failures, "total": len(detail)})
     return failures
 
 
@@ -1536,46 +1546,92 @@ def run_agent_layers(cases) -> int:
     return failures
 
 
+def _layer(fn, *args, **kwargs) -> int:
+    """执行一个评估层并兜底异常:单层因环境/依赖问题抛异常时,把异常
+    记为一条失败继续跑完 —— 评估可以失败,但报告必须照样出。"""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        name = getattr(fn, "__name__", "layer")
+        print("  [EXCEPTION] %s: %s: %s" % (name, type(e).__name__, e))
+        _RECORDS.append({"layer": "%s(异常)" % name,
+                         "checks": [{"name": "%s: %s" % (type(e).__name__, e),
+                                     "ok": False}],
+                         "failures": 1, "total": 1})
+        return 1
+
+
+def run_all(offline: bool = False) -> tuple:
+    """跑全部分层,返回 (失败数, 结构化记录)。main() 与 eval/report.py
+    共用同一入口,保证报告与终端结果永远来自同一次运行。"""
+    _RECORDS.clear()
+    cases = load_cases()
+    failures = _layer(run_rule_layer, cases["rule_cases"])
+    failures += _layer(run_backtest_layer, cases["backtest_checks"])
+    failures += _layer(run_monitor_layer, cases["monitor_cases"])
+    failures += _layer(run_scan_layer)
+    failures += _layer(run_graph_layer)
+    failures += _layer(run_actions_layer)
+    failures += _layer(run_health_layer)
+    failures += _layer(run_agent_log_layer)
+    failures += _layer(run_engine_layer)
+    failures += _layer(run_whitelist_layer)
+    failures += _layer(run_graylist_layer)
+    failures += _layer(run_policy_layer)
+    failures += _layer(run_governance_layer)
+    failures += _layer(run_shadow_layer)
+    failures += _layer(run_baseline_layer)
+    failures += _layer(run_intel_layer)
+    failures += _layer(run_profile_layer)
+    failures += _layer(run_reconcile_layer)
+    failures += _layer(run_mismatch_queue_layer)
+    failures += _layer(run_gen_layer)
+    failures += _layer(run_stats_layer)
+    failures += _layer(run_depth_layer)
+    failures += _layer(run_strategy_layer)
+    failures += _layer(run_serve_layer)
+    failures += _layer(run_privacy_layer)
+    failures += _layer(run_regression_layer)
+    failures += _layer(run_cost_layer)
+    chart_failures = _layer(run_chart_smoke)
+    failures += chart_failures
+    # 图表冒烟不走 _report,手工补一条记录(保持报告覆盖无盲区)
+    _RECORDS.append({"layer": "图表冒烟", "checks":
+                     [{"name": "三类图渲染落盘", "ok": chart_failures == 0}],
+                     "failures": chart_failures, "total": 1})
+    agent_note = ""
+    if offline:
+        agent_note = "offline 模式,跳过 agent 层"
+    elif not os.environ.get("DEEPSEEK_API_KEY"):
+        print("\n(未设置 DEEPSEEK_API_KEY,跳过第 2+3 层 agent 评估)")
+        agent_note = "未设置 DEEPSEEK_API_KEY,跳过 agent 层"
+    else:
+        agent_failures = _layer(run_agent_layers, cases["agent_cases"])
+        failures += agent_failures
+        _RECORDS.append({"layer": "agent 层(第 2+3 层,四维断言)",
+                         "checks": [], "failures": agent_failures,
+                         "total": len(cases["agent_cases"]),
+                         "note": "见上方逐案例打印(结论/取证轨迹/成本)"})
+        return failures, list(_RECORDS)
+    _RECORDS.append({"layer": "agent 层(第 2+3 层,四维断言)",
+                     "checks": [], "failures": 0, "total": 0,
+                     "note": agent_note})
+    return failures, list(_RECORDS)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="风控 agent 三层评估")
     ap.add_argument("--offline", action="store_true", help="只跑第 1 层规则评估,不调 API")
+    ap.add_argument("--report", metavar="PATH",
+                    help="额外把评估报告(markdown)写入指定路径")
     args = ap.parse_args()
-    cases = load_cases()
-    failures = run_rule_layer(cases["rule_cases"])
-    failures += run_backtest_layer(cases["backtest_checks"])
-    failures += run_monitor_layer(cases["monitor_cases"])
-    failures += run_scan_layer()
-    failures += run_graph_layer()
-    failures += run_actions_layer()
-    failures += run_health_layer()
-    failures += run_agent_log_layer()
-    failures += run_engine_layer()
-    failures += run_whitelist_layer()
-    failures += run_graylist_layer()
-    failures += run_policy_layer()
-    failures += run_governance_layer()
-    failures += run_shadow_layer()
-    failures += run_baseline_layer()
-    failures += run_intel_layer()
-    failures += run_profile_layer()
-    failures += run_reconcile_layer()
-    failures += run_mismatch_queue_layer()
-    failures += run_gen_layer()
-    failures += run_stats_layer()
-    failures += run_depth_layer()
-    failures += run_strategy_layer()
-    failures += run_serve_layer()
-    failures += run_privacy_layer()
-    failures += run_regression_layer()
-    failures += run_cost_layer()
-    failures += run_chart_smoke()
-    if args.offline:
-        pass
-    elif not os.environ.get("DEEPSEEK_API_KEY"):
-        print("\n(未设置 DEEPSEEK_API_KEY,跳过第 2+3 层 agent 评估)")
-    else:
-        failures += run_agent_layers(cases["agent_cases"])
+    failures, records = run_all(offline=args.offline)
     print("\n结果:%s" % ("全部通过" if failures == 0 else "%d 项失败" % failures))
+    if args.report:
+        from report import write_report
+        write_report(Path(args.report), records, offline=args.offline,
+                     failures=failures)
+        print("报告已写入: %s" % args.report)
     return 1 if failures else 0
 
 
