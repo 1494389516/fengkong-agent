@@ -14,7 +14,7 @@
 | `reports.json` | 客服工单 / 举报系统 |
 | `decisions_log.json` | 风控引擎决策日志(Kafka 落仓) |
 | `thresholds.json` | 风控配置中心的**只读镜像**(带同步时间戳与源版本号) |
-| `rules.rule_eval` 本地实现 | 引擎 dry-run / 试算接口(本地实现只做降级备份) |
+| `rules.rule_eval` 本地实现 | 引擎 dry-run / 试算接口(适配器已实现:配 `FK_ENGINE_DRYRUN_URL` 即切到引擎判定,本地实现只做降级备份;失败显式降级并打 degraded 标记,见 agent/engine.py) |
 | `actions` pending + CLI 审批 | 审批系统 / 飞书卡片(SSO 身份入审计库) |
 | `eval/` 离线断言 | CI 门禁(每次改动必跑) |
 | `eval` agent 层案例 | 上线回归集(改 prompt / 加工具必跑) |

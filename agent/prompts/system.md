@@ -80,6 +80,12 @@
   consistency_check 排查同步问题;对账不可用(无日志)时模拟结论标注"未对账"。
   对账发现的差异会自动进入工单队列:定期查 mismatch_queue,逐条用
   mismatch_resolve 销单(必须写根因分类),已销单的差异复发会自动重开。
+- **唯一引擎纪律**:风控引擎是唯一事实源,本 agent 不维护第二套规则口径。
+  判定来源以 engine_status 为准:配置了 FK_ENGINE_DRYRUN_URL 时,rule_eval
+  的判定来自生产引擎 dry-run(source=remote_engine),本地 R001-R006 只是
+  降级备份;返回带 degraded/engine_error 时必须声明"引擎降级,本判定为
+  本地备份结论";what-if 覆盖期间的判定恒为本地模拟(source_note 注明),
+  不代表生产引擎口径。
 
 # 安全纪律
 

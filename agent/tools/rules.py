@@ -65,6 +65,9 @@ def _hit(hits: List[Dict[str, str]], rule_id: str, reason: str, action: str) -> 
         "用当前最新阈值('现在会怎么判'),特征仍按事件时点。白名单命中降一档"
         "(hits 保留 original_action);黑白冲突返回 whitelist_conflict;"
         "灰名单+行为命中返回 gray_escalation_hint。"
+        "判定来源看返回的 source 字段:生产引擎 dry-run 优先(engine_status 查"
+        "当前通道),本地 R001-R006 只是降级备份;degraded=true 时必须声明"
+        "本判定为本地备份结论。"
     ),
     parameters={
         "type": "object",
@@ -91,6 +94,16 @@ def _hit(hits: List[Dict[str, str]], rule_id: str, reason: str, action: str) -> 
     },
 )
 def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
+    """规则试跑:判定唯一入口在 agent.engine —— 生产引擎 dry-run 优先,
+    本地实现是降级备份。返回带 source 字段(local_rules / remote_engine /
+    local_rules_fallback)。"""
+    from ..engine import evaluate_event
+    return evaluate_event(event, use_current_policy=use_current_policy)
+
+
+def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
+    """本地 R001-R006 实现 —— 骨架替身/降级备份,不是独立引擎。
+    公开判定入口是 agent.engine.evaluate_event(经上方的 rule_eval 工具)。"""
     hits: List[Dict[str, str]] = []
     uid = event.get("uid", "")
     ip = event.get("ip", "")

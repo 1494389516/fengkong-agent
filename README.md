@@ -303,6 +303,8 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 | `FK_PRIVACY=1` | 启用脱敏层(公有云部署红线) |
 | `FK_OPERATOR` | 审批人身份标识,写入审计日志 decided_by(接 SSO 后由网关注入,默认 cli) |
 | `FK_AGENT_RUN_LOG=1` | 每次 agent 问答落一行运行日志 out/agent_runs.jsonl(用 eval/agent_metrics.py 聚合运行指标) |
+| `FK_ENGINE_DRYRUN_URL` | 生产引擎 dry-run 试算端点:配置后 rule_eval 判定来自引擎(本地 R001-R006 自动降级为备份);调用失败显式降级并打 degraded 标记 |
+| `FK_ENGINE_DRYRUN_TIMEOUT` | dry-run 调用超时秒数,默认 10 |
 | `FK_TZ_OFFSET_HOURS` | 分桶业务时区偏移,默认 +8(UTC 切日会把凌晨攻击劈进两桶) |
 
 ## 已知边界(诚实声明)

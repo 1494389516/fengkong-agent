@@ -366,6 +366,75 @@ def run_agent_log_layer() -> int:
         ])
 
 
+def run_engine_layer() -> int:
+    """离线:引擎适配器 —— 默认本地、远程 dry-run 优先、失败显式降级、
+    what-if 覆盖强制本地(唯一引擎纪律的四条路径,传输打桩零网络)。"""
+    import agent.engine as engine
+    from agent.tools import policy
+
+    ev = {"uid": "u_1009", "ip": "203.0.113.66", "type": "order",
+          "amount": 4999.0}
+    checks = []
+
+    r = registry.dispatch("rule_eval", {"event": ev})
+    checks.append(("默认未接引擎:判定来自本地实现且结论 reject",
+                   r.get("source") == "local_rules" and r["action"] == "reject"))
+    st = registry.dispatch("engine_status", {})
+    checks.append(("engine_status 报告 local_rules", st.get("mode") == "local_rules"))
+
+    calls = []
+
+    def fake_post(url, payload):
+        calls.append(payload)
+        return {"action": "review", "policy_version": "engine-v42",
+                "hits": [{"rule_id": "R_ENGINE_1", "reason": "引擎规则",
+                          "action": "review"}]}
+
+    def boom(url, payload):
+        raise OSError("connection refused")
+
+    orig_post = engine._post_json
+    os.environ["FK_ENGINE_DRYRUN_URL"] = "http://fake-engine/dry-run?token=x"
+    try:
+        engine._post_json = fake_post
+        r2 = registry.dispatch("rule_eval",
+                               {"event": ev, "use_current_policy": True})
+        checks.append(("远程 dry-run 优先:source=remote_engine 且映射正确",
+                       r2.get("source") == "remote_engine"
+                       and r2["action"] == "review"
+                       and r2["hits"][0]["rule_id"] == "R_ENGINE_1"
+                       and r2["policy_version"] == "engine-v42"))
+        checks.append(("请求体透传事件与口径开关",
+                       bool(calls) and calls[0]["event"]["uid"] == "u_1009"
+                       and calls[0]["use_current_policy"] is True))
+        st2 = registry.dispatch("engine_status", {})
+        checks.append(("engine_status 报告 remote_engine 且不泄漏 query 凭据",
+                       st2.get("mode") == "remote_engine"
+                       and st2["url"] == "http://fake-engine/dry-run"))
+
+        engine._post_json = boom
+        r3 = registry.dispatch("rule_eval", {"event": ev})
+        checks.append(("引擎失败显式降级:degraded + engine_error + 本地结论",
+                       r3.get("source") == "local_rules_fallback"
+                       and r3.get("degraded") is True
+                       and bool(r3.get("engine_error"))
+                       and r3["action"] == "reject"))
+
+        engine._post_json = fake_post
+        policy._OVERRIDES.update({"r003_high_amount": 100})
+        try:
+            r4 = registry.dispatch("rule_eval", {"event": ev})
+            checks.append(("what-if 覆盖强制本地且注明原因",
+                           r4.get("source") == "local_rules"
+                           and bool(r4.get("source_note"))))
+        finally:
+            policy._OVERRIDES.clear()
+    finally:
+        engine._post_json = orig_post
+        os.environ.pop("FK_ENGINE_DRYRUN_URL", None)
+    return _report("引擎适配器(离线,打桩 dry-run)", checks)
+
+
 def run_gen_layer() -> int:
     """离线:生成器产出小规模数据集,回测指标须过下限。
     下限故意留了余量(生成含随机性,虽然种子固定,但规则阈值调整后指标会漂),
@@ -1476,6 +1545,7 @@ def main() -> int:
     failures += run_actions_layer()
     failures += run_health_layer()
     failures += run_agent_log_layer()
+    failures += run_engine_layer()
     failures += run_whitelist_layer()
     failures += run_graylist_layer()
     failures += run_policy_layer()

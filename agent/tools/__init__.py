@@ -112,6 +112,7 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
 # scan 依赖 backtest;graph 依赖 charts;actions 依赖 policy;calibrate 依赖
 # backtest/featurelib/policy/drift,放 drift 之后;risk/adversary/draft 依赖
 # backtest/drift/policy;feedback 依赖 backtest/reports,actions 惰性回调它;
-# graylist 依赖 backtest/blacklist/policy,放最后;audit/health 只依赖 datasource,顺序无关)
-from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, drift, calibrate, risk, adversary, draft, reports, feedback, ops, brief, profile, reconcile, graylist, audit, health  # noqa: E402,F401
+# graylist 依赖 backtest/blacklist/policy,放最后;audit/health/engine_status
+# 只依赖 datasource 或 engine,顺序无关)
+from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, drift, calibrate, risk, adversary, draft, reports, feedback, ops, brief, profile, reconcile, graylist, audit, health, engine_status  # noqa: E402,F401
 # intel 由 monitor/profile 传递导入即完成注册,无需在上一行重复列出
