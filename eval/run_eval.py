@@ -503,8 +503,11 @@ def run_agent_log_layer() -> int:
 
 
 def run_engine_layer() -> int:
-    """离线:引擎适配器 —— 默认本地、远程 dry-run 优先、失败显式降级、
-    what-if 覆盖强制本地(唯一引擎纪律的四条路径,传输打桩零网络)。"""
+    """离线:引擎适配器 —— 默认本地、远程优先、显式降级、覆盖强制本地、
+    批量判定一次 POST、鉴权头注入(打 urllib 桩,零网络,测真实传输函数)。"""
+    import json as _json
+    import urllib.request as _ur
+
     import agent.engine as engine
     from agent.tools import policy
 
@@ -520,19 +523,43 @@ def run_engine_layer() -> int:
 
     calls = []
 
-    def fake_post(url, payload):
-        calls.append(payload)
-        return {"action": "review", "policy_version": "engine-v42",
-                "hits": [{"rule_id": "R_ENGINE_1", "reason": "引擎规则",
-                          "action": "review"}]}
+    class _Resp:
+        def __init__(self, body):
+            self._b = body
 
-    def boom(url, payload):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return self._b
+
+    def fake_urlopen(req, timeout=None):
+        data = _json.loads(req.data.decode("utf-8"))
+        calls.append({"payload": data, "headers": dict(req.headers)})
+        if "events" in data:
+            body = _json.dumps({"decisions": [
+                {"action": "reject",
+                 "hits": [{"rule_id": "R_ENGINE_B", "reason": "引擎批量",
+                           "action": "reject"}]}
+                for _ in data["events"]]}).encode("utf-8")
+        else:
+            body = _json.dumps({"action": "review", "policy_version": "engine-v42",
+                                "hits": [{"rule_id": "R_ENGINE_1",
+                                          "reason": "引擎规则",
+                                          "action": "review"}]}).encode("utf-8")
+        return _Resp(body)
+
+    def boom(req, timeout=None):
         raise OSError("connection refused")
 
-    orig_post = engine._post_json
-    os.environ["FK_ENGINE_DRYRUN_URL"] = "http://fake-engine/dry-run?token=x"
+    orig_urlopen = _ur.urlopen
+    os.environ["FK_ENGINE_DRYRUN_URL"] = "http://fake-engine/dry-run"
+    os.environ["FK_ENGINE_DRYRUN_TOKEN"] = "tok123"
     try:
-        engine._post_json = fake_post
+        _ur.urlopen = fake_urlopen
         r2 = registry.dispatch("rule_eval",
                                {"event": ev, "use_current_policy": True})
         checks.append(("远程 dry-run 优先:source=remote_engine 且映射正确",
@@ -541,14 +568,16 @@ def run_engine_layer() -> int:
                        and r2["hits"][0]["rule_id"] == "R_ENGINE_1"
                        and r2["policy_version"] == "engine-v42"))
         checks.append(("请求体透传事件与口径开关",
-                       bool(calls) and calls[0]["event"]["uid"] == "u_1009"
-                       and calls[0]["use_current_policy"] is True))
+                       calls[-1]["payload"]["event"]["uid"] == "u_1009"
+                       and calls[-1]["payload"]["use_current_policy"] is True))
+        checks.append(("鉴权 token 注入 Authorization 头",
+                       calls[-1]["headers"].get("Authorization") == "Bearer tok123"))
         st2 = registry.dispatch("engine_status", {})
         checks.append(("engine_status 报告 remote_engine 且不泄漏 query 凭据",
                        st2.get("mode") == "remote_engine"
                        and st2["url"] == "http://fake-engine/dry-run"))
 
-        engine._post_json = boom
+        _ur.urlopen = boom
         r3 = registry.dispatch("rule_eval", {"event": ev})
         checks.append(("引擎失败显式降级:degraded + engine_error + 本地结论",
                        r3.get("source") == "local_rules_fallback"
@@ -556,7 +585,7 @@ def run_engine_layer() -> int:
                        and bool(r3.get("engine_error"))
                        and r3["action"] == "reject"))
 
-        engine._post_json = fake_post
+        _ur.urlopen = fake_urlopen
         policy._OVERRIDES.update({"r003_high_amount": 100})
         try:
             r4 = registry.dispatch("rule_eval", {"event": ev})
@@ -565,9 +594,29 @@ def run_engine_layer() -> int:
                            and bool(r4.get("source_note"))))
         finally:
             policy._OVERRIDES.clear()
+
+        from agent.tools.backtest import account_verdicts
+        from agent.tools.datasource import load_events
+        evs = load_events()
+        calls.clear()
+        verdicts = account_verdicts(["u_1001", "u_1002"], evs)
+        n_expected = sum(1 for e in evs if e["uid"] in ("u_1001", "u_1002"))
+        checks.append(("全量工具批量判定:一次 POST 覆盖该批全部事件",
+                       len(calls) == 1
+                       and len(calls[0]["payload"]["events"]) == n_expected
+                       and calls[0]["headers"].get("Authorization") == "Bearer tok123"))
+        checks.append(("批量判定:团伙账号取最重 reject",
+                       verdicts["u_1002"]["predicted"] == "reject"
+                       and "R_ENGINE_B" in verdicts["u_1002"]["rules"]))
+
+        _ur.urlopen = boom
+        verdicts2 = account_verdicts(["u_1001"], evs)
+        checks.append(("批量失败显式降级:仍出结论且不静默",
+                       verdicts2["u_1001"]["predicted"] in ("pass", "review", "reject")))
     finally:
-        engine._post_json = orig_post
+        _ur.urlopen = orig_urlopen
         os.environ.pop("FK_ENGINE_DRYRUN_URL", None)
+        os.environ.pop("FK_ENGINE_DRYRUN_TOKEN", None)
     return _report("引擎适配器(离线,打桩 dry-run)", checks)
 
 

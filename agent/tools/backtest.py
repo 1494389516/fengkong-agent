@@ -77,23 +77,34 @@ def account_verdicts(uids: Iterable[str], events: List[Dict],
                      use_current_policy: bool = True) -> Dict[str, Dict]:
     """逐账号跑规则集:账号内任一事件命中即记入,处置取最重。
     scan_all(全量巡检)与 backtest(指标回测)共用这一份口径。
+    判定统一经引擎适配器 evaluate_batch:远程模式下一次批量 dry-run
+    (全量工具绝不逐事件打在线网关),本地/覆盖/降级路径语义不变。
     use_current_policy=False 时逐事件回放当时生效的策略版本(as-of 口径),
     rule_drift 用它分离"流量变化"与"策略变化"。"""
+    import os as _os
+
     uids = sorted(uids)
+    # 缓存键必须含引擎模式:引擎 URL 切换会改变判定来源,数据没动但
+    # 结论源变了,陈旧缓存会吐与当前通道不符的判定。
     cache_key = (_dataset_fingerprint(), policy.overrides_key(), use_current_policy,
                  len(events), events[0]["ts"] if events else None,
-                 events[-1]["ts"] if events else None, tuple(uids))
+                 events[-1]["ts"] if events else None, tuple(uids),
+                 "engine:" + (_os.environ.get("FK_ENGINE_DRYRUN_URL") or "local"))
     hit = _VERDICT_CACHE.get(cache_key)
     if hit is not None:
         return hit
+    from ..engine import evaluate_batch
+    ordered = [e for e in events if e["uid"] in set(uids)]
+    results = evaluate_batch(ordered, use_current_policy=use_current_policy)
+    by_uid_results: Dict[str, list] = {}
+    for e, r in zip(ordered, results):
+        by_uid_results.setdefault(e["uid"], []).append(r)
     verdicts = {}
     for uid in uids:
         worst = "pass"
         hit_rules: set = set()
         reasons: List[str] = []
-        for e in (e for e in events if e["uid"] == uid):
-            # 默认当前策略(评估口径);as-of 模式逐事件回放当时策略(审计口径)
-            r = rule_eval(e, use_current_policy=use_current_policy)
+        for r in by_uid_results.get(uid, []):
             if rules.ACTION_ORDER[r["action"]] > rules.ACTION_ORDER[worst]:
                 worst = r["action"]
             for h in r["hits"]:
@@ -101,9 +112,16 @@ def account_verdicts(uids: Iterable[str], events: List[Dict],
                     reasons.append("%s: %s" % (h["rule_id"], h["reason"]))
                 hit_rules.add(h["rule_id"])
         verdicts[uid] = {"predicted": worst, "rules": sorted(hit_rules), "reasons": reasons[:3]}
-    if len(_VERDICT_CACHE) >= _VERDICT_CACHE_MAX:
-        _VERDICT_CACHE.pop(next(iter(_VERDICT_CACHE)))
-    _VERDICT_CACHE[cache_key] = verdicts
+    # 降级结果不落缓存:引擎故障期间算出的本地降级结论,引擎恢复后
+    # (数据未变)不得继续从缓存吐出来 —— 与 reconcile 缓存同一纪律。
+    from ..engine import DRYRUN_URL_ENV as _URL_ENV
+    degraded_run = (_os.environ.get(_URL_ENV)
+                    and any(r.get("degraded") for rs in by_uid_results.values()
+                            for r in rs))
+    if not degraded_run:
+        if len(_VERDICT_CACHE) >= _VERDICT_CACHE_MAX:
+            _VERDICT_CACHE.pop(next(iter(_VERDICT_CACHE)))
+        _VERDICT_CACHE[cache_key] = verdicts
     return verdicts
 
 
