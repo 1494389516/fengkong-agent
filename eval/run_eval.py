@@ -355,6 +355,62 @@ def run_label_quality_layer() -> int:
     return _report("标注数据质量(离线)", checks)
 
 
+def run_label_lifecycle_layer() -> int:
+    """离线:标签生命周期 —— 快照/差异/血缘/回测指纹绑定。"""
+    checks = []
+    from agent.tools.label_lifecycle import (label_fingerprint,
+                                             write_label_lineage)
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "labels.json", "blacklist.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            fp0 = label_fingerprint()
+            r1 = registry.dispatch("label_version", {"note": "基线"})
+            checks += [
+                ("快照:指纹=内容哈希且落库",
+                 r1.get("status") == "snapshotted"
+                 and r1.get("fingerprint") == fp0),
+                ("同指纹不重复打",
+                 registry.dispatch("label_version", {}).get("status")
+                 == "already_snapshotted"),
+            ]
+            raw = json.loads((base / "labels.json").read_text(encoding="utf-8"))
+            raw["u_1002"]["label"] = "normal"
+            raw["u_1002"]["note"] = "eval:误伤修正"
+            (base / "labels.json").write_text(json.dumps(raw, ensure_ascii=False),
+                                              encoding="utf-8")
+            d = registry.dispatch("label_diff", {"version_a": fp0})
+            checks += [
+                ("修正后 diff:检出变更与旧新标签",
+                 d["changed"] == [{"uid": "u_1002", "old": "fraud",
+                                   "new": "normal"}]),
+            ]
+            r2 = registry.dispatch("label_refresh", {"note": "申诉 #9 修正"})
+            checks.append(("label_refresh 产生新指纹快照",
+                           r2.get("status") == "snapshotted"
+                           and r2["fingerprint"] == label_fingerprint()
+                           and r2["fingerprint"] != fp0))
+            write_label_lineage("u_1002", "fraud", "normal", source="appeal",
+                                appeal_id=9, decided_by="eval_op")
+            lines = (base / "label_lineage.jsonl").read_text(
+                encoding="utf-8").splitlines()
+            rec = json.loads(lines[-1])
+            checks += [
+                ("申诉修正血缘:来源/旧新标签/审批人齐全",
+                 rec["source"] == "appeal" and rec["appeal_id"] == 9
+                 and rec["old_label"] == "fraud" and rec["new_label"] == "normal"
+                 and rec["decided_by"] == "eval_op"),
+            ]
+            bt = registry.dispatch("rule_backtest", {})
+            checks.append(("回测结果携带 label_fingerprint",
+                           bt.get("label_fingerprint") == label_fingerprint()))
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("标签生命周期(离线,临时目录)", checks)
+
+
 def run_feature_version_layer() -> int:
     """离线:特征版本化 —— 快照/漂移检测/版本对比,篡改快照必须被抓出。"""
     checks = []
@@ -2480,12 +2536,13 @@ def run_cost_layer() -> int:
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
     # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000;
     # Job 四件套后 58 工具上调至 29000;特征健康/血缘/事故后 66 工具上调
-    # 至 33000;特征版本化三件套后 69 工具上调至 34500(人均 500 纪律不放松)。
+    # 至 33000;特征版本化三件套后 69 工具上调至 34500;标签生命周期三件套
+    # 后 72 工具上调至 36000(人均 500 纪律不放松)。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 34500 chars(现 %d,%d 个工具,人均 %.0f)"
+        ("工具 schema 总量 <= 36000 chars(现 %d,%d 个工具,人均 %.0f)"
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
-         s["schemas_chars"] <= 34500),
+         s["schemas_chars"] <= 36000),
         ("system prompt <= 5000 chars(现 %d)" % s["system_chars"],
          s["system_chars"] <= 5000),
     ])
@@ -2635,6 +2692,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_cost_budget_layer)
     failures += _layer(run_versioning_layer)
     failures += _layer(run_feature_version_layer)
+    failures += _layer(run_label_lifecycle_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)

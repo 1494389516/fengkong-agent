@@ -18,6 +18,7 @@ from . import tool
 from . import policy
 from . import rules
 from .datasource import load_accounts, load_events, load_labels
+from .label_lifecycle import label_fingerprint
 from .rules import rule_eval
 
 # 误伤流失系数:被误拦的正常账号流失概率的保守估计。只用于期望损失的
@@ -231,6 +232,7 @@ def backtest(overrides: Optional[Dict] = None):
         ]
         return {
             "accounts_evaluated": len(per_account),
+            "label_fingerprint": label_fingerprint(),
             "label_observation": label_observation(labels, events),
             "overrides_applied": applied,
             "operating_points": points,

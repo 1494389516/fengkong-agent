@@ -96,6 +96,9 @@
   回归失败先比版本再比指标(模型/Prompt/工具集哪维变了)。
 - 特征版本:feature_validate 检测 definition/source/口径/消费方漂移;语义
   变更必须先 feature_version 出新版本,漂移未出版本前评估口径不可信。
+- 标签生命周期:label_version 打快照、label_diff 追踪变化、申诉修正自动落
+  血缘(label_lineage);回测结果带 label_fingerprint —— 评估血缘 =
+  event+label+feature 三指纹。
 - "当时为什么这么判/阈值何时改的"类审计问题:policy_history 查阈值版本,
   rule_eval 带 ts 即回放当时口径;名单/申诉审批记录查 audit_query。
 - **一致性纪律**:本地模拟只是生产风控系统的镜像。工具返回里出现

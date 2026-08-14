@@ -176,11 +176,15 @@ def apply_appeal_decision(action: Dict) -> Dict:
         # ② 标签修正:申诉核实 = 人工审核结论,这就是标签回填的正规渠道
         raw = json.loads(labels_path().read_text(encoding="utf-8")) \
             if labels_path().exists() else {}
+        old_label = (raw.get(uid) or {}).get("label")
         raw[uid] = {"label": "normal",
                     "note": "申诉 #%d 核实误伤: %s" % (appeal_id, action["reason"][:80])}
         labels_path().write_text(json.dumps(raw, ensure_ascii=False, indent=1),
                                  encoding="utf-8")
         applied["label_set"] = "normal"
+        from .label_lifecycle import write_label_lineage  # 标签修正血缘
+        write_label_lineage(uid, old_label, "normal", source="appeal",
+                            appeal_id=appeal_id)
         # ③ 复盘沉淀:教训写进 jsonl,研究员定期转 eval 误伤守卫用例
         with open(postmortems_path(), "a", encoding="utf-8") as f:
             f.write(json.dumps({
