@@ -67,6 +67,8 @@
   团伙资源账号数增速 = 扩张中;它看得见 PSI 看不见的贴边行为。
 - 用户喊冤走 appeal_review 核查证据,决议 appeal_resolve 提交待审批;
   申诉核实成立 = 误伤实锤,自动修正标签并沉淀复盘。
+- 算法人向:挑特征先 feature_catalog;建模样本 build_dataset 导出(口径与
+  规则同源、指纹复现);训练结果 model_register 登记(只登记不训练)。
 - 换数据集/接真实数据后先 data_health_check 体检:error 级问题(缺字段/
   重复/枚举漂移)必须写进结论;warning 级影响 R004/R005 时同样说明。
 - "当时为什么这么判/阈值何时改的"类审计问题:policy_history 查阈值版本,

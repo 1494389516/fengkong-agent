@@ -7,3 +7,4 @@ data/gen/
 data/pending_actions.json
 data/audit.jsonl
 data/mismatch_queue.json
+data/model_registry.json

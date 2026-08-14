@@ -18,6 +18,7 @@
 案例定义在 eval/cases.json。退出码:全过 0,有失败 1。
 """
 import argparse
+import csv
 import json
 import os
 import shutil
@@ -339,6 +340,74 @@ def run_label_quality_layer() -> int:
         finally:
             os.environ.pop("FK_DATA_DIR", None)
     return _report("标注数据质量(离线)", checks)
+
+
+def run_ml_tools_layer() -> int:
+    """离线:算法人三件套 —— 特征清单自检、建模样本导出(PIT+指纹)、模型登记簿。"""
+    checks = []
+    fc = registry.dispatch("feature_catalog", {})
+    checks += [
+        ("特征清单:>=14 个特征且目录与真实输出一致",
+         fc.get("feature_count", 0) >= 14 and fc.get("consistency_ok") is True),
+        ("特征清单:分组覆盖活跃度/行为/团伙",
+         {"活跃度", "行为", "团伙"} <= set((fc.get("groups") or {}).keys())),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        shutil.copy(ROOT / "data" / "events_sample.json",
+                    base / "events_sample.json")
+        evs = json.loads((base / "events_sample.json").read_text(encoding="utf-8"))
+        labels = {}
+        for uid in ("u_1001", "u_1002"):
+            labels[uid] = {"label": "normal" if uid == "u_1001" else "fraud",
+                           "note": "eval"}
+        (base / "labels.json").write_text(json.dumps(labels, ensure_ascii=False),
+                                          encoding="utf-8")
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            r = registry.dispatch("build_dataset", {})
+            m = r.get("manifest", {})
+
+            def count_lt(uid, pred):
+                last = max(e["ts"] for e in evs if e["uid"] == uid)
+                return sum(1 for e in evs
+                           if e["uid"] == uid and e["ts"] < last and pred(e))
+
+            u1002_coupons = count_lt("u_1002", lambda e: e["type"] == "coupon_claim")
+            u1001_events = count_lt("u_1001", lambda e: True)
+            rows = list(csv.DictReader(open(r["csv_path"], encoding="utf-8")))
+            by_uid = {x["uid"]: x for x in rows}
+            checks += [
+                ("样本导出:行数=标注账号数,标签计数正确",
+                 m.get("rows") == 2
+                 and m.get("label_counts") == {"fraud": 1, "normal": 1}),
+                ("样本导出:PIT 口径与暴力计算一致(u_1002 领券 %d)" % u1002_coupons,
+                 by_uid["u_1002"]["coupon_claims"] == str(u1002_coupons)),
+                ("样本导出:PIT 口径与暴力计算一致(u_1001 事件数 %d)" % u1001_events,
+                 by_uid["u_1001"]["event_count"] == str(u1001_events)),
+                ("样本导出:manifest 落盘且指纹非空",
+                 bool(m.get("fingerprint")) and Path(r["manifest_path"]).exists()),
+            ]
+            from agent.tools.dataset import dataset_fingerprint
+            checks.append(("样本导出:指纹与内容哈希一致(可复现)",
+                           m["fingerprint"] == dataset_fingerprint()))
+            reg1 = registry.dispatch("model_register", {
+                "name": "xgb_eval", "version": "0.1",
+                "train_fingerprint": m["fingerprint"], "metrics": {"auc": 0.9}})
+            reg_dup = registry.dispatch("model_register",
+                                        {"name": "xgb_eval", "version": "0.1"})
+            lst = registry.dispatch("model_list", {})
+            checks += [
+                ("模型登记:成功登记", reg1.get("status") == "registered"),
+                ("模型登记:同名同版本拒绝重复",
+                 reg_dup.get("status") == "already_registered"),
+                ("模型清单:计数与训练集指纹回填正确",
+                 lst.get("count") == 1
+                 and lst["models"][0]["train_fingerprint"] == m["fingerprint"]),
+            ]
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("算法人三件套(离线,临时目录)", checks)
 
 
 def run_agent_log_layer() -> int:
@@ -1495,15 +1564,17 @@ def run_cost_layer() -> int:
     # 三操作合一)加入后 32 工具上调至 16000,当前人均 ~491 —— 合并优先于
     # 抬预算的纪律仍然有效,duty_ops 本身就是三合一的产物。
     # system prompt 同理:三色名单纪律 + 漂移/申诉纪律并集后上调至 3300;
-    # 审计查询/数据体检/差异工单/唯一引擎纪律并入后上调至 3600(四块都是
-    # 结论溯源纪律,砍它们省的 token 会以错误结论的形式翻倍还给业务)。
+    # 审计查询/数据体检/差异工单/唯一引擎纪律并入后上调至 3600;算法人
+    # 三件套(feature_catalog/build_dataset/model_registry)提示并入后
+    # 上调至 3700。schema:算法人三件套后 41 工具上调至 20500(人均 500
+    # 纪律不放松,现人均 ~470)。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 18000 chars(现 %d,%d 个工具,人均 %.0f)"
+        ("工具 schema 总量 <= 20500 chars(现 %d,%d 个工具,人均 %.0f)"
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
-         s["schemas_chars"] <= 18000),
-        ("system prompt <= 3600 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 3600),
+         s["schemas_chars"] <= 20500),
+        ("system prompt <= 3700 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 3700),
     ])
 
 
@@ -1631,6 +1702,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_actions_layer)
     failures += _layer(run_health_layer)
     failures += _layer(run_label_quality_layer)
+    failures += _layer(run_ml_tools_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
     failures += _layer(run_whitelist_layer)
