@@ -15,6 +15,8 @@
 | `decisions_log.json` | 风控引擎决策日志(Kafka 落仓) |
 | `thresholds.json` | 风控配置中心的**只读镜像**(带同步时间戳与源版本号) |
 | `rules.rule_eval` 本地实现 | 引擎 dry-run / 试算接口(适配器已实现:配 `FK_ENGINE_DRYRUN_URL` 即切到引擎判定,本地实现只做降级备份;失败显式降级并打 degraded 标记,见 agent/engine.py) |
+| `data/model_scores.json` + R007 | 模型服务(配 `FK_ENGINE_MODEL_URL` 即切到远程打分;本地文件只是骨架模拟。champion 模型分过 model_score_*_threshold 才拦截,阈值在 policy 版本表,生效走审批) |
+| `feature_parity_check` + `FK_FEATURE_ONLINE_MODULE` | 在线特征服务客户端(签名与 featurelib.account_features 一致);接真实数仓后注入在线实现,建模/回测前跑 parity,检出 training-serving skew |
 | `actions` pending + CLI 审批 | 审批系统 / 飞书卡片(SSO 身份入审计库) |
 | `eval/` 离线断言 | CI 门禁(每次改动必跑) |
 | `eval` agent 层案例 | 上线回归集(改 prompt / 加工具必跑) |

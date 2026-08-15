@@ -28,11 +28,11 @@
 
 ## 2. 能力总览
 
-- **工具层 37 个**(`37`):查询(名单/特征/监控/档案/情报/举报)、
+- **工具层 82 个**(`82`):查询(名单/特征/监控/档案/情报/举报)、
   策略(回测/校准/影子/试衣间)、图表(PNG 旁路)、巡检(scan/daily_brief/duty_ops)、
   监控(drift/adversary/risk)、生命周期(申诉/灰名单治理)、审计治理
   (audit_query/差异工单/数据体检/engine_status)
-- **规则集 R001-R006**(阈值全部版本化,point-in-time 回放 + what-if 覆盖)
+- **规则集 R001-R006 + 引擎级 R007 模型信号**(阈值全部版本化,point-in-time 回放 + what-if 覆盖;champion 模型分过 model_score_*_threshold 即命中,默认阈值=关闭)
 - **名单三色**:black 硬拦 / gray 观察(生命周期裁决)/ white 误伤抑制(降档不留免检)
 - **两阶段处置**:agent 只提交,人在 CLI 审批,全程审计
 - **模型生命周期**:candidate→shadow→challenger→champion 状态机(评估门禁
@@ -42,6 +42,10 @@
 - **特征健康**:建模/回测前 feature_health_check(缺失/新鲜度/分布漂移/取值域/
   枚举,ok/warn/fail)
 - **决策血缘**:serve/decide 自动落库,decision_explain/trace 回答"为什么"
+- **Decision Plane(P0)**:active strategy 阈值覆盖进入判定(rule_eval 带
+  strategy_version);champion 模型信号 R007 按阈值命中(带 model_version/
+  model_score);评估防泄漏(model_eval 只接受时间切分评估侧,零重叠且更晚);
+  特征离线/在线一致性 feature_parity_check(training-serving skew 防线)
 - **上下文工程 ①~⑦**:度量/限幅/隔离/裁剪/checkpoint/硬预算/脱敏
 
 ## 3. 数据面
@@ -76,12 +80,13 @@
 
 | 指标 | 值 |
 |---|---|
-| git commit | `16eb4ca` |
-| 数据指纹 | `8ea6b80ca62a2715` |
-| 工具数 | 37 |
-| 工具 schema | 17985 chars(预算 18000) |
-| system prompt | 3563 chars(预算 3600) |
-| 最近刷新(UTC) | 2026-08-14T10:19:09Z |
+| git commit | `81f09c2` |
+| 数据指纹 | `4d4596c1cdde5d1a` |
+| 工具数 | 82 |
+| 离线断言 | 355 项 |
+| 工具 schema | 36397 chars(预算 18000) |
+| system prompt | 5590 chars(预算 5700) |
+| 最近刷新(UTC) | 2026-08-15T14:42:38Z |
 
 > 完整评估报告:`python3 eval/run_eval.py --offline --report out/eval_report.md`
 > 案例库账本:`eval/cases_changelog.md`(21 个黄金案例,含红队与唯一引擎纪律)。

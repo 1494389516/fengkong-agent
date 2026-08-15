@@ -181,9 +181,18 @@ def write_report(path, records: list, offline: bool = False,
                  encoding="utf-8")
 
 
-def refresh_agent_card(card_path=None) -> int:
-    """用最新评估数字刷新 AGENT_CARD.md「当前评估指标」表。按行正则替换
-    单元格(而非一次性占位符),重复执行幂等。返回刷新的行数。"""
+def _assert_total(records) -> int:
+    """本次评估的断言总数(records 汇总);无 records 时返回 0(表示未知,
+    调用方跳过依赖它的替换)。"""
+    if not records:
+        return 0
+    return sum(r.get("total", 0) for r in records)
+
+
+def refresh_agent_card(card_path=None, records=None) -> int:
+    """用最新系统状态刷新 AGENT_CARD.md(P0-4,数字全部自动取,不人工维护):
+      指标表(commit/指纹/工具数/schema/system/断言数)+ 能力总览"工具层 N 个"。
+    按行正则替换,重复执行幂等。返回刷新的行数。"""
     import re
 
     p = Path(card_path) if card_path else ROOT / "AGENT_CARD.md"
@@ -192,12 +201,14 @@ def refresh_agent_card(card_path=None) -> int:
     metrics = _structural_metrics()
     from agent.tools import schemas  # 工具数取真实注册表
     ch = _champion_model()
+    n_tools = len(schemas())
+    n_asserts = _assert_total(records)
     values = {
         "git commit": "`%s`" % git_commit(),
         "数据指纹": "`%s`" % data_fingerprint(),
-        "工具数": str(len(schemas())),
+        "工具数": str(n_tools),
         "工具 schema": "%s chars(预算 18000)" % metrics.get("schemas_chars", "-"),
-        "system prompt": "%s chars(预算 3600)" % metrics.get("system_chars", "-"),
+        "system prompt": "%s chars(预算 5700)" % metrics.get("system_chars", "-"),
         "最近刷新(UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "MODEL_CHAMPION": ("无" if not ch else "%s %s" % (ch["name"], ch["version"])),
         "MODEL_AUC": "-" if not ch else ch.get("auc"),
@@ -213,8 +224,96 @@ def refresh_agent_card(card_path=None) -> int:
         if n:
             text = new_text
             refreshed += n
+    # 指标表"离线断言"行:有则刷新,无则插在工具数行之后
+    if n_asserts:
+        row = "| 离线断言 | %d 项 |" % n_asserts
+        if "| 离线断言 |" in text:
+            new_text, n = re.subn(r"\| 离线断言 \|[^|\n]*(?=\|)",
+                                  "| 离线断言 | %d 项 " % n_asserts, text)
+            text, refreshed = new_text, refreshed + n
+        else:
+            idx = text.find("| 工具数 |")
+            if idx >= 0:
+                eol = text.find("\n", idx)
+                text = text[:eol + 1] + row + "\n" + text[eol + 1:]
+                refreshed += 1
+    # 叙述文本:"工具层 N 个" 与紧跟的 (`N`)
+    text, n = re.subn(r"工具层 \d+ 个", "工具层 %d 个" % n_tools, text)
+    refreshed += n
+    text, n = re.subn(r"`\d+`", "`%d`" % n_tools, text)
+    refreshed += n
     p.write_text(text, encoding="utf-8")
     return refreshed
+
+
+def refresh_readme(readme_path=None, records=None) -> int:
+    """刷新 README.md 系统快照(P0-4):
+      - AUTO-SYNC 标记之间的快照块整块重写(commit/工具数/schema/system/指纹/
+        断言数/案例数/刷新时间);
+      - "工具层(N 个"、"170+ 项"、"N 个黄金案例" 与现状对齐。
+    返回刷新的行数。"""
+    import re
+    import json as _j
+
+    p = Path(readme_path) if readme_path else ROOT / "README.md"
+    if not p.exists():
+        return 0
+    metrics = _structural_metrics()
+    from agent.tools import schemas
+    n_tools = len(schemas())
+    n_asserts = _assert_total(records)
+    n_cases = 0
+    try:
+        cases = _j.loads((ROOT / "eval" / "cases.json").read_text(encoding="utf-8"))
+        n_cases = len(cases.get("agent_cases", []))
+    except Exception:  # noqa: BLE001 案例数缺失不阻塞其余同步
+        pass
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    block = "\n".join([
+        "<!-- AUTO-SYNC:FK-DOC-SNAPSHOT-START -->",
+        "## 系统快照(自动生成,勿手改;`python3 eval/run_eval.py --report` 刷新)",
+        "",
+        "| 项 | 值 |",
+        "|---|---|",
+        "| git commit | `%s` |" % git_commit(),
+        "| 工具数 | %d |" % n_tools,
+        "| 工具 schema | %d chars |" % metrics.get("schemas_chars", 0),
+        "| system prompt | %d chars |" % metrics.get("system_chars", 0),
+        "| 数据指纹 | `%s` |" % data_fingerprint(),
+        "| 离线断言数 | %d |" % (n_asserts or 0),
+        "| agent 黄金案例 | %d |" % n_cases,
+        "| 最近刷新(UTC) | %s |" % now,
+        "",
+        "<!-- AUTO-SYNC:FK-DOC-SNAPSHOT-END -->",
+    ])
+    text = p.read_text(encoding="utf-8")
+    refreshed = 0
+    if "AUTO-SYNC:FK-DOC-SNAPSHOT-START" in text:
+        text, n = re.subn(
+            r"<!-- AUTO-SYNC:FK-DOC-SNAPSHOT-START -->.*?"
+            r"<!-- AUTO-SYNC:FK-DOC-SNAPSHOT-END -->",
+            block, text, count=1, flags=re.S)
+        refreshed += 1
+    else:
+        m = re.search(r"\n## ", text)
+        pos = m.start() if m else len(text)
+        text = text[:pos] + "\n" + block + text[pos:]
+        refreshed += 1
+    text, n = re.subn(r"工具层\(\d+ 个", "工具层(%d 个" % n_tools, text)
+    refreshed += n
+    if n_asserts:
+        text, n = re.subn(r"170\+ 项", "%d 项" % n_asserts, text)
+        refreshed += n
+    if n_cases:
+        text, n = re.subn(r"\d+ 个黄金案例", "%d 个黄金案例" % n_cases, text)
+        refreshed += n
+    p.write_text(text, encoding="utf-8")
+    return refreshed
+
+
+def refresh_docs(records=None) -> int:
+    """P0-4:AGENT_CARD + README 一次同步(指标/工具数/断言数/案例数)。"""
+    return refresh_agent_card(records=records) + refresh_readme(records=records)
 
 
 def main() -> int:
@@ -222,6 +321,7 @@ def main() -> int:
     failures, records = run_eval.run_all(offline=True)
     out = ROOT / "out" / "eval_report.md"
     write_report(out, records, offline=True, failures=failures)
+    refresh_docs(records)  # P0-4:AGENT_CARD/README 系统快照自动同步
     print("报告已写入: %s" % out)
     return 1 if failures else 0
 

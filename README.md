@@ -14,10 +14,25 @@
 
 项目的两根支柱,所有设计都围绕它们展开:
 
-1. **效果评估**:agent 的每个能力都有离线断言钉住(当前 170+ 项,全离线零 token),
+1. **效果评估**:agent 的每个能力都有离线断言钉住(当前 185 项,全离线零 token),
    agent 本体行为有四维黄金案例(结论 / 取证轨迹 / 轨迹效率 / token 预算);
 2. **token 成本**:上下文工程 ①~⑦ 七道防线 + 成本预算化(超限即评估变红)。
 
+<!-- AUTO-SYNC:FK-DOC-SNAPSHOT-START -->
+## 系统快照(自动生成,勿手改;`python3 eval/run_eval.py --report` 刷新)
+
+| 项 | 值 |
+|---|---|
+| git commit | `81f09c2` |
+| 工具数 | 82 |
+| 工具 schema | 36397 chars |
+| system prompt | 5590 chars |
+| 数据指纹 | `4d4596c1cdde5d1a` |
+| 离线断言数 | 355 |
+| agent 黄金案例 | 24 |
+| 最近刷新(UTC) | 2026-08-15T14:42:38Z |
+
+<!-- AUTO-SYNC:FK-DOC-SNAPSHOT-END -->
 ## 快速开始
 
 ```bash
@@ -27,7 +42,7 @@ pip install -r requirements.txt
 export DEEPSEEK_API_KEY=sk-...
 python3 main.py
 
-# 离线评估(不需要 key,170+ 项断言)
+# 离线评估(不需要 key,185 项断言)
 python3 eval/run_eval.py
 
 # 生成大规模合成数据(约 250 账号、五类欺诈模式)并切换使用
@@ -61,7 +76,7 @@ flowchart TB
     subgraph 特征层
         FL[featurelib.py 统一特征层<br/>point-in-time · 窗口 · 基线/百分位 · 行为路径]
     end
-    subgraph 工具层["工具层(32 个,dispatch 单点限幅+注入防线)"]
+    subgraph 工具层["工具层(82 个,dispatch 单点限幅+注入防线)"]
         T1[查询:profile/monitor/features/<br/>blacklist/ip/device/reports/graph]
         T2[策略:rule_eval/backtest/shadow/<br/>calibrate/propose/history/consistency]
         T3[图表:仪表盘/扫描/群体对比]
@@ -77,7 +92,7 @@ flowchart TB
     CORE --> PRIV --> T1 & T2 & T3 & T4 & T5 & T6
     T1 & T2 & T3 & T4 & T5 & T6 --> FL --> DS
     T2 --> POL --> DS
-    EVAL[eval/ 170+ 项离线断言 + agent 层四维案例 + 成本预算] -. 回归门禁 .-> 工具层 & AGENT
+    EVAL[eval/ 185 项离线断言 + agent 层四维案例 + 成本预算] -. 回归门禁 .-> 工具层 & AGENT
 ```
 
 ```
@@ -278,7 +293,7 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 
 ### 10. 评估体系(效果与成本同一根尺子)
 
-**离线(170+ 项,零 token,CI 门禁)**:规则回归(含防泄漏/误伤守卫)、指标基线、
+**离线(185 项,零 token,CI 门禁)**:规则回归(含防泄漏/误伤守卫)、指标基线、
 监控信号、全量巡检、关联图谱、处置写流程、策略版本化、治理(限速/漂移)、影子+覆盖
 原子性、基线与百分位、IP/设备情报与举报、账号档案(含路径签名)、模拟一致性对账、
 数据生成+大样本指标下限(含 R006 误伤计量)、**统计核心已知答案**(PSI/IV/AUC/KS
@@ -286,7 +301,7 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 **策略生命周期**(区分度纪律/试衣间/申诉全链路/值班台)、**在线服务冒烟**(线上
 决策与离线引擎逐字段一致)、脱敏与注入防线、结构性成本预算、图表冒烟。
 
-**agent 层(21 个黄金案例,含 5 个红队用例 + 唯一引擎纪律,需 API key)**,每案例四维断言:
+**agent 层(24 个黄金案例,含 5 个红队用例 + 唯一引擎纪律,需 API key)**,每案例四维断言:
 
 - 结论:期望关键词 + **禁用表述**(说"已拉黑/已生效"= 越权话术判负);
 - 取证:必须调过期望工具(凭空下结论判负);
@@ -419,7 +434,33 @@ reject/review/pass 率变化)、`agent_behavior_drift`(agent 运行日志的工�
   待实测项从此有实验载体);
 - **生产就绪门禁 production_readiness_check**:11 项检查(data/feature/label
   健康、模型与策略状态、引擎通道、评估报告、审计、安全、降级、预算)输出
-  READY / BLOCKED / DEGRADED,已接入 `/health`。
+  READY / BLOCKED / DEGRADED,已接入 `/health`。语义:BLOCKED = 核心决策
+  资产未就绪(数据硬伤 / 无 champion / 无 active strategy);DEGRADED = 有
+  可信决策路径但能力降级(本地引擎 / 缺报告等)。
+
+### 25. Decision Plane 接入(评审 P0:治理 -> 判定打通)
+
+治理元数据(模型登记簿 / 策略注册表)从"管理面"真正进入"判定面":
+
+- **P0-1 模型评估防泄漏**:`build_dataset(split_ratio)` 按账号最后事件时间
+  切分,导出 train + eval 两份(评估侧账号零重叠且全部更晚);`model_eval`
+  门禁:评估指纹必须来自评估切分且 != 训练指纹 —— 同源评估(train/eval
+  同批账号)是训练泄漏,拒绝。评估结果记录两侧账号数/切点时点/样本数,
+  引用指标必须先声明评估侧样本数;
+- **P0-2 champion 模型接入判定**:rule_eval 判定路径自动携带模型信号 R007
+  —— champion 模型风险分过 `model_score_review_threshold`(0.9)/
+  `model_score_reject_threshold`(0.98)即命中(阈值在 policy 版本表,默认
+  等于"关着":模型生效 = 审批调低阈值,与规则阈值同级治理)。分数来源
+  `FK_ENGINE_MODEL_URL` 模型服务,或本地 `data/model_scores.json`
+  (骨架模拟模型服务);无 champion / 无分数 = 无模型信号,判定不变;
+- **P0-3 active strategy 接入判定**:strategy registry 里 status=active 的
+  策略,其阈值覆盖真正进入判定(函数级参数传递,线程安全,what-if 覆盖
+  优先);结果带 `strategy_version` / `strategy_thresholds` 供证据链溯源,
+  serve/decide 的决策血缘同步记录策略与模型版本;
+- **P0-5 特征离线/在线一致性**:`feature_parity_check` 对同一 (uid, as_of,
+  window) 比较离线实现(featurelib)与在线实现(`FK_FEATURE_ONLINE_MODULE`
+  注入)的特征输出,逐字段严格比对 —— training-serving skew 的骨架防线;
+  未注入在线实现时返回 warn 并诚实声明"同源一致 != 线上已验证"。
 
 ## 环境变量
 
@@ -433,12 +474,14 @@ reject/review/pass 率变化)、`agent_behavior_drift`(agent 运行日志的工�
 | `FK_AGENT_RUN_LOG=1` | 每次 agent 问答落一行运行日志 out/agent_runs.jsonl(用 eval/agent_metrics.py 聚合运行指标) |
 | `FK_ENGINE_DRYRUN_URL` | 生产引擎 dry-run 试算端点:配置后 rule_eval 判定来自引擎(本地 R001-R006 自动降级为备份);调用失败显式降级并打 degraded 标记 |
 | `FK_ENGINE_DRYRUN_TIMEOUT` | dry-run 调用超时秒数,默认 10 |
+| `FK_ENGINE_MODEL_URL` | 模型服务端点(P0-2):POST {"uid","event"} -> {"score": 0~1};未配置时走本地 data/model_scores.json(骨架模拟模型服务) |
+| `FK_FEATURE_ONLINE_MODULE` | 在线特征实现注入点(P0-5):"module:function",签名同 account_features;未配置时 feature_parity_check 返回 warn(同源一致,未验证线上) |
 | `FK_TZ_OFFSET_HOURS` | 分桶业务时区偏移,默认 +8(UTC 切日会把凌晨攻击劈进两桶) |
 
 ## 已知边界(诚实声明)
 
 - 数据是合成的:指标的绝对值没有外推意义,分辨率与张力是设计出来的;
-- agent 层 21 案例(含红队:越权话术/伪指令注入/身份施压/唯一引擎纪律)尚未实弹运行(需 API key),四维基线待第一次真实运行建立;
+- agent 层 24 案例(含红队:越权话术/伪指令注入/身份施压/唯一引擎纪律)尚未实弹运行(需 API key),四维基线待第一次真实运行建立;
 - 本骨架中 agent 的规则引擎就是唯一引擎;接真实系统后它降级为镜像,
   对账机制(已建)成为一切模拟结论的前提;
 - 全量类工具(scan/backtest)是同步实现,真实数据量下须改异步任务(见 DEPLOY.md);
