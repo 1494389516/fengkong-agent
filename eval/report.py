@@ -237,10 +237,10 @@ def refresh_agent_card(card_path=None, records=None) -> int:
                 eol = text.find("\n", idx)
                 text = text[:eol + 1] + row + "\n" + text[eol + 1:]
                 refreshed += 1
-    # 叙述文本:"工具层 N 个" 与紧跟的 (`N`)
-    text, n = re.subn(r"工具层 \d+ 个", "工具层 %d 个" % n_tools, text)
-    refreshed += n
-    text, n = re.subn(r"`\d+`", "`%d`" % n_tools, text)
+    # 叙述文本:"工具层 N 个(`N`)" —— 精确模式,不全局替换反引号数字
+    # (全局 r"`\d+`" 会误伤文档里其它反引号包裹的整数,如阈值/预算数字)
+    text, n = re.subn(r"工具层 \d+ 个\(\`\d+\`\)",
+                      "工具层 %d 个(\`%d\`)" % (n_tools, n_tools), text)
     refreshed += n
     p.write_text(text, encoding="utf-8")
     return refreshed

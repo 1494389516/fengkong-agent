@@ -110,11 +110,23 @@ def _active_strategy() -> Dict:
         return {}
     if not actives:
         return {}
-    s = actives[0]
-    return {
+    # 不同名策略各自允许一个 active;判定只能有一套生效阈值 —— 取部署时间
+    # 最新的 active 并显式标注歧义,不静默选第一个(顺序取决于文件写入序,
+    # 语义上是随机的)。生产应由配置中心路由到单一策略,这里兜底确定性。
+    actives.sort(key=lambda s: (s.get("deployed_at") or "",
+                                s["strategy_name"], s["version"]))
+    s = actives[-1]
+    out = {
         "strategy_version": "%s %s" % (s["strategy_name"], s["version"]),
         "strategy_thresholds": s.get("thresholds") or {},
     }
+    if len(actives) > 1:
+        out["strategy_ambiguity"] = (
+            "存在 %d 个 active 策略,取部署时间最新的 %s;其余 %s"
+            % (len(actives), out["strategy_version"],
+               ", ".join("%s %s" % (x["strategy_name"], x["version"])
+                         for x in actives[:-1])))
+    return out
 
 
 def _champion() -> Dict:
@@ -158,7 +170,8 @@ def _model_score_remote(uid: str, event: Dict[str, Any]):
         return None
 
 
-def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any]) -> Dict:
+def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
+                        use_current_policy: bool = False) -> Dict:
     """R007 模型信号(P0-2):champion 模型真正进入判定路径。
 
     - 无 champion -> 判定不变(只可能随 champion 上线才生效);
@@ -167,6 +180,8 @@ def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any]) -> Dict:
     - 分数 >= model_score_reject_threshold -> R007 reject;
       >= model_score_review_threshold -> R007 review(阈值在 policy 版本表,
       与规则阈值同级治理:默认 0.9/0.98 是"关着"的,生效要审批调低)。
+    阈值口径与规则一致:use_current_policy=True 用当前,否则按事件 ts 回放
+    当时版本 —— 否则回放历史事件时规则用历史阈值、模型用当前阈值,口径劈叉。
     命中后按 action 权重与既有规则取最重。rule_count_evaluated 相应 +1
     (R007 是引擎级规则,不属 R001-R006 的静态规则集)。"""
     ch = _champion()
@@ -182,7 +197,7 @@ def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any]) -> Dict:
     result["model_score"] = score
     from .tools.policy import active_policy
     from .tools.rules import ACTION_ORDER, _hit
-    p = active_policy(None)
+    p = active_policy(None if use_current_policy else event.get("ts"))
     if score >= p["model_score_reject_threshold"]:
         hit_action = "reject"
     elif score >= p["model_score_review_threshold"]:
@@ -211,7 +226,9 @@ def _local_eval(event: Dict[str, Any], use_current_policy: bool,
     if strategy:
         r["strategy_version"] = strategy["strategy_version"]
         r["strategy_thresholds"] = strategy["strategy_thresholds"]
-    return _apply_model_signal(r, event)
+        if strategy.get("strategy_ambiguity"):
+            r["strategy_ambiguity"] = strategy["strategy_ambiguity"]
+    return _apply_model_signal(r, event, use_current_policy=use_current_policy)
 
 
 def evaluate_event(event: Dict[str, Any],
@@ -244,6 +261,8 @@ def evaluate_event(event: Dict[str, Any],
         r = _map_remote(_post_json(url, payload))
         if strategy and not r.get("strategy_version"):
             r["strategy_version"] = strategy["strategy_version"]
+        if strategy and strategy.get("strategy_ambiguity"):
+            r["strategy_ambiguity"] = strategy["strategy_ambiguity"]
         # 远程模式:模型融合由生产引擎负责,本地只附 champion 血缘
         ch = _champion()
         if ch:
