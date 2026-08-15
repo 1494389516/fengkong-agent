@@ -458,8 +458,10 @@ def run_readiness_layer() -> int:
                                       "evaluation_status", "audit_status",
                                       "security_status", "degraded_status",
                                       "budget_status"}),
-                ("骨架态:DEGRADED(本地引擎+缺报告)",
-                 r.get("overall") == "DEGRADED"
+                ("骨架态:BLOCKED(无 champion/无 active strategy 核心资产)",
+                 r.get("overall") == "BLOCKED"
+                 and r["checks"]["model_status"]["level"] == "fail"
+                 and r["checks"]["strategy_status"]["level"] == "fail"
                  and r["checks"]["engine_status"]["level"] == "degraded"),
                 ("门禁:带数据集指纹",
                  len(r.get("dataset_fingerprint", "")) == 16),
@@ -1300,7 +1302,7 @@ def run_model_lifecycle_layer() -> int:
     非法回滚/重复晋升,全流程在临时目录走完。"""
     checks = []
     from agent.tools import actions
-    from agent.tools.dataset import dataset_fingerprint
+    from agent.tools.dataset import dataset_fingerprint, split_datasets
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
         for f in ("events_sample.json", "labels.json", "blacklist.json"):
@@ -1308,10 +1310,20 @@ def run_model_lifecycle_layer() -> int:
         os.environ["FK_DATA_DIR"] = td
         try:
             fp = dataset_fingerprint()
-            scores = {"u_1001": 0.1, "u_1002": 0.9, "u_1003": 0.85,
-                      "u_1004": 0.8, "u_1005": 0.75, "u_1009": 0.95}
+            # P0-1 防泄漏:评估必须发生在时间切分的评估侧(≠ 训练指纹)。
+            # 样本 6 账号按 last_ts 排序,train=前 4, eval=后 2(u_1004/1005)。
+            sp = split_datasets(0.7)
+            train_fp, eval_fp = sp["train_fingerprint"], sp["eval_fingerprint"]
+            eval_scores = {"u_1004": 0.8, "u_1005": 0.75}
+            checks += [
+                ("时间切分:两侧零重叠且评估账号全部晚于训练账号",
+                 sp["disjoint"] is True and len(sp["train_accounts"]) == 4
+                 and len(sp["eval_accounts"]) == 2
+                 and sp["train_fingerprint"] != sp["eval_fingerprint"]
+                 and set(sp["train_accounts"]) & set(sp["eval_accounts"]) == set()),
+            ]
             r0 = registry.dispatch("model_register", {
-                "name": "xgb_demo", "version": "0.1", "train_fingerprint": fp})
+                "name": "xgb_demo", "version": "0.1", "train_fingerprint": train_fp})
             checks.append(("登记:状态 candidate 且绑定特征目录指纹",
                            r0["entry"]["status"] == "candidate"
                            and len(r0["entry"]["feature_catalog_version"]) == 16))
@@ -1322,17 +1334,41 @@ def run_model_lifecycle_layer() -> int:
                 "name": "xgb_demo", "version": "0.1", "to": "challenger"})
             checks.append(("评估门禁:无评估结果拒绝晋升",
                            "评估门禁" in r2.get("error", "")))
+            re_no = registry.dispatch("model_eval", {
+                "name": "xgb_demo", "version": "0.1", "scores": eval_scores})
+            checks.append(("泄漏门禁:缺 eval_fingerprint 拒绝评估",
+                           "泄漏门禁" in re_no.get("error", "")))
+            re_same = registry.dispatch("model_eval", {
+                "name": "xgb_demo", "version": "0.1", "scores": eval_scores,
+                "eval_fingerprint": train_fp})
+            checks.append(("泄漏门禁:评估指纹 == 训练指纹拒绝(同源=泄漏)",
+                           "泄漏门禁" in re_same.get("error", "")
+                           and "leakage" in re_same.get("error", "").lower()))
+            re_fake = registry.dispatch("model_eval", {
+                "name": "xgb_demo", "version": "0.1", "scores": eval_scores,
+                "eval_fingerprint": "deadbeef"})
+            checks.append(("泄漏门禁:非本数据集评估切分拒绝",
+                           "泄漏门禁" in re_fake.get("error", "")
+                           and "deadbeef" in re_fake.get("error", "")))
             re_ = registry.dispatch("model_eval", {
-                "name": "xgb_demo", "version": "0.1", "scores": scores})
+                "name": "xgb_demo", "version": "0.1", "scores": eval_scores,
+                "eval_fingerprint": eval_fp})
             checks += [
-                ("评估:指标写入且指纹绑定",
+                ("评估:指标写入且指纹绑定(eval 切分,2 个更晚账号)",
                  re_.get("status") == "evaluated"
-                 and re_["metrics"]["auc"] == 1.0
-                 and re_["metrics"]["sample_count"] == 6
-                 and re_["metrics"]["eval_fingerprint"] == fp),
-                ("评估:混淆矩阵阈值 0.5 全对",
-                 re_["metrics"]["confusion_matrix"] == {"tp": 5, "fp": 0,
-                                                        "tn": 1, "fn": 0}),
+                 and re_["metrics"]["eval_fingerprint"] == eval_fp
+                 and re_["metrics"]["train_fingerprint"] == train_fp
+                 and re_["metrics"]["sample_count"] == 2
+                 and re_["metrics"]["eval_accounts"] == 2
+                 and re_["metrics"]["train_accounts"] == 4
+                 and re_["metrics"]["split_disjoint"] is True),
+                ("评估:混淆矩阵阈值 0.5 全对(评估侧全 fraud)",
+                 re_["metrics"]["confusion_matrix"] == {"tp": 2, "fp": 0,
+                                                        "tn": 0, "fn": 0}
+                 and re_["metrics"]["precision"] == 1.0
+                 and re_["metrics"]["recall"] == 1.0),
+                ("评估:单侧样本 AUC 诚实返回 None(不编数)",
+                 re_["metrics"]["auc"] is None),
             ]
             r3 = registry.dispatch("model_promote", {
                 "name": "xgb_demo", "version": "0.1", "to": "challenger"})
@@ -1354,21 +1390,23 @@ def run_model_lifecycle_layer() -> int:
                 "name": "xgb_bad", "version": "0.1",
                 "train_fingerprint": "deadbeef"})
             re_bad = registry.dispatch("model_eval", {
-                "name": "xgb_bad", "version": "0.1", "scores": scores})
-            checks.append(("fingerprint 不匹配拒绝评估",
-                           "不匹配" in re_bad.get("error", "")))
+                "name": "xgb_bad", "version": "0.1", "scores": eval_scores,
+                "eval_fingerprint": "beefdead"})
+            checks.append(("泄漏门禁:非本数据集评估切分拒绝",
+                           "泄漏门禁" in re_bad.get("error", "")))
             r_dup = registry.dispatch("model_promote", {
                 "name": "xgb_demo", "version": "0.1", "to": "shadow"})
             checks.append(("重复晋升被拒(已在更远状态)",
                            "非法转移" in r_dup.get("error", "")))
             registry.dispatch("model_register", {
-                "name": "xgb_v2", "version": "0.2", "train_fingerprint": fp})
+                "name": "xgb_v2", "version": "0.2", "train_fingerprint": train_fp})
             for to in ("shadow", "challenger"):
                 registry.dispatch("model_promote", {
                     "name": "xgb_v2", "version": "0.2", "to": to})
                 if to == "shadow":
                     registry.dispatch("model_eval", {
-                        "name": "xgb_v2", "version": "0.2", "scores": scores})
+                        "name": "xgb_v2", "version": "0.2",
+                        "scores": eval_scores, "eval_fingerprint": eval_fp})
             r5p = registry.dispatch("model_promote", {
                 "name": "xgb_v2", "version": "0.2", "to": "champion"})
             actions.decide(r5p["action_id"], approve=True)
@@ -1405,15 +1443,18 @@ def run_model_lifecycle_layer() -> int:
             cmp_ = registry.dispatch("model_compare", {
                 "challenger_name": "xgb_v2", "challenger_version": "0.2",
                 "champion_name": "xgb_demo", "champion_version": "0.1"})
-            row_auc = [r for r in cmp_.get("rows", []) if r["metric"] == "auc"]
+            # 评估侧全 fraud:auc/ks 诚实为 None,compare 跳过缺失指标,
+            # precision/recall 两侧同为 1.0 -> delta 0
+            row_prec = [r for r in cmp_.get("rows", []) if r["metric"] == "precision"]
             checks += [
                 ("Champion-Challenger 对比表结构完整",
                  cmp_["champion"] == "xgb_demo 0.1"
                  and cmp_["challenger"] == "xgb_v2 0.2"
-                 and cmp_["dataset_fingerprint"] == fp
-                 and row_auc and row_auc[0]["delta"] == 0.0
-                 and cmp_["champion_sample_count"] == 6
-                 and cmp_["challenger_sample_count"] == 6),
+                 and cmp_["dataset_fingerprint"] == eval_fp
+                 and row_prec and row_prec[0]["delta"] == 0.0
+                 and all(r["metric"] != "auc" for r in cmp_.get("rows", []))
+                 and cmp_["champion_sample_count"] == 2
+                 and cmp_["challenger_sample_count"] == 2),
             ]
             from agent.metrics import champion_beats_challenger
             m_better = {"auc": 0.8, "ks": 0.6, "precision": 0.7, "recall": 0.7,
@@ -1480,6 +1521,23 @@ def run_ml_tools_layer() -> int:
             from agent.tools.dataset import dataset_fingerprint
             checks.append(("样本导出:指纹与内容哈希一致(可复现)",
                            m["fingerprint"] == dataset_fingerprint()))
+            # P0-1:时间切分导出 train+eval 两份,零重叠、指纹不同
+            sp_r = registry.dispatch("build_dataset", {"split_ratio": 0.7})
+            checks += [
+                ("时间切分导出:双 manifest + 零重叠 + 指纹不同",
+                 sp_r.get("split") is True
+                 and sp_r["train"]["manifest"]["rows"] == 1
+                 and sp_r["eval"]["manifest"]["rows"] == 1
+                 and sp_r["disjoint"] is True
+                 and sp_r["train"]["manifest"]["fingerprint"]
+                 != sp_r["eval"]["manifest"]["fingerprint"]
+                 and Path(sp_r["train"]["manifest_path"]).exists()
+                 and Path(sp_r["eval"]["manifest_path"]).exists()),
+                ("时间切分导出:评估侧账号全部晚于训练侧",
+                 sp_r["train_accounts"] == ["u_1001"]
+                 and sp_r["eval_accounts"] == ["u_1002"]
+                 and sp_r["cutoff_ts"] is not None),
+            ]
             reg1 = registry.dispatch("model_register", {
                 "name": "xgb_eval", "version": "0.1",
                 "train_fingerprint": m["fingerprint"], "metrics": {"auc": 0.9}})
@@ -1707,6 +1765,220 @@ def run_engine_layer() -> int:
         os.environ.pop("FK_ENGINE_DRYRUN_URL", None)
         os.environ.pop("FK_ENGINE_DRYRUN_TOKEN", None)
     return _report("引擎适配器(离线,打桩 dry-run)", checks)
+
+
+def run_decision_plane_layer() -> int:
+    """离线:P0-2/P0-3 Decision Plane —— active strategy 阈值覆盖真正进入
+    判定(本地模式),champion 模型信号 R007 按阈值命中,what-if 优先于
+    策略覆盖,远程模式只带版本号、判定归引擎。"""
+    checks = []
+    from agent.tools import actions
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "labels.json", "blacklist.json",
+                  "thresholds.json", "device_intel.json", "accounts.json",
+                  "ip_intel.json", "reports.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        os.environ["FK_DATA_DIR"] = td
+        try:
+            ev1009 = {"uid": "u_1009", "ip": "203.0.113.66",
+                      "type": "order", "amount": 4999.0, "ts": 1784106480}
+            base_r = registry.dispatch("rule_eval", {"event": ev1009})
+            r003_in = any(h["rule_id"] == "R003" for h in base_r["hits"])
+            checks.append(("基线:R003 命中且无策略/模型血缘",
+                           r003_in and "strategy_version" not in base_r
+                           and "model_version" not in base_r))
+
+            # --- P0-3: active strategy 阈值覆盖生效 ---
+            registry.dispatch("strategy_register", {
+                "strategy_name": "s_strict", "version": "1",
+                "rules": ["R001", "R002", "R003"],
+                "thresholds": {"r003_high_amount": 999999.0}})
+            registry.dispatch("strategy_promote", {
+                "strategy_name": "s_strict", "version": "1", "to": "validated"})
+            registry.dispatch("strategy_promote", {
+                "strategy_name": "s_strict", "version": "1", "to": "shadow"})
+            p3 = registry.dispatch("strategy_promote", {
+                "strategy_name": "s_strict", "version": "1", "to": "active",
+                "reason": "eval"})
+            actions.decide(p3["action_id"], approve=True, operator="eval_op")
+            r1 = registry.dispatch("rule_eval", {"event": ev1009})
+            checks += [
+                ("active strategy:阈值覆盖进入判定(R003 失效)",
+                 "strategy_version" in r1 and r1["strategy_version"] == "s_strict 1"
+                 and not any(h["rule_id"] == "R003" for h in r1["hits"])
+                 and r1["action"] == "reject"),
+                ("active strategy:结果携带覆盖阈值供证据链溯源",
+                 r1.get("strategy_thresholds") == {"r003_high_amount": 999999.0}),
+            ]
+            r_u1 = registry.dispatch("rule_eval", {"event": {
+                "uid": "u_1001", "type": "order", "amount": 5000.0,
+                "ts": 1784099100}})
+            checks.append(("active strategy:原 R003 大额正常单变 pass",
+                           r_u1["action"] == "pass"
+                           and not any(h["rule_id"] == "R003"
+                                      for h in r_u1["hits"])))
+
+            # what-if 显式覆盖 > 策略覆盖(用户实验优先)
+            from agent.tools import policy as _policy
+            prev = _policy.set_overrides({"r003_high_amount": 1.0})
+            try:
+                r_wi = registry.dispatch("rule_eval", {"event": ev1009})
+                checks.append(("what-if 覆盖优先于 active strategy",
+                               any(h["rule_id"] == "R003" for h in r_wi["hits"])
+                               and r_wi.get("source_note")
+                               and "what-if" in r_wi["source_note"]))
+            finally:
+                _policy.restore_overrides(prev)
+
+            # --- P0-2: champion 模型信号 R007 ---
+            from agent.tools.dataset import split_datasets
+            sp = split_datasets(0.7)
+            registry.dispatch("model_register", {
+                "name": "xgb_dp", "version": "1",
+                "train_fingerprint": sp["train_fingerprint"]})
+            registry.dispatch("model_promote", {
+                "name": "xgb_dp", "version": "1", "to": "shadow"})
+            registry.dispatch("model_eval", {
+                "name": "xgb_dp", "version": "1",
+                "scores": {"u_1004": 0.8, "u_1005": 0.75},
+                "eval_fingerprint": sp["eval_fingerprint"]})
+            registry.dispatch("model_promote", {
+                "name": "xgb_dp", "version": "1", "to": "challenger"})
+            pm = registry.dispatch("model_promote", {
+                "name": "xgb_dp", "version": "1", "to": "champion",
+                "reason": "eval"})
+            actions.decide(pm["action_id"], approve=True, operator="eval_op")
+            ev_low = {"uid": "u_1001", "type": "order", "amount": 50.0,
+                      "ts": 1784099100}
+            r_ns = registry.dispatch("rule_eval", {"event": ev_low})
+            checks += [
+                ("champion 上线无分数:判定不变,附模型血缘",
+                 r_ns["model_version"] == "xgb_dp 1"
+                 and "model_score" not in r_ns
+                 and "champion" in r_ns.get("model_signal", "")
+                 and not any(h["rule_id"] == "R007" for h in r_ns["hits"])),
+            ]
+            (base / "model_scores.json").write_text(
+                json.dumps({"u_1001": 0.3}), encoding="utf-8")
+            r_lo = registry.dispatch("rule_eval", {"event": ev_low})
+            checks.append(("champion 低分(<review 阈值):不命中 R007",
+                           r_lo.get("model_score") == 0.3
+                           and "低于模型阈值" in r_lo.get("model_signal", "")
+                           and not any(h["rule_id"] == "R007"
+                                      for h in r_lo["hits"])))
+            (base / "model_scores.json").write_text(
+                json.dumps({"u_1001": 0.99}), encoding="utf-8")
+            r_hi = registry.dispatch("rule_eval", {"event": ev_low})
+            checks += [
+                ("champion 高分(>=reject 阈值):R007 reject 且取最重",
+                 r_hi["action"] == "reject"
+                 and any(h["rule_id"] == "R007" for h in r_hi["hits"])
+                 and r_hi.get("model_score") == 0.99
+                 and r_hi.get("rule_count_evaluated") == 7),
+            ]
+            # 远程模式:本地 active strategy 只带版本号,判定归引擎(打桩)
+            import urllib.request as _ur
+            import json as _j
+
+            class _Resp:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def read(self):
+                    return _j.dumps({
+                        "action": "review", "policy_version": "engine-p9",
+                        "hits": [{"rule_id": "R_ENGINE", "reason": "引擎",
+                                  "action": "review"}]}).encode("utf-8")
+
+            seen = {}
+
+            def fake_urlopen(req, timeout=None):
+                seen["payload"] = _j.loads(req.data.decode("utf-8"))
+                return _Resp()
+
+            orig = _ur.urlopen
+            os.environ["FK_ENGINE_DRYRUN_URL"] = "http://fake/dry-run"
+            try:
+                _ur.urlopen = fake_urlopen
+                r_rem = registry.dispatch("rule_eval", {"event": ev_low})
+                checks += [
+                    ("远程模式:请求体带 strategy_version 且判定来自引擎",
+                     seen["payload"].get("strategy_version") == "s_strict 1"
+                     and r_rem["source"] == "remote_engine"
+                     and r_rem["action"] == "review"
+                     and r_rem["strategy_version"] == "s_strict 1"),
+                    ("远程模式:本地模型信号不叠加(融合归生产引擎),附血缘",
+                     r_rem["model_version"] == "xgb_dp 1"
+                     and not any(h["rule_id"] == "R007"
+                                for h in r_rem["hits"])),
+                ]
+            finally:
+                _ur.urlopen = orig
+                os.environ.pop("FK_ENGINE_DRYRUN_URL", None)
+        finally:
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("Decision Plane 接入(离线,P0-2/P0-3,临时目录)", checks)
+
+
+def run_feature_parity_layer() -> int:
+    """离线:P0-5 特征离线/在线一致性 —— 默认同源诚实标注未验证;
+    注入破损在线实现必须检出差异(检验注册路径真实生效,不是恒真断言)。"""
+    checks = []
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+        for f in ("events_sample.json", "labels.json"):
+            shutil.copy(ROOT / "data" / f, base / f)
+        os.environ["FK_DATA_DIR"] = td
+        sys.path.insert(0, td)
+        try:
+            r0 = registry.dispatch("feature_parity_check", {})
+            checks += [
+                ("默认(未注入在线实现):全部账号一致且诚实标注未验证",
+                 r0["checked"] == 6 and r0["passed"] == 6
+                 and r0["diff_count"] == 0
+                 and r0["source"] == "same_impl"
+                 and r0["verdict"] == "warn"),
+                ("默认:结论明确说清'同源一致 != 线上已验证'",
+                 "未配置 FK_FEATURE_ONLINE_MODULE" in r0.get("note", "")),
+            ]
+            # 破损在线实现:coupon_claims 恒 +1 —— 典型的线上口径偏差
+            (base / "broken_online.py").write_text(
+                "def online_features(uid, as_of_ts=None, window_seconds=None):\n"
+                "    from agent.tools.featurelib import account_features\n"
+                "    r = account_features(uid, as_of_ts=as_of_ts, "
+                "window_seconds=window_seconds)\n"
+                "    if r.get('found'):\n"
+                "        r['coupon_claims'] = (r.get('coupon_claims') or 0) + 1\n"
+                "    return r\n", encoding="utf-8")
+            os.environ["FK_FEATURE_ONLINE_MODULE"] = "broken_online:online_features"
+            r1 = registry.dispatch("feature_parity_check",
+                                   {"uids": ["u_1001", "u_1002"]})
+            checks += [
+                ("注入破损在线实现:检出差异且点名账号与特征",
+                 r1["source"] == "online_impl"
+                 and r1["verdict"] == "fail"
+                 and r1["diff_count"] >= 2
+                 and any(d["key"] == "coupon_claims" for d in r1["diffs"])
+                 and set(r1["failed_accounts"]) == {"u_1001", "u_1002"}),
+                ("parity:通过的账号不被误报",
+                 r1["passed"] == 0 and r1["checked"] == 2),
+            ]
+            # 无差异账号(破损实现对无 coupon 账号可能一致):u_1009 无领券?
+            # 破损实现只改 coupon_claims,若某账号本就 0 且 found=True 会 +1,
+            # 全账号都应有差异;这里验证 uids 过滤生效
+            r2 = registry.dispatch("feature_parity_check", {"uids": ["u_1003"]})
+            checks.append(("uids 过滤生效",
+                           r2["checked"] == 1 and r2["diff_count"] == 1))
+            os.environ.pop("FK_FEATURE_ONLINE_MODULE", None)
+        finally:
+            sys.path.remove(td)
+            os.environ.pop("FK_FEATURE_ONLINE_MODULE", None)
+            os.environ.pop("FK_DATA_DIR", None)
+    return _report("特征离线/在线一致性(P0-5,临时目录)", checks)
 
 
 def run_gen_layer() -> int:
@@ -2710,7 +2982,8 @@ def run_cost_layer() -> int:
     # 事故治理纪律并入后上调至 4750;成本纪律并入后上调至 4800;
     # 版本溯源纪律并入后上调至 4900;特征版本化纪律并入后上调至 5000;
     # 标签生命周期纪律并入后上调至 5150;在线漂移纪律并入后上调至 5250;
-    # 反馈/实验/门禁纪律并入后上调至 5300。
+    # 反馈/实验/门禁纪律并入后上调至 5300;Decision Plane/评估防泄漏/
+    # 特征一致性三条纪律(P0)并入后上调至 5700(压缩后仍以纪律完整为准)。
     # schema:模型生命周期五件套后 46 工具上调至 23000;策略注册表六件套
     # 后 52 工具上调至 26000;策略回放/影子两件套后 54 工具上调至 27000;
     # Job 四件套后 58 工具上调至 29000;特征健康/血缘/事故后 66 工具上调
@@ -2722,8 +2995,8 @@ def run_cost_layer() -> int:
          % (s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
          s["schemas_chars"] <= 40500),
-        ("system prompt <= 5300 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 5300),
+        ("system prompt <= 5700 chars(现 %d)" % s["system_chars"],
+         s["system_chars"] <= 5700),
     ])
 
 
@@ -2878,6 +3151,8 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_feedback_pipeline_layer)
     failures += _layer(run_agent_log_layer)
     failures += _layer(run_engine_layer)
+    failures += _layer(run_decision_plane_layer)
+    failures += _layer(run_feature_parity_layer)
     failures += _layer(run_whitelist_layer)
     failures += _layer(run_graylist_layer)
     failures += _layer(run_policy_layer)
@@ -2931,9 +3206,12 @@ def main() -> int:
     failures, records = run_all(offline=args.offline)
     print("\n结果:%s" % ("全部通过" if failures == 0 else "%d 项失败" % failures))
     if args.report:
-        from report import write_report
+        from report import write_report, refresh_docs
         write_report(Path(args.report), records, offline=args.offline,
                      failures=failures)
+        # P0-4:AGENT_CARD/README 系统快照自动同步(工具数/断言数/案例数/
+        # schema/system/commit/指纹 —— 全部取代码与本次评估,不人工维护)
+        refresh_docs(records)
         print("报告已写入: %s" % args.report)
     return 1 if failures else 0
 
