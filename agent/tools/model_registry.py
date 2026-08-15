@@ -8,8 +8,9 @@
 铁律:
   - champion 同时只能有一个(新 champion 上线自动把旧 champion 置 deprecated);
   - 模型必须绑定 train_fingerprint + feature_catalog_version(feature semantics);
-  - model_eval 只在"评估数据集指纹 == 训练指纹"时有效 —— 换个数据集评出来的
-    指标不能冒充训练集表现;
+  - 评估防泄漏(P0-1):model_eval 必须用 build_dataset 时间切分的评估侧
+    (eval_fingerprint != train_fingerprint,账号零重叠且更晚)—— 同源评估
+    是 train/eval leakage,指标不能冒充泛化表现;
   - shadow -> challenger 必须已过评估门禁(metrics 存在且指纹匹配);
   - challenger -> champion 必须走 pending 审批(actions.decide 批准后才落盘),
     审批 id 进记录(approval_id),rollback 同样走审批并写审计;
@@ -138,10 +139,12 @@ def model_register(name: str, version: str, train_fingerprint: str = "",
 @tool(
     name="model_eval",
     description=(
-        "对模型跑评估并写入登记簿:传入模型对已标注账号的风险分 {uid: score}"
+        "对模型跑评估并写入登记簿:传入模型对评估切分账号的风险分 {uid: score}"
         "(越大越可疑),计算 AUC/KS/Precision@K/Recall/FPR/FNR/混淆矩阵。"
-        "评估数据集指纹必须等于模型训练指纹,否则拒绝(换数据集评出的指标"
-        "不能冒充训练集表现)。结果是 shadow->challenger 评估门禁的依据。"
+        "防泄漏门禁(P0-1):eval_fingerprint 必须来自 build_dataset 的时间切分"
+        "评估侧,且不等于训练指纹 —— 同源评估(train/eval 同批账号)= 训练泄漏,"
+        "指标不能冒充泛化表现。结果带训练/评估指纹、两侧账号数与切点时点。"
+        "结果是 shadow->challenger 评估门禁的依据。"
     ),
     parameters={
         "type": "object",
@@ -149,28 +152,47 @@ def model_register(name: str, version: str, train_fingerprint: str = "",
             "name": {"type": "string", "description": "模型名"},
             "version": {"type": "string", "description": "版本号"},
             "scores": {"type": "object",
-                       "description": "模型风险分 {uid: score},越大越可疑"},
+                       "description": "模型对评估切分账号的风险分 {uid: score},越大越可疑"},
+            "eval_fingerprint": {"type": "string",
+                                 "description": "评估数据集指纹(build_dataset split_ratio 输出的 eval 侧指纹,必填)"},
         },
-        "required": ["name", "version", "scores"],
+        "required": ["name", "version", "scores", "eval_fingerprint"],
     },
 )
-def model_eval(name: str, version: str, scores: Dict[str, float]):
+def model_eval(name: str, version: str, scores: Dict[str, float],
+               eval_fingerprint: str = ""):
     items = _load()
     entry = _find(items, name, version)
     if entry is None:
         return {"error": "模型未登记: %s %s" % (name, version)}
     if not isinstance(scores, dict) or not scores:
         return {"error": "scores 必须是非空 {uid: score}"}
-    from .dataset import dataset_fingerprint
+    from .dataset import split_datasets
     from ..metrics import evaluate  # 惰性:数学本体在 agent/metrics.py
-    fp = dataset_fingerprint()
-    if fp != entry.get("train_fingerprint"):
-        return {"error": "fingerprint 不匹配:评估数据集 %s != 训练指纹 %s"
-                         "(评估必须用训练同源数据)" % (fp, entry["train_fingerprint"])}
+    if not eval_fingerprint:
+        return {"error": "泄漏门禁:必须提供 eval_fingerprint"
+                         "(先 build_dataset split_ratio 拿评估切分指纹)"}
+    if eval_fingerprint == entry.get("train_fingerprint"):
+        return {"error": "泄漏门禁:评估指纹 == 训练指纹 —— 同源评估是 "
+                         "train/eval leakage,指标不代表泛化,拒绝"}
+    sp = split_datasets()
+    if "error" in sp:
+        return {"error": "泄漏门禁:%s" % sp["error"]}
+    if eval_fingerprint != sp["eval_fingerprint"]:
+        return {"error": "泄漏门禁:评估指纹 %s 不是当前数据集的评估切分(%s)"
+                         "—— 评估只能发生在 build_dataset 的时间切分评估侧"
+                         "(零重叠,更晚的账号)" % (eval_fingerprint,
+                                               sp["eval_fingerprint"])}
     labels = load_labels()
     metrics = evaluate(scores, labels)
-    metrics["eval_fingerprint"] = fp
+    metrics["eval_fingerprint"] = eval_fingerprint
+    metrics["train_fingerprint"] = entry.get("train_fingerprint")
+    metrics["eval_accounts"] = sp["eval_count"]
+    metrics["train_accounts"] = sp["train_count"]
+    metrics["split_cutoff_ts"] = sp["cutoff_ts"]
+    metrics["split_disjoint"] = sp["disjoint"]
     entry["metrics"] = metrics
+    entry["eval_fingerprint"] = eval_fingerprint
     entry["evaluated_at"] = _now_iso()
     _save(items)
     return {"status": "evaluated", "name": name, "version": version,
@@ -213,9 +235,11 @@ def model_promote(name: str, version: str, to: str, reason: str = ""):
                 "to": "shadow", "note": "shadow 自动提交(观察期)"}
     if to == "challenger":
         m = entry.get("metrics") or {}
-        if not m or m.get("eval_fingerprint") != entry.get("train_fingerprint"):
-            return {"error": "评估门禁:先 model_eval 且评估指纹须与训练指纹一致"
-                             "(当前 metrics=%s)" % bool(m)}
+        ef = m.get("eval_fingerprint")
+        tf = entry.get("train_fingerprint")
+        if not m or not ef or ef == tf or not m.get("split_disjoint"):
+            return {"error": "评估门禁:先 model_eval(时间切分评估侧,"
+                             "评估指纹须 != 训练指纹;当前 metrics=%s)" % bool(m)}
         entry["status"] = "challenger"
         _save(items)
         return {"status": "promoted", "name": name, "version": version,
