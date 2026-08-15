@@ -4,7 +4,10 @@
 检查面:data_health / label_quality / feature_health / model_status /
 strategy_status / engine_status / evaluation_status / audit_status /
 security_status / degraded_status / budget_status。
-结果:READY / BLOCKED(硬伤,先修)/ DEGRADED(有降级或骨架态,可观察运行)。
+结果:READY / BLOCKED(硬伤或核心资产未就绪,先修)/ DEGRADED(能力降级
+但仍有可信决策路径,可观察运行)。语义拆分:无 champion / 无 active
+strategy / 数据硬伤 = BLOCKED(判定路径没有完整资产);引擎本地模式、
+缺评估报告等 = DEGRADED(判定路径在,只是降级态)。
 """
 from pathlib import Path
 from typing import Dict
@@ -43,12 +46,16 @@ def _readiness() -> Dict:
         "conflicts=%d(只报不改)" % len(conflicts))
     models = _mload()
     champions = [m for m in models if m.get("status") == "champion"]
-    add("model_status", "ok" if champions else "warn",
-        "champion=%s" % (champions[0]["name"] if champions else "无"))
+    # 语义修正(评审 P0-5 方向):BLOCKED = 核心决策资产未就绪 ——
+    # 无 champion(判定路径没有模型层)/无 active strategy(没有经治理
+    # 生效的策略声明)与数据硬伤同级,不是"还能凑合观察"的降级态;
+    # DEGRADED 只留给"能力降级但仍有可信决策路径"(本地引擎/缺报告等)。
+    add("model_status", "ok" if champions else "fail",
+        "champion=%s(核心资产:判定路径的模型层)" % (champions[0]["name"] if champions else "无"))
     strategies = _sload()
     actives = [s for s in strategies if s.get("status") == "active"]
-    add("strategy_status", "ok" if actives else "warn",
-        "active=%s" % (len(actives),))
+    add("strategy_status", "ok" if actives else "fail",
+        "active=%s(核心资产:经治理生效的策略声明)" % (len(actives),))
     es = engine_status()
     add("engine_status", "ok" if es["mode"] == "remote_engine" else "degraded",
         es["mode"])
