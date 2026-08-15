@@ -23,7 +23,6 @@ from .datasource import data_dir, load_appeals
     parameters={"type": "object", "properties": {}},
 )
 def feedback_pipeline():
-    from .feature_health import feature_health_check
     from .incidents import _load as _inc_load
     from .label_quality_proxy import label_conflicts
     from .reconcile import _load_queue as _mq_load

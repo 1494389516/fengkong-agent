@@ -34,7 +34,7 @@ def _readiness() -> Dict:
         verdicts.append(level)
 
     dh = data_health_check()
-    add("data_health", dh["summary"] if dh["summary"] != "ok" else "ok",
+    add("data_health", dh["summary"],
         "issues=%d" % dh.get("issues_total", 0))
     fh = feature_health_check()
     add("feature_health", fh["summary"], "accounts=%d" % fh.get("accounts_checked", 0))
@@ -73,9 +73,8 @@ def _readiness() -> Dict:
                 pass
     add("degraded_status", "ok" if degraded == 0 else "degraded",
         "degraded_decisions=%d" % degraded)
-    import json as _j2
     from . import schemas as _schemas
-    schema_chars = len(_j2.dumps(_schemas(), ensure_ascii=False))
+    schema_chars = len(_json.dumps(_schemas(), ensure_ascii=False))
     system_chars = len((ROOT / "agent" / "prompts" / "system.md")
                        .read_text(encoding="utf-8"))
     budget_ok = schema_chars <= 37500 and system_chars <= 5250

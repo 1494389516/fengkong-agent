@@ -24,9 +24,6 @@ from .datasource import data_dir, load_decisions
 ROOT = Path(__file__).resolve().parent.parent.parent
 WARN_REL = 0.5        # 率/均值相对变化 50% 告警
 WARN_PSI = 0.25       # 工具分布 PSI 告警线
-WARN_AUC_DROP = 0.05  # champion AUC 跌幅告警线
-
-
 def _split(records: list) -> tuple:
     """前一半=基线窗,后一半=当前窗。"""
     n = len(records)
@@ -167,10 +164,6 @@ def model_drift():
     if not met:
         level = "warn"
         alerts.append("champion 尚无评估指标(先 model_eval)")
-    else:
-        auc = met.get("auc")
-        if auc is not None and auc < 0.95 - WARN_AUC_DROP:  # 骨架口径:绝佳模型基准
-            pass  # 绝对值不作硬判,只判相对
     return {"available": True,
             "champion": "%s %s" % (m["name"], m["version"]),
             "metrics": {k: met.get(k) for k in ("auc", "ks", "recall",
