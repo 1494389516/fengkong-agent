@@ -183,6 +183,15 @@ def model_eval(name: str, version: str, scores: Dict[str, float],
                          "—— 评估只能发生在 build_dataset 的时间切分评估侧"
                          "(零重叠,更晚的账号)" % (eval_fingerprint,
                                                sp["eval_fingerprint"])}
+    # 指纹门禁只约束了"声明",还必须约束"scores 的账号集":训练侧账号的
+    # 分数混进评估 = 标签泄漏(指纹对了、账号错了照样漏)。scores 的 uid
+    # 必须是评估切分账号的子集。
+    eval_uids = set(sp["eval_accounts"])
+    leaked = sorted(set(scores) - eval_uids)
+    if leaked:
+        return {"error": "泄漏门禁:scores 含评估切分之外的账号 %s"
+                         "(评估只能发生在评估侧账号上,训练侧账号进评估=泄漏)"
+                         % leaked}
     labels = load_labels()
     metrics = evaluate(scores, labels)
     metrics["eval_fingerprint"] = eval_fingerprint

@@ -1350,6 +1350,14 @@ def run_model_lifecycle_layer() -> int:
             checks.append(("泄漏门禁:非本数据集评估切分拒绝",
                            "泄漏门禁" in re_fake.get("error", "")
                            and "deadbeef" in re_fake.get("error", "")))
+            # 指纹对了、账号错了也要拦:训练侧账号分数混进评估 = 标签泄漏
+            re_leak = registry.dispatch("model_eval", {
+                "name": "xgb_demo", "version": "0.1",
+                "scores": {"u_1001": 0.1, "u_1004": 0.8},  # u_1001 在训练侧
+                "eval_fingerprint": eval_fp})
+            checks.append(("泄漏门禁:scores 含评估切分之外的账号拒绝",
+                           "泄漏门禁" in re_leak.get("error", "")
+                           and "u_1001" in re_leak.get("error", "")))
             re_ = registry.dispatch("model_eval", {
                 "name": "xgb_demo", "version": "0.1", "scores": eval_scores,
                 "eval_fingerprint": eval_fp})
