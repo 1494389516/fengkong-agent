@@ -87,22 +87,20 @@ def _load_lineage() -> list:
 
 
 def _lineage_context(event: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, Any]:
-    """给判定结果补全血缘字段(解释/落库共用)。"""
+    """给判定结果补全血缘字段(解释/落库共用)。champion/active 策略的选择
+    口径与引擎一致(engine._champion / engine._active_strategy),避免"文件序
+    第一个"与"部署时间最新"两套口径打架。"""
     from .featurelib import FEATURE_CATALOG_VERSION
-    from .model_registry import _load as _mload
-    from .strategy_registry import _load as _sload
     decision = dict(decision)
     decision.setdefault("feature_snapshot_version", FEATURE_CATALOG_VERSION)
-    champions = [m for m in _mload() if m.get("status") == "champion"]
+    from ..engine import _champion, _active_strategy  # 惰性:防导入环
+    ch = _champion()
     decision["model_version"] = (decision.get("model_version")
-                                 or ("%s %s" % (champions[0]["name"],
-                                                champions[0]["version"])
-                                     if champions else None))
-    actives = [s for s in _sload() if s.get("status") == "active"]
+                                 or ("%s %s" % (ch["name"], ch["version"])
+                                     if ch else None))
+    strategy = _active_strategy()
     decision["strategy_version"] = (decision.get("strategy_version")
-                                    or ("%s %s" % (actives[0]["strategy_name"],
-                                                   actives[0]["version"])
-                                        if actives else None))
+                                    or strategy.get("strategy_version"))
     return decision
 
 

@@ -171,7 +171,8 @@ def _model_score_remote(uid: str, event: Dict[str, Any]):
 
 
 def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
-                        use_current_policy: bool = False) -> Dict:
+                        use_current_policy: bool = False,
+                        strategy_thresholds: Dict = None) -> Dict:
     """R007 模型信号(P0-2):champion 模型真正进入判定路径。
 
     - 无 champion -> 判定不变(只可能随 champion 上线才生效);
@@ -189,15 +190,27 @@ def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
         return result
     result["model_version"] = "%s %s" % (ch["name"], ch["version"])
     uid = event.get("uid", "")
-    score = (_model_score_remote(uid, event)
-             if os.environ.get(MODEL_URL_ENV) else _model_score_local(uid))
-    if score is None:
-        result["model_signal"] = "champion 已上线但无模型分数(未接入模型服务/无本地分数)"
-        return result
+    if os.environ.get(MODEL_URL_ENV):
+        # 远程模型服务:失败/无分数与本地无分数语义不同,须区分并打降级标
+        score = _model_score_remote(uid, event)
+        if score is None:
+            result["model_signal"] = ("champion 已上线但模型服务未返回分数"
+                                      "(FK_ENGINE_MODEL_URL 调用失败或无分数)")
+            result["model_degraded"] = True
+            return result
+    else:
+        score = _model_score_local(uid)
+        if score is None:
+            result["model_signal"] = ("champion 已上线但本地无模型分数"
+                                      "(data/model_scores.json 无此 uid)")
+            return result
     result["model_score"] = score
     from .tools.policy import active_policy
     from .tools.rules import ACTION_ORDER, _hit
     p = active_policy(None if use_current_policy else event.get("ts"))
+    # 策略覆盖同样作用于模型阈值(与规则阈值一套口径,不回放时覆盖为空)
+    if use_current_policy and strategy_thresholds and not p.get("_overridden"):
+        p.update(strategy_thresholds)
     if score >= p["model_score_reject_threshold"]:
         hit_action = "reject"
     elif score >= p["model_score_review_threshold"]:
@@ -219,16 +232,28 @@ def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
 
 def _local_eval(event: Dict[str, Any], use_current_policy: bool,
                 strategy: Dict) -> Dict:
-    """本地判定 + active strategy 覆盖 + 模型信号,一次打包。"""
+    """本地判定 + active strategy 覆盖 + 模型信号,一次打包。
+
+    口径纪律:active strategy 阈值覆盖只在当前口径(use_current_policy=True)
+    生效 —— 回放(False)要还原"当时生效的策略"(policy 版本表 as-of),当前
+    active strategy 是"现在"的治理声明,把它叠到回放上会污染 reconcile 对账
+    (历史决策当时并没有这套覆盖)。回放时只带 strategy_version 与说明,不应用。"""
     from .tools.rules import _local_rule_eval  # 惰性:防导入环
+    overrides = (strategy.get("strategy_thresholds")
+                 if use_current_policy and strategy else None)
     r = _local_rule_eval(event, use_current_policy=use_current_policy,
-                         threshold_overrides=strategy.get("strategy_thresholds"))
+                         threshold_overrides=overrides)
     if strategy:
         r["strategy_version"] = strategy["strategy_version"]
-        r["strategy_thresholds"] = strategy["strategy_thresholds"]
+        if use_current_policy:
+            r["strategy_thresholds"] = strategy["strategy_thresholds"]
+        else:
+            r["strategy_note"] = ("回放口径:active strategy 阈值覆盖未应用,"
+                                  "判定来自 policy 版本表(as-of)")
         if strategy.get("strategy_ambiguity"):
             r["strategy_ambiguity"] = strategy["strategy_ambiguity"]
-    return _apply_model_signal(r, event, use_current_policy=use_current_policy)
+    return _apply_model_signal(r, event, use_current_policy=use_current_policy,
+                               strategy_thresholds=strategy.get("strategy_thresholds"))
 
 
 def evaluate_event(event: Dict[str, Any],
@@ -237,8 +262,6 @@ def evaluate_event(event: Dict[str, Any],
     (local_rules / remote_engine / local_rules_fallback)供溯源;
     P0-2/P0-3 起,本地判定自动携带 active strategy 覆盖与 champion
     模型信号(R007,见 _apply_model_signal)。"""
-    from .tools.rules import _local_rule_eval  # 惰性:防导入环
-
     strategy = _active_strategy()
     if _overridden():
         r = _local_eval(event, use_current_policy, strategy)
@@ -306,10 +329,14 @@ def evaluate_batch(events: List[Dict[str, Any]],
             raise ValueError("批量 dry-run 返回与请求不齐(期望 %d 条,得 %r)"
                              % (len(events), type(decisions).__name__))
         out = [_map_remote(d) for d in decisions]
-        if strategy:
-            for r in out:
-                if not r.get("strategy_version"):
-                    r["strategy_version"] = strategy["strategy_version"]
+        ch = _champion()  # 批量远程同样附 champion 血缘(与单事件口径一致)
+        for r in out:
+            if strategy and not r.get("strategy_version"):
+                r["strategy_version"] = strategy["strategy_version"]
+            if strategy and strategy.get("strategy_ambiguity"):
+                r["strategy_ambiguity"] = strategy["strategy_ambiguity"]
+            if ch:
+                r["model_version"] = "%s %s" % (ch["name"], ch["version"])
         return out
     except Exception as e:  # noqa: BLE001
         out = []
