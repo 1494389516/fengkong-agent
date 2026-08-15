@@ -1810,7 +1810,9 @@ def run_decision_plane_layer() -> int:
                 "strategy_name": "s_strict", "version": "1", "to": "active",
                 "reason": "eval"})
             actions.decide(p3["action_id"], approve=True, operator="eval_op")
-            r1 = registry.dispatch("rule_eval", {"event": ev1009})
+            # 当前口径(use_current_policy=True):策略覆盖生效
+            r1 = registry.dispatch("rule_eval", {"event": ev1009,
+                                                 "use_current_policy": True})
             checks += [
                 ("active strategy:阈值覆盖进入判定(R003 失效)",
                  "strategy_version" in r1 and r1["strategy_version"] == "s_strict 1"
@@ -1821,11 +1823,18 @@ def run_decision_plane_layer() -> int:
             ]
             r_u1 = registry.dispatch("rule_eval", {"event": {
                 "uid": "u_1001", "type": "order", "amount": 5000.0,
-                "ts": 1784099100}})
+                "ts": 1784099100}, "use_current_policy": True})
             checks.append(("active strategy:原 R003 大额正常单变 pass",
                            r_u1["action"] == "pass"
                            and not any(h["rule_id"] == "R003"
                                       for h in r_u1["hits"])))
+            # 回放口径(use_current_policy=False):策略覆盖不应用,防污染对账
+            r_rp = registry.dispatch("rule_eval", {"event": ev1009})
+            checks.append(("回放口径:active strategy 覆盖不应用(R003 仍按当时阈值命中)",
+                           any(h["rule_id"] == "R003" for h in r_rp["hits"])
+                           and "strategy_thresholds" not in r_rp
+                           and r_rp.get("strategy_version") == "s_strict 1"
+                           and "回放口径" in r_rp.get("strategy_note", "")))
 
             # what-if 显式覆盖 > 策略覆盖(用户实验优先)
             from agent.tools import policy as _policy
@@ -1885,6 +1894,37 @@ def run_decision_plane_layer() -> int:
                  and r_hi.get("model_score") == 0.99
                  and r_hi.get("rule_count_evaluated") == 7),
             ]
+            # 策略覆盖 model_score 阈值:先让 s_strict 退役(唯一 active 便于
+            # 确定性验证),再上线 s_model 把 reject 阈值提到 1.01、review 降到
+            # 0.5 -> 同分 0.99 由 reject 降为 review,证明 R007 阈值同样受
+            # active strategy 覆盖(而非只走 policy 版本表)。
+            rb = registry.dispatch("strategy_rollback", {
+                "strategy_name": "s_strict", "version": "1", "reason": "eval"})
+            actions.decide(rb["action_id"], approve=True, operator="eval_op")
+            registry.dispatch("strategy_register", {
+                "strategy_name": "s_model", "version": "1", "rules": [],
+                "thresholds": {"model_score_review_threshold": 0.5,
+                               "model_score_reject_threshold": 1.01}})
+            registry.dispatch("strategy_promote", {
+                "strategy_name": "s_model", "version": "1", "to": "validated"})
+            registry.dispatch("strategy_promote", {
+                "strategy_name": "s_model", "version": "1", "to": "shadow"})
+            pm2 = registry.dispatch("strategy_promote", {
+                "strategy_name": "s_model", "version": "1", "to": "active",
+                "reason": "eval"})
+            actions.decide(pm2["action_id"], approve=True, operator="eval_op")
+            r_mt = registry.dispatch("rule_eval", {"event": ev_low,
+                                                   "use_current_policy": True})
+            checks += [
+                ("策略覆盖 model_score 阈值:R007 按覆盖值判定(reject->review)",
+                 r_mt["action"] == "review"
+                 and any(h["rule_id"] == "R007" and h["action"] == "review"
+                         for h in r_mt["hits"])
+                 and r_mt.get("model_score") == 0.99),
+                ("单 active 策略:血缘指向 s_model 且无歧义",
+                 r_mt.get("strategy_version") == "s_model 1"
+                 and "strategy_ambiguity" not in r_mt),
+            ]
             # 远程模式:本地 active strategy 只带版本号,判定归引擎(打桩)
             import urllib.request as _ur
             import json as _j
@@ -1915,10 +1955,10 @@ def run_decision_plane_layer() -> int:
                 r_rem = registry.dispatch("rule_eval", {"event": ev_low})
                 checks += [
                     ("远程模式:请求体带 strategy_version 且判定来自引擎",
-                     seen["payload"].get("strategy_version") == "s_strict 1"
+                     seen["payload"].get("strategy_version") == "s_model 1"
                      and r_rem["source"] == "remote_engine"
                      and r_rem["action"] == "review"
-                     and r_rem["strategy_version"] == "s_strict 1"),
+                     and r_rem["strategy_version"] == "s_model 1"),
                     ("远程模式:本地模型信号不叠加(融合归生产引擎),附血缘",
                      r_rem["model_version"] == "xgb_dp 1"
                      and not any(h["rule_id"] == "R007"
