@@ -31,7 +31,9 @@
    "self_amount_spike_ratio": 3.0,
    "self_amount_floor": 100.0,
    "graylist_observe_days": 30,
-   "graylist_promote_min_review": 3
+   "graylist_promote_min_review": 3,
+   "model_score_review_threshold": 0.9,
+   "model_score_reject_threshold": 0.98
   }
  },
  {

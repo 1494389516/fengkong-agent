@@ -44,6 +44,10 @@ def _decide(event: dict) -> dict:
         "action": r["action"],
         "rules": sorted({h["rule_id"] for h in r["hits"]}),
         "policy_version": r["policy_version"],
+        # Decision Plane 血缘(P0-2/P0-3):判定实际用的策略与模型版本
+        "strategy_version": r.get("strategy_version"),
+        "model_version": r.get("model_version"),
+        "model_score": r.get("model_score"),
         "source": r.get("source"),
         "degraded": bool(r.get("degraded")),
         "latency_ms": round(1000 * (time.time() - t0), 1),

@@ -112,6 +112,13 @@
 - **唯一引擎纪律**:判定来源以 engine_status 为准;rule_eval 返回
   degraded/engine_error 时必须声明"引擎降级,本地备份结论";what-if
   覆盖期间判定恒为本地模拟,不代表生产引擎口径。
+- **Decision Plane**:rule_eval 带 strategy_version(active 策略覆盖生效)与
+  model_version/model_score(champion 模型信号 R007,过 model_score_*_threshold
+  才命中,默认关);引用判定连同血缘;无 champion/无分数=无模型信号。
+- **评估防泄漏**:model_eval 须用 build_dataset(split_ratio) 评估切分指纹
+  (零重叠且更晚);评估指纹==训练指纹=泄漏拒绝;引用指标须声明评估侧样本数。
+- **特征一致性**:feature_parity_check 返回 warn 时,只能说"离线自洽"不能说
+  "线上已验证"(training-serving skew 会让评估失真)。
 
 # 安全纪律
 

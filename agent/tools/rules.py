@@ -101,9 +101,13 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
     return evaluate_event(event, use_current_policy=use_current_policy)
 
 
-def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
+def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False,
+                      threshold_overrides: Dict[str, float] = None):
     """本地 R001-R006 实现 —— 骨架替身/降级备份,不是独立引擎。
-    公开判定入口是 agent.engine.evaluate_event(经上方的 rule_eval 工具)。"""
+    公开判定入口是 agent.engine.evaluate_event(经上方的 rule_eval 工具)。
+    threshold_overrides:active strategy 的阈值覆盖(引擎层解析后传入,
+    函数级参数传递,不动全局 _OVERRIDES —— 线程安全的局部覆盖;what-if
+    覆盖生效时跳过,用户显式实验优先)。"""
     hits: List[Dict[str, str]] = []
     uid = event.get("uid", "")
     ip = event.get("ip", "")
@@ -116,6 +120,11 @@ def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
     # 策略口径:默认回放当时生效的版本(审计);backtest/scan 传 use_current_policy=True
     # 用当前策略评估历史数据 —— 否则批准了新版本,回测指标永远照不进
     p = active_policy(None if use_current_policy else as_of)
+    # active strategy 的阈值覆盖(引擎层传入):策略注册表治理的阈值真正进入
+    # 判定。函数级参数,不碰全局 _OVERRIDES(线程安全);what-if 覆盖生效时
+    # 跳过(用户显式实验优先于策略覆盖,与远程模式语义一致)。
+    if threshold_overrides and not p.get("_overridden"):
+        p.update(threshold_overrides)
 
     # ------------------------------------------------------------------
     # R001 名单硬拦截:uid / ip / device_id 三个维度带值的全查。

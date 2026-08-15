@@ -26,6 +26,15 @@ Authorization: Bearer 头。
 请求对齐。backtest/scan 的 account_verdicts 在远程模式下走这条批量
 路径 —— 全量工具绝不逐事件打在线网关(250 账号 = 1 次 POST 而非
 N×M 次 HTTP)。
+
+Decision Plane 接入(P0-2/P0-3,骨架的"治理 -> 判定"打通):
+  - active strategy:strategy registry 里 status=active 的策略,其阈值覆盖
+    真正进入本地判定(函数级参数,线程安全);远程模式下版本号随请求带出,
+    判定由生产引擎负责(本地 registry 是治理镜像);
+  - champion 模型:R007 模型信号 —— champion 风险分过 model_score_*_threshold
+    (policy 版本表,默认 0.9/0.98 = 关闭)即命中;分数来源 FK_ENGINE_MODEL_URL
+    或本地 data/model_scores.json(骨架模拟模型服务)。无 champion/无分数
+    = 无信号,判定不变。
 """
 import json
 import os
@@ -35,6 +44,9 @@ from typing import Any, Dict, List
 DRYRUN_URL_ENV = "FK_ENGINE_DRYRUN_URL"
 DRYRUN_TIMEOUT_ENV = "FK_ENGINE_DRYRUN_TIMEOUT"
 DRYRUN_TOKEN_ENV = "FK_ENGINE_DRYRUN_TOKEN"
+# P0-2 模型服务端点(可选):POST {"uid","event"} -> {"score": 0~1}。
+# 未配置时走本地 data/model_scores.json(骨架模拟模型服务)。
+MODEL_URL_ENV = "FK_ENGINE_MODEL_URL"
 
 
 def _overridden() -> bool:
@@ -82,31 +94,164 @@ def _map_remote(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _active_strategy() -> Dict:
+    """当前 active strategy 的阈值覆盖(治理元数据 -> 判定, P0-3)。
+
+    strategy registry 是治理层:同名同时只有一个 active;其阈值覆盖在此
+    真正进入判定路径(本地模式经函数级参数传给规则实现,线程安全)。
+    无 active / 文件缺失 -> 空覆盖(行为与接入前完全一致)。
+    远程引擎模式:阈值由生产配置中心下发,本地 registry 是治理镜像 ——
+    判定以引擎为准,这里只把版本号带进血缘。
+    """
+    from .tools.strategy_registry import _load as _sload  # 惰性:防导入环
+    try:
+        actives = [s for s in _sload() if s.get("status") == "active"]
+    except Exception:  # noqa: BLE001 注册表损坏不掀翻判定路径
+        return {}
+    if not actives:
+        return {}
+    s = actives[0]
+    return {
+        "strategy_version": "%s %s" % (s["strategy_name"], s["version"]),
+        "strategy_thresholds": s.get("thresholds") or {},
+    }
+
+
+def _champion() -> Dict:
+    """当前 champion 模型(唯一)。无则返回 {}。"""
+    from .tools.model_registry import _load as _mload  # 惰性:防导入环
+    try:
+        ch = [m for m in _mload() if m.get("status") == "champion"]
+    except Exception:  # noqa: BLE001 登记簿损坏不掀翻判定路径
+        return {}
+    return ch[0] if ch else {}
+
+
+def _model_score_local(uid: str):
+    """本地模型分数(骨架模拟模型服务):data/model_scores.json {uid: score}。
+    这是离线实验/影子阶段的注入点,接真实系统后由 FK_ENGINE_MODEL_URL
+    的模型服务取代。文件缺失或 uid 无分 -> None(无模型信号)。"""
+    from .tools.datasource import data_dir  # 惰性
+    import json as _j
+    p = data_dir() / "model_scores.json"
+    try:
+        data = _j.loads(p.read_text(encoding="utf-8"))
+    except (OSError, _j.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    s = data.get(uid)
+    return float(s) if s is not None else None
+
+
+def _model_score_remote(uid: str, event: Dict[str, Any]):
+    """远程模型服务(FK_ENGINE_MODEL_URL):POST {"uid","event"} ->
+    {"score": 0~1}。失败显式返回 None(无模型信号,不静默拦截/放行)。"""
+    url = os.environ.get(MODEL_URL_ENV)
+    if not url:
+        return None
+    try:
+        raw = _post_json(url, {"uid": uid, "event": event})
+        s = raw.get("score")
+        return float(s) if s is not None else None
+    except Exception:  # noqa: BLE001 模型服务失败 = 模型信号缺失,规则照常
+        return None
+
+
+def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any]) -> Dict:
+    """R007 模型信号(P0-2):champion 模型真正进入判定路径。
+
+    - 无 champion -> 判定不变(只可能随 champion 上线才生效);
+    - 有 champion 无分数 -> 附 model_version 血缘,不命中(诚实:模型在
+      观察位,没有分数的模型不存在拦截);
+    - 分数 >= model_score_reject_threshold -> R007 reject;
+      >= model_score_review_threshold -> R007 review(阈值在 policy 版本表,
+      与规则阈值同级治理:默认 0.9/0.98 是"关着"的,生效要审批调低)。
+    命中后按 action 权重与既有规则取最重。rule_count_evaluated 相应 +1
+    (R007 是引擎级规则,不属 R001-R006 的静态规则集)。"""
+    ch = _champion()
+    if not ch:
+        return result
+    result["model_version"] = "%s %s" % (ch["name"], ch["version"])
+    uid = event.get("uid", "")
+    score = (_model_score_remote(uid, event)
+             if os.environ.get(MODEL_URL_ENV) else _model_score_local(uid))
+    if score is None:
+        result["model_signal"] = "champion 已上线但无模型分数(未接入模型服务/无本地分数)"
+        return result
+    result["model_score"] = score
+    from .tools.policy import active_policy
+    from .tools.rules import ACTION_ORDER, _hit
+    p = active_policy(None)
+    if score >= p["model_score_reject_threshold"]:
+        hit_action = "reject"
+    elif score >= p["model_score_review_threshold"]:
+        hit_action = "review"
+    else:
+        result["model_signal"] = "champion 风险分 %.3f 低于模型阈值,未命中" % score
+        return result
+    hits = result.setdefault("hits", [])
+    _hit(hits, "R007", "champion 模型 %s 风险分 %.3f 达到 %s 阈值 %.2f"
+         % (result["model_version"], score, hit_action, p[
+            "model_score_reject_threshold" if hit_action == "reject"
+            else "model_score_review_threshold"]), hit_action)
+    if ACTION_ORDER[hit_action] > ACTION_ORDER[result.get("action", "pass")]:
+        result["action"] = hit_action
+    result["rule_count_evaluated"] = (result.get("rule_count_evaluated") or 0) + 1
+    result["model_signal"] = "R007 命中(模型分 %.3f)" % score
+    return result
+
+
+def _local_eval(event: Dict[str, Any], use_current_policy: bool,
+                strategy: Dict) -> Dict:
+    """本地判定 + active strategy 覆盖 + 模型信号,一次打包。"""
+    from .tools.rules import _local_rule_eval  # 惰性:防导入环
+    r = _local_rule_eval(event, use_current_policy=use_current_policy,
+                         threshold_overrides=strategy.get("strategy_thresholds"))
+    if strategy:
+        r["strategy_version"] = strategy["strategy_version"]
+        r["strategy_thresholds"] = strategy["strategy_thresholds"]
+    return _apply_model_signal(r, event)
+
+
 def evaluate_event(event: Dict[str, Any],
                    use_current_policy: bool = False) -> Dict[str, Any]:
-    """规则判定的唯一入口。返回结构与本地 rule_eval 兼容,附 source 字段
-    (local_rules / remote_engine / local_rules_fallback)供溯源。"""
+    """判定的唯一入口。返回结构与本地 rule_eval 兼容,附 source 字段
+    (local_rules / remote_engine / local_rules_fallback)供溯源;
+    P0-2/P0-3 起,本地判定自动携带 active strategy 覆盖与 champion
+    模型信号(R007,见 _apply_model_signal)。"""
     from .tools.rules import _local_rule_eval  # 惰性:防导入环
 
+    strategy = _active_strategy()
     if _overridden():
-        r = _local_rule_eval(event, use_current_policy=use_current_policy)
+        r = _local_eval(event, use_current_policy, strategy)
         r["source"] = "local_rules"
         r["source_note"] = ("what-if 覆盖生效,强制本地模拟"
                             "(覆盖参数是本地模拟概念,生产 dry-run 不接收)")
         return r
     url = os.environ.get(DRYRUN_URL_ENV)
     if not url:
-        r = _local_rule_eval(event, use_current_policy=use_current_policy)
+        r = _local_eval(event, use_current_policy, strategy)
         r["source"] = "local_rules"
         return r
     try:
-        return _map_remote(_post_json(url, {
+        payload = {
             "event": event,
             "use_current_policy": bool(use_current_policy),
-        }))
+        }
+        if strategy:
+            payload["strategy_version"] = strategy["strategy_version"]
+        r = _map_remote(_post_json(url, payload))
+        if strategy and not r.get("strategy_version"):
+            r["strategy_version"] = strategy["strategy_version"]
+        # 远程模式:模型融合由生产引擎负责,本地只附 champion 血缘
+        ch = _champion()
+        if ch:
+            r["model_version"] = "%s %s" % (ch["name"], ch["version"])
+        return r
     except Exception as e:  # noqa: BLE001
         # 显式降级:结果必须带 degraded/engine_error,让结论可被审计到
-        r = _local_rule_eval(event, use_current_policy=use_current_policy)
+        r = _local_eval(event, use_current_policy, strategy)
         r["source"] = "local_rules_fallback"
         r["degraded"] = True
         r["engine_error"] = "%s: %s" % (type(e).__name__, e)
@@ -117,28 +262,40 @@ def evaluate_batch(events: List[Dict[str, Any]],
                    use_current_policy: bool = False) -> List[Dict[str, Any]]:
     """批量判定:全量工具(backtest/scan 的 account_verdicts)在远程模式下
     的唯一形态 —— 一次 POST 覆盖全部事件,顺序与请求对齐。覆盖生效/未配置
-    引擎时逐条走本地;远程失败逐条显式降级(degraded,不静默)。"""
-    from .tools.rules import _local_rule_eval  # 惰性:防导入环
-
+    引擎时逐条走本地;远程失败逐条显式降级(degraded,不静默)。
+    本地逐条同样携带 active strategy 覆盖与 champion 模型信号。"""
     if not events:
         return []
+    strategy = _active_strategy()
     if _overridden() or not os.environ.get(DRYRUN_URL_ENV):
-        return [{**_local_rule_eval(e, use_current_policy=use_current_policy),
-                 "source": "local_rules"} for e in events]
+        out = []
+        for ev in events:
+            r = _local_eval(ev, use_current_policy, strategy)
+            r["source"] = "local_rules"
+            out.append(r)
+        return out
     try:
-        raw = _post_json(os.environ[DRYRUN_URL_ENV], {
+        payload = {
             "events": events,
             "use_current_policy": bool(use_current_policy),
-        })
+        }
+        if strategy:
+            payload["strategy_version"] = strategy["strategy_version"]
+        raw = _post_json(os.environ[DRYRUN_URL_ENV], payload)
         decisions = raw.get("decisions")
         if not isinstance(decisions, list) or len(decisions) != len(events):
             raise ValueError("批量 dry-run 返回与请求不齐(期望 %d 条,得 %r)"
                              % (len(events), type(decisions).__name__))
-        return [_map_remote(d) for d in decisions]
+        out = [_map_remote(d) for d in decisions]
+        if strategy:
+            for r in out:
+                if not r.get("strategy_version"):
+                    r["strategy_version"] = strategy["strategy_version"]
+        return out
     except Exception as e:  # noqa: BLE001
         out = []
         for ev in events:
-            r = _local_rule_eval(ev, use_current_policy=use_current_policy)
+            r = _local_eval(ev, use_current_policy, strategy)
             r.update({"source": "local_rules_fallback", "degraded": True,
                       "engine_error": "%s: %s" % (type(e).__name__, e)})
             out.append(r)

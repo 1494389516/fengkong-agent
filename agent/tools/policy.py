@@ -66,6 +66,12 @@ DEFAULTS: Dict[str, float] = {
     # 灰名单生命周期:灰是观察态,必须走向结论(升黑/出灰),不能永久挂着
     "graylist_observe_days": 30,        # 默认观察期:期满且干净建议出灰
     "graylist_promote_min_review": 3,   # 关联账号中 >= N 个命中 review 即聚集性实锤,建议升黑
+    # R007 模型信号(引擎层规则):champion 模型风险分(0~1,越大越可疑)过线
+    # 即命中。默认 0.9/0.98 是"关着"的阈值 —— 模型要真正生效必须走
+    # threshold_propose 调低(与规则阈值同级治理、可审批可回滚),不是部署
+    # champion 就自动拦截:上线动作与生效力度是两件事,各自留痕。
+    "model_score_review_threshold": 0.90,
+    "model_score_reject_threshold": 0.98,
 }
 
 # rule_backtest / chart_threshold_sweep 允许覆盖的键(规则组)。
@@ -75,7 +81,8 @@ RULE_KEYS = ("r002_max_gap_seconds", "r002_min_events", "r002_reject_min_ips",
              "r003_cashout_min_coupons", "r003_cashout_window_seconds",
              "r004_max_account_age_seconds", "r004_min_amount",
              "r005_min_register_score", "r005_max_account_age_seconds",
-             "r006_reject_emulator", "r006_reject_rooted", "r006_reject_hook")
+             "r006_reject_emulator", "r006_reject_rooted", "r006_reject_hook",
+             "model_score_review_threshold", "model_score_reject_threshold")
 
 # 开关型参数(取值只允许 0/1):强拒开/关。显式声明而非按值域猜"是不是开关"
 # —— 按 {现值,新值}⊆{0,1} 推断会把恰好取 0/1 的数值参数误判成开关而豁免限速,
