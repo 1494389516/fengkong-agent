@@ -402,9 +402,9 @@ def run_experiment_layer() -> int:
                 "name": "tool_pruning_ab_1", "kind": "tool_pruning_ab"})
             eid = r1["experiment_id"]
             checks += [
-                ("登记:预设模板填充 control/treatment/指标",
+                ("登记:返回 id 且状态 registered",
                  r1.get("status") == "registered"
-                 and "TOOL_KEEP_TURNS=2" in r1.get("control", "") if False else True),
+                 and r1.get("experiment_id", 0) >= 1),
                 ("同名不重复登记",
                  "已存在" in registry.dispatch("experiment_register", {
                      "name": "tool_pruning_ab_1"}).get("error", "")),
