@@ -28,8 +28,19 @@ JOB_TYPES = ("backtest", "scan", "replay", "model_eval", "dataset_build")
 STATUSES = ("queued", "running", "success", "failed", "cancelled")
 
 _gate = threading.Event()  # 测试钩子:执行前等待
-_next_id = 0
-_next_id_lock = threading.Lock()
+
+
+def _next_job_id() -> int:
+    """跨进程/重启安全:job id 从既有文件推导 —— 内存计数器在重启后会
+    重新从 1 开始,覆盖同名 job 文件(产物与状态一起丢)。"""
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    ids = []
+    for p in JOBS_DIR.glob("job_*.json"):
+        try:
+            ids.append(int(p.stem.split("_")[1]))
+        except (ValueError, IndexError):
+            continue
+    return (max(ids) if ids else 0) + 1
 
 
 def _now_iso() -> str:
@@ -93,6 +104,11 @@ def _execute(job_id: int, job_type: str, params: Dict) -> None:
         else:
             raise ValueError("未知任务类型: %s" % job_type)
         job = _load_job(job_id)
+        if job.get("status") == "cancelled":
+            # 运行中收到取消:不落结果,取消优先(竞态防护)
+            job["finished_at"] = _now_iso()
+            _save_job(job)
+            return
         job["status"] = "success"
         job["progress"] = 1
         job["result_path"] = str(JOBS_DIR / ("job_%06d.result.json" % job_id))
@@ -101,8 +117,9 @@ def _execute(job_id: int, job_type: str, params: Dict) -> None:
             encoding="utf-8")
     except Exception as e:  # noqa: BLE001 任务失败落 error,不中断其他 job
         job = _load_job(job_id)
-        job["status"] = "failed"
-        job["error"] = "%s: %s" % (type(e).__name__, e)
+        if job.get("status") != "cancelled":  # 已取消的 job 不写 failed
+            job["status"] = "failed"
+            job["error"] = "%s: %s" % (type(e).__name__, e)
     finally:
         job["finished_at"] = _now_iso()
         _save_job(job)
@@ -127,13 +144,10 @@ def _execute(job_id: int, job_type: str, params: Dict) -> None:
     },
 )
 def job_submit(type: str, params: Dict = None):
-    global _next_id
     if type not in JOB_TYPES:
         return {"error": "未知任务类型: %s(可用 %s)" % (type, JOB_TYPES)}
     params = params or {}
-    with _next_id_lock:
-        _next_id += 1
-        job_id = _next_id
+    job_id = _next_job_id()
     job = {
         "job_id": job_id,
         "type": type,
