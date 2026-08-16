@@ -135,11 +135,12 @@ def _prf(tp: int, fp: int, fn: int) -> Dict[str, float]:
     return {"precision": round(p, 4), "recall": round(r, 4), "f1": round(f1, 4)}
 
 
-def backtest(overrides: Optional[Dict] = None):
+def backtest(overrides: Optional[Dict] = None, uids: Optional[List[str]] = None):
     """核心逻辑,同时供工具调用、chart_threshold_sweep、shadow_compare 与离线 eval 复用。
 
     覆盖必须整体校验后才应用(原子):部分应用会把错误值泄漏给进程内
-    后续所有调用。finally 恢复旧快照而非清空,嵌套/连续调用互不污染。"""
+    后续所有调用。finally 恢复旧快照而非清空,嵌套/连续调用互不污染。
+    uids:人群/时间切片;None=全量标注账号。"""
     overrides = overrides or {}
     bad = [k for k in overrides if k not in OVERRIDABLE]
     if bad:
@@ -148,6 +149,11 @@ def backtest(overrides: Optional[Dict] = None):
     prev = policy.set_overrides(overrides)
     try:
         labels = load_labels()
+        if uids is not None:
+            want = set(uids)
+            labels = {u: v for u, v in labels.items() if u in want}
+            if not labels:
+                return {"error": "切片内无标注账号"}
         bad_labels = sorted(u for u, v in labels.items()
                             if v.get("label") not in VALID_LABELS)
         if bad_labels:
@@ -339,3 +345,74 @@ def _attach_sim_trust(result: Dict) -> Dict:
     if st is not None:
         result["sim_consistency"] = st
     return result
+
+
+def _slice_uids(kind: str) -> Dict:
+    """解析切片账号集。holdout 走 split_datasets 评估侧(防账号泄漏)。"""
+    from .dataset import split_datasets
+    from .intel import device_info
+    labels = load_labels()
+    events = load_events()
+    if kind == "holdout":
+        sp = split_datasets(0.7)
+        if "error" in sp:
+            return sp
+        return {"uids": list(sp["eval_accounts"]), "cutoff_ts": sp.get("cutoff_ts"),
+                "eval_fingerprint": sp.get("eval_fingerprint")}
+    last_ts: Dict[str, float] = {}
+    risky = set()
+    for e in events:
+        last_ts[e["uid"]] = max(last_ts.get(e["uid"], 0), e.get("ts") or 0)
+        d = device_info(e.get("device_id") or "")
+        if d.get("risk") == "high" or d.get("is_emulator") or d.get("is_rooted") or d.get("hook_detected"):
+            risky.add(e["uid"])
+    if kind == "new_account":
+        accts = load_accounts()
+        uids = []
+        for u in labels:
+            reg = (accts.get(u) or {}).get("registered_at")
+            if reg is None:
+                continue
+            if last_ts.get(u, 0) - float(reg) <= 7 * 86400:
+                uids.append(u)
+        return {"uids": uids}
+    if kind == "device_risk":
+        return {"uids": sorted(u for u in risky if u in labels)}
+    return {"error": "未知切片: %s" % kind}
+
+
+@tool(
+    name="slice_eval",
+    description=(
+        "时间外holdout或人群切片回测。holdout=更晚账号;new_account=账龄<=7天;"
+        "device_risk=高危设备。返回宽口径指标,不改策略。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "slice": {"type": "string",
+                      "enum": ["holdout", "new_account", "device_risk"],
+                      "description": "切片类型"},
+        },
+    },
+)
+def slice_eval(slice: str = "holdout"):
+    meta = _slice_uids(slice)
+    if "error" in meta:
+        return meta
+    r = backtest(uids=meta["uids"])
+    if "error" in r:
+        return r
+    wide = r["operating_points"]["flag=review+reject"]
+    out = {
+        "slice": slice,
+        "accounts": r["accounts_evaluated"],
+        "wide": {k: wide[k] for k in ("tp", "fp", "fn", "tn",
+                                      "precision", "recall", "f1")},
+        "cost": wide.get("cost"),
+        "label_fingerprint": r.get("label_fingerprint"),
+    }
+    if meta.get("cutoff_ts") is not None:
+        out["cutoff_ts"] = meta["cutoff_ts"]
+        out["eval_fingerprint"] = meta.get("eval_fingerprint")
+    return out

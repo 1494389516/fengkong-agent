@@ -14,16 +14,17 @@
 
 边界(诚实声明):
 - 纯 stdlib(ThreadingHTTPServer),无鉴权无限流 —— 只能内网使用;上公网
-  前置网关做认证与限流(见 DEPLOY.md)。
-- 数据仍是 JSON 文件 + mtime 缓存:并发读安全(CPython 字典操作原子),
-  写路径(审批/申诉)仍走 CLI 单进程 —— 服务只读策略与数据,不落处置。
-- 单事件决策延迟 = 特征计算(账号事件索引缓存后为该账号事件量级),
-  真实规模下特征须下推数仓预计算(featurelib 签名即接口契约)。
+  前置网关做认证与限流(见 DEPLOY.md)。SSO 接缝:X-Operator 或 FK_OPERATOR
+  写入血缘 approver,缺省 serve;网关应在前面鉴权再注入身份。
+- 幂等:事件指纹唯一键落盘(decide_idemp.json)+ 进程内 in-flight 合并;
+  同机多进程共享 data_dir 即共享幂等表。重放不写血缘/日志。
+- 数据仍是 JSON 文件 + mtime 缓存。写路径(审批/申诉)仍走 CLI。
 
 用法:python3 serve.py [--port 8080] ;FK_DATASET/FK_DATA_DIR 照常生效。
 """
 import argparse
 import json
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,10 +33,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 LOG_PATH = ROOT / "out" / "serve_decisions.jsonl"
 MAX_BODY = 64 * 1024
-_log_lock = threading.Lock()
-# 同输入指纹返回同一条决策(Ojuri: idempotent on transaction_id)。
-# 进程内缓存:骨架够用;重放不写血缘/日志,避免重复事件灌爆对账。
+_mu = threading.Lock()
 _idemp: dict = {}
+_inflight: dict = {}
 
 
 def _public_view(decision: dict, replay: bool) -> dict:
@@ -47,46 +47,95 @@ def _public_view(decision: dict, replay: bool) -> dict:
     return public
 
 
-def _decide(event: dict) -> dict:
-    from agent.tools.lineage import event_fingerprint, write_lineage
+def _replay(public: dict) -> dict:
+    out = dict(public)
+    out["idempotent_replay"] = True
+    out["latency_ms"] = 0.0
+    return out
+
+
+def _compute(event: dict, operator: str) -> dict:
+    from agent.tools.lineage import write_lineage
     from agent.tools.rules import rule_eval
+    t0 = time.time()
+    r = rule_eval(event, use_current_policy=True)
+    decision = {
+        "ts": time.time(),
+        "event": event,
+        "action": r["action"],
+        "rules": sorted({h["rule_id"] for h in r["hits"]}),
+        "hits": list(r.get("hits") or []),
+        "policy_version": r["policy_version"],
+        "strategy_version": r.get("strategy_version"),
+        "model_version": r.get("model_version"),
+        "model_score": r.get("model_score"),
+        "source": r.get("source"),
+        "degraded": bool(r.get("degraded")),
+        "reason_codes": list(r.get("reason_codes") or []),
+        "escalate_to_human": bool(r.get("escalate_to_human")),
+        "agent_cannot_override": True,
+        "decision_combine": r.get("decision_combine"),
+        "combine_score": r.get("combine_score"),
+        "latency_ms": round(1000 * (time.time() - t0), 1),
+    }
+    write_lineage(event, decision, approver=operator or "serve")
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(decision, ensure_ascii=False) + "\n")
+    return _public_view(decision, False)
+
+
+def _decide(event: dict, operator: str = "serve") -> dict:
+    from agent.tools.idemp_store import abort, begin, complete, lookup, wait_done
+    from agent.tools.lineage import event_fingerprint
     fp = event_fingerprint(event)
-    # 锁内 double-check + 计算:并发同指纹只判定一次,只写一行日志/血缘。
-    with _log_lock:
+    with _mu:
         cached = _idemp.get(fp)
         if cached is not None:
-            out = dict(cached)
-            out["idempotent_replay"] = True
-            out["latency_ms"] = 0.0
-            return out
-        t0 = time.time()
-        r = rule_eval(event, use_current_policy=True)
-        decision = {
-            "ts": time.time(),
-            "event": event,
-            "action": r["action"],
-            "rules": sorted({h["rule_id"] for h in r["hits"]}),
-            "hits": list(r.get("hits") or []),
-            "policy_version": r["policy_version"],
-            "strategy_version": r.get("strategy_version"),
-            "model_version": r.get("model_version"),
-            "model_score": r.get("model_score"),
-            "source": r.get("source"),
-            "degraded": bool(r.get("degraded")),
-            "reason_codes": list(r.get("reason_codes") or []),
-            "escalate_to_human": bool(r.get("escalate_to_human")),
-            "agent_cannot_override": True,
-            "decision_combine": r.get("decision_combine"),
-            "combine_score": r.get("combine_score"),
-            "latency_ms": round(1000 * (time.time() - t0), 1),
-        }
-        write_lineage(event, decision, approver="serve")
-        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(decision, ensure_ascii=False) + "\n")
-        public = _public_view(decision, False)
-        _idemp[fp] = dict(public)
+            return _replay(cached)
+        ev = _inflight.get(fp)
+        if ev is None:
+            ev = threading.Event()
+            _inflight[fp] = ev
+            owner = True
+        else:
+            owner = False
+    if not owner:
+        ev.wait(timeout=30)
+        with _mu:
+            cached = _idemp.get(fp)
+        if cached is not None:
+            return _replay(cached)
+        disk = lookup(fp)
+        if disk is not None:
+            return _replay(disk)
+    try:
+        state = begin(fp)
+        if state == "hit":
+            public = lookup(fp)
+            if public is not None:
+                with _mu:
+                    _idemp[fp] = dict(public)
+                return _replay(public)
+        if state == "wait":
+            public = wait_done(fp)
+            if public is not None:
+                with _mu:
+                    _idemp[fp] = dict(public)
+                return _replay(public)
+        public = _compute(event, operator)
+        complete(fp, public)
+        with _mu:
+            _idemp[fp] = dict(public)
         return public
+    except Exception:
+        abort(fp)
+        raise
+    finally:
+        with _mu:
+            held = _inflight.pop(fp, None)
+            if held is not None:
+                held.set()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -135,8 +184,10 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(event, dict) or not event.get("uid"):
             self._json(400, {"error": "事件缺少 uid"})
             return
+        operator = (self.headers.get("X-Operator")
+                    or os.environ.get("FK_OPERATOR") or "serve")
         try:
-            self._json(200, _decide(event))
+            self._json(200, _decide(event, operator=operator))
         except Exception:  # noqa: BLE001 决策异常必须显式 500,细节不回给调用方
             self._json(500, {"error": "internal_error"})
 

@@ -33,10 +33,10 @@
   确认过的告警/要盯梢的对象用 duty_ops(确认后恶化会自动重浮)。
   "有没有团伙"用 graph_relations(已含 device_flags,勿逐台 device_intel);
   未点名写入时不要 blacklist_add。
-- IP 看 ip_intel(idc/proxy 在登录下单即强风险);设备看 device_intel
-  (模拟器/root/hook);跳变与指纹已在 account_monitor。举报 verified
+- IP 看 ip_intel(idc/proxy 登录下单即强风险);设备问 device_intel
+  (含关联账号与判定,勿逐个档案);跳变/指纹见 account_monitor。举报 verified
   强证据,dismissed 不作依据。
-- **名单三色纪律**:black 硬拦 / gray 观察 / white 误伤抑制。白名单不是免检:
+- **名单三色纪律**:black 硬拦 / gray 观察 / white 误伤抑制。白名单只降档不豁免:
   行为规则对其失效,但 reject 级证据只降档为 review(账号可能被盗/被收买);
   结论引用白名单账号时必须说明降档影响。加白走 blacklist_add(list=white,
   带 expires_days 有效期)同样需 /approve;同值黑白并存以黑为准并告警。
@@ -55,8 +55,7 @@
   <0.1 稳定,0.1~0.25 关注,>0.25 告警),rule_drift 看规则输出(处置分布
   PSI 与逐规则命中率)。入参稳而输出动查规则/阈值,一起动是流量变了;
   缺失率异动查采集。两者都不需要标签,比回测灵敏。研究员要看趋势形状时
-  用 chart_drift_dashboard 出图;返回带 benchmark_note 说明基准桶不完整时,
-  改用 benchmark_buckets>=2 复核再下结论。
+  用 chart_drift_dashboard 出图;漂移/对抗默认 2 桶基准,不必再调一遍。
 - 解读回测指标必须连 label_observation 一起看:coverage < 1 时 P/R/F1 只
   代表已标注(已表现)账号,未标注不是正常,是还不知道。
 - 试穿/候选规则入口必须是 rule_draft_test(net_new_catches 是加规则唯一正当理由);

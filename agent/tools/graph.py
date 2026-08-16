@@ -95,26 +95,28 @@ def component_summary(uid: str):
 @tool(
     name="graph_relations",
     description=(
-        "账号-设备-IP 关联图谱:把事件流建成二部图,连通分量作为疑似团伙分组。"
-        "并组只认强证据:共享设备、共享家宽/基站 IP;机房/代理 IP 是公共出口,"
-        "只在 weak_ips 里展示、不作团伙依据(引用关联结论时说明纽带是什么)。"
-        "不传参数返回所有多账号分量(按账号数降序)+ 全图 PNG;传 uid 只返回该"
-        "账号所在分量 + 该分量的 PNG。返回已含成员、共用设备/IP、device_flags"
-        "(模拟器/root/hook)、device_summary、名单命中与标签。"
-        "'有没有团伙'类问题直接调本工具,不要先 data_health_check,也不要对每个"
-        "设备/IP 再拆 device_intel/ip_intel。调查只报告,未点名写入时不要"
-        "blacklist_add。account_profile 已判目标 uid 不存在时不要为查团伙再调。"
+        "账号-设备-IP 关联图谱:连通分量即疑似团伙。并组只认强证据(共享设备/"
+        "家宽/基站 IP);机房/代理只进 weak_ips,不作团伙依据。"
+        "不传参返回多账号分量(按账号数降序)+ PNG;传 uid 或 device_id 只返回"
+        "该节点所在分量。返回含成员、设备/IP、device_flags、名单、标签、"
+        "member_verdicts(各 uid 的 action/rules)。有团伙/某设备上有谁直接调,"
+        "不要先体检,不要再拆 device_intel/ip_intel,不要对成员逐个档案。"
+        "未点名写入时不要 blacklist_add。目标 uid 已判不存在时不要再调。"
     ),
     parameters={
         "type": "object",
         "properties": {
-            "uid": {"type": "string", "description": "可选:只看该账号所在的关联分量"},
+            "uid": {"type": "string", "description": "可选:只看该账号所在分量"},
+            "device_id": {"type": "string", "description": "可选:只看该设备所在分量"},
             "min_accounts": {"type": "integer",
                              "description": "分量最少账号数,默认 2(单账号分量不是团伙)"},
         },
     },
 )
-def graph_relations(uid: Optional[str] = None, min_accounts: int = 2):
+def graph_relations(uid: Optional[str] = None, device_id: Optional[str] = None,
+                    min_accounts: int = 2):
+    if uid and device_id:
+        return {"error": "uid 与 device_id 不要同时传;设备问题用 device_id"}
     g = _build_graph()
     sg = _strong_subgraph(g)
     # 图上的"名单命中"只标黑/灰(风险);白名单是抑制标注,不该画成红圈
@@ -122,11 +124,13 @@ def graph_relations(uid: Optional[str] = None, min_accounts: int = 2):
                    if r["list"] in ("black", "gray")}
     labels = {k: v["label"] for k, v in load_labels().items()}
 
-    if uid is not None:
-        node = ("uid", uid)
+    if uid is not None or device_id is not None:
+        kind, val = ("uid", uid) if uid is not None else ("device_id", device_id)
+        node = (kind, val)
         if node not in g:
-            return {"uid": uid, "found": False, "next_action": "stop",
-                    "stop_reason": "图上无此 uid。若 account_profile 已判不存在则停止。"}
+            return {kind: val, "found": False, "next_action": "stop",
+                    "stop_reason": "图上无此 %s。设备可改调 device_intel 看指纹是否入库。"
+                    % kind}
         comps = [nx.node_connected_component(sg, node)]
     else:
         comps = [c for c in nx.connected_components(sg)
@@ -135,15 +139,24 @@ def graph_relations(uid: Optional[str] = None, min_accounts: int = 2):
 
     expanded = [_expand_weak(g, c) for c in comps]
     infos = [_component_info(c, e, blacklisted, labels) for c, e in zip(comps, expanded)]
+    from .intel import verdict_brief
+    for info in infos:
+        info["member_verdicts"] = verdict_brief(info.get("accounts") or [])
 
     chart_path = None
     draw_comps = expanded[:MAX_DRAW_COMPONENTS]
     if draw_comps:
-        chart_path = _draw(g, draw_comps, blacklisted, labels, uid)
+        chart_path = _draw(g, draw_comps, blacklisted, labels, uid or device_id)
 
-    result = {"components": infos, "component_count": len(infos), "chart_path": chart_path}
+    result = {"components": infos, "component_count": len(infos), "chart_path": chart_path,
+              "next_action": "answer",
+              "stop_reason": "分量成员判定见 member_verdicts,直接作答,"
+                             "不要再对每个 uid 调 account_profile。"}
     if uid is not None:
         result["uid"] = uid
+        result["found"] = True
+    if device_id is not None:
+        result["device_id"] = device_id
         result["found"] = True
     if chart_path and len(draw_comps) < len(comps):
         result["chart_note"] = "图中只画账号数最多的前 %d 个分量,完整信息见 components" % len(draw_comps)

@@ -51,8 +51,9 @@ def active_records(dimension: str, value: str, as_of_ts: Optional[float] = None,
     description=(
         "查询名单库。传入维度(uid/ip/device_id)和值,返回命中的名单记录。"
         "list 字段:black(黑,强证据硬拦)/ gray(灰,嫌疑观察)/ white(白,"
-        "误伤抑制:行为规则失效、硬证据降档 review,不是免检)。带 expires_at 的"
+        "误伤抑制:行为规则失效、硬证据降档 review,只降档不豁免)。带 expires_at 的"
         "记录到期即失效(expired=true 标注)。未命中时 hit=false。"
+        "查询不是变更。移除须点名后走待审批,回答用「须 /approve」,不要写「已生效」。"
         "account_profile 已判目标 uid 不存在时不要再调本工具核同一 uid。"
     ),
     parameters={
@@ -72,4 +73,9 @@ def blacklist_query(dimension: str, value: str):
     hits = [dict(r, **({"expired": True} if _expired(r, None) else {}))
             for r in load_blacklist()
             if r["dimension"] == dimension and r["value"] == value]
-    return {"hit": any(not h.get("expired") for h in hits), "records": hits}
+    out = {"hit": any(not h.get("expired") for h in hits), "records": hits,
+           "speak": "查询不是变更。移除须点名后走待审批,回答用「须 /approve」,"
+                    "不要写「已生效」。"}
+    if any(not h.get("expired") and h.get("list") == "white" for h in hits):
+        out["speak"] += " 白名单只降档不豁免,回答不要写「免检」。"
+    return out

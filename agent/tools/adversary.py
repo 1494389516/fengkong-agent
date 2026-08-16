@@ -56,6 +56,7 @@ def _in_band(v: float, thr: float, side: str) -> bool:
         "(间隔贴 R002 线上方/金额贴 R003 线下方),翻倍且超 5pp 报警,是对手"
         "适应阈值的信号(此时整体 PSI 往往还稳);②团伙演化 —— 设备/IP 账号数"
         "逐桶增速,最近一桶新增 ≥3 告警。答'对手在不在适应''团伙在不在扩张'。"
+        "默认已用 2 桶基准,一次够,勿同参重调。"
     ),
     parameters={
         "type": "object",
@@ -63,11 +64,11 @@ def _in_band(v: float, thr: float, side: str) -> bool:
             "time_grain": {"type": "string", "enum": ["day", "hour"],
                            "description": "分桶粒度,默认 day"},
             "benchmark_buckets": {"type": "integer",
-                                  "description": "作为基准的最早桶数,默认 1"},
+                                  "description": "作为基准的最早桶数,默认 2"},
         },
     },
 )
-def adversary_watch(time_grain: str = "day", benchmark_buckets: int = 1):
+def adversary_watch(time_grain: str = "day", benchmark_buckets: int = 2):
     if time_grain not in ("day", "hour"):
         return {"error": "time_grain 只支持 day / hour"}
     p = active_policy()
@@ -149,8 +150,7 @@ def adversary_watch(time_grain: str = "day", benchmark_buckets: int = 1):
         "bucket_count": len(labels),
         "benchmark_buckets": bench_labels,
         "tail_bucket_partial": tail_partial,
-        **({"benchmark_note": "基准桶 %s 事件量不足后续中位桶一半,可能采集不完整,"
-                              "PSI/密度基准参考价值低,建议 benchmark_buckets>=2"
+        **({"benchmark_note": "首桶 %s 事件偏少,基准偏弱;已按可获得桶计算,不必再调"
                               % labels[0]}
            if benchmark_buckets == 1 and head_partial else {}),
         "policy_version": p["_version"],
@@ -161,6 +161,9 @@ def adversary_watch(time_grain: str = "day", benchmark_buckets: int = 1):
         "alarms": alarms,
         "note": "近阈密度告警是调阈值的强信号(对手已适应当前线),但改线仍走"
                 "shadow_backtest → threshold_propose 全流程",
+        "next_action": "answer",
+        "stop_reason": "一次巡检已含近阈+扩张,不要同参再调;"
+                       "要换基准在同一次调用传 benchmark_buckets。",
     }
     out["alert_text"] = drift_alert_text(out)
     return out

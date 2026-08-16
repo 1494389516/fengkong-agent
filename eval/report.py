@@ -13,7 +13,6 @@
   python3 eval/report.py                                           # 只出报告(离线层)
   失败时报告头部标 ❌,与退出码联动。
 """
-import hashlib
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -33,27 +32,72 @@ def git_commit() -> str:
 
 
 def data_fingerprint() -> str:
-    """数据指纹:data/*.json|jsonl 的 (名, mtime_ns, size) 哈希。
-    数据变了指纹必变 —— 报告与数据集的绑定关系因此不可伪造。"""
-    d = ROOT / "data"
-    h = hashlib.sha256()
-    files = sorted(d.glob("*.json")) + sorted(d.glob("*.jsonl"))
-    if not files:
-        return "empty"
-    for p in files:
-        st = p.stat()
-        h.update(("%s:%d:%d;" % (p.name, st.st_mtime_ns, st.st_size))
-                 .encode("utf-8"))
-    return h.hexdigest()[:16]
+    """与 readiness 同一口径:events+labels 内容哈希。"""
+    return _evidence_fingerprints()["dataset"]
+
+
+def _evidence_fingerprints() -> dict:
+    """报告头与 readiness 对质的三类内容指纹。"""
+    try:
+        from agent.tools.dataset import dataset_fingerprint
+        from agent.tools.featurelib import FEATURE_CATALOG_VERSION
+        from agent.tools.label_lifecycle import label_fingerprint
+        return {"dataset": dataset_fingerprint(),
+                "label": label_fingerprint(),
+                "feature": FEATURE_CATALOG_VERSION}
+    except Exception:  # noqa: BLE001
+        return {"dataset": "unknown", "label": "unknown", "feature": "unknown"}
 
 
 def _structural_metrics() -> dict:
-    """结构性成本快照(schema/system 字符量),报告的成本面数据源。"""
+    """结构性成本快照(schema/system 字符量),报告的成本面数据源。
+    默认取 full(评估最坏底价);pack 表见 collect_scorecard。"""
     try:
         from measure_costs import structural_sizes
-        return structural_sizes()
+        return structural_sizes(pack="full")
     except Exception:  # noqa: BLE001 依赖未装时成本面降级为空
         return {}
+
+
+def collect_scorecard(records: list) -> dict:
+    """效果 × 成本同一张卡。离线也能出:Decision Plane 回测 + 各包 miss 底价;
+    Agent Plane 有 key 才有四维数字,否则诚实写未跑。"""
+    from measure_costs import (ANALYST_SCHEMA_BUDGET, PER_TOOL_SCHEMA_CHARS,
+                               SCHEMA_BUDGET, SYSTEM_PROMPT_BUDGET,
+                               pack_structural_sizes)
+    packs = pack_structural_sizes()
+    sample_effect = next((r.get("effect") for r in records
+                          if r.get("layer") == "指标回测(离线)" and r.get("effect")),
+                         None)
+    gen_effect = next((r.get("effect") for r in records
+                       if r.get("layer", "").startswith("数据生成") and r.get("effect")),
+                      None)
+    agent = next((r for r in records if r.get("layer", "").startswith("agent 层")),
+                 None)
+    agent_ran = bool(agent and agent.get("checks"))
+    return {
+        "token_cost": {
+            "packs": packs,
+            "budgets": {"full": SCHEMA_BUDGET, "analyst": ANALYST_SCHEMA_BUDGET,
+                        "system": SYSTEM_PROMPT_BUDGET,
+                        "per_tool": PER_TOOL_SCHEMA_CHARS},
+            "daily_pack": "analyst",
+            "eval_pack": "full",
+        },
+        "effect": {
+            "sample_backtest": sample_effect,
+            "gen_backtest": gen_effect,
+            "agent_layer": {
+                "ran": agent_ran,
+                "failures": (agent or {}).get("failures", 0),
+                "total": (agent or {}).get("total", 0),
+                "note": (agent or {}).get("note") or (
+                    None if agent_ran else "需 DEEPSEEK_API_KEY,离线未跑"),
+                "session": (agent or {}).get("token_cost"),
+                "cases": (agent or {}).get("checks") if agent_ran else [],
+            },
+        },
+    }
 
 
 def _champion_model() -> dict:
@@ -96,6 +140,7 @@ def render_report(records: list, offline: bool = False,
     metrics = _structural_metrics()
     status = "❌ 有失败" if failures else "✅ 全部通过"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ev = _evidence_fingerprints()
 
     lines = [
         "# 风控 Agent 评估报告",
@@ -104,7 +149,10 @@ def render_report(records: list, offline: bool = False,
         "|---|---|",
         "| 生成时间(UTC) | %s |" % now,
         "| git commit | `%s` |" % git_commit(),
-        "| 数据指纹 | `%s` |" % data_fingerprint(),
+        "| 数据指纹 | `%s` |" % ev["dataset"],
+        "| 标签指纹 | `%s` |" % ev["label"],
+        "| 特征目录 | `%s` |" % ev["feature"],
+        "| 退出码 | %d |" % (1 if failures else 0),
         "| 模式 | %s |" % ("offline(第 1 层 + 离线层)" if offline else "完整"),
         "| 工具数 | %s |" % metrics.get("tool_count", "-"),
         "",
@@ -122,13 +170,85 @@ def render_report(records: list, offline: bool = False,
     if metrics:
         from measure_costs import SCHEMA_BUDGET, SYSTEM_PROMPT_BUDGET
         lines += [
-            "| 工具 schema | %d chars | %d |" % (
+            "| 工具 schema(full) | %d chars | %d |" % (
                 metrics["schemas_chars"], SCHEMA_BUDGET),
             "| system prompt | %d chars | %d |" % (
                 metrics["system_chars"], SYSTEM_PROMPT_BUDGET),
         ]
     else:
         lines.append("| (依赖未装,成本面不可用) | - | - |")
+
+    try:
+        card = collect_scorecard(records)
+    except Exception:  # noqa: BLE001 成本面失败不掀翻整份报告
+        card = {"token_cost": {"packs": {}}, "effect": {}}
+    cost = card["token_cost"]
+    eff = card["effect"]
+    lines += [
+        "",
+        "## 效果 × 成本",
+        "",
+        "同一根尺子:Decision Plane 看回测(P/R/F1 + 期望损失),Agent Plane 看"
+        "黄金案例四维;token 底价按工具包拆开 —— 日常 Copilot 是 analyst,"
+        "评估最坏是 full。cache miss 底价 = (schema + system) / 2 tokens。",
+        "",
+        "### Token 底价(cache miss)",
+        "",
+        "| 包 | 工具数 | schema chars | 人均 | miss 底价(tok) | 角色 |",
+        "|---|---:|---:|---:|---:|---|",
+    ]
+    role = {"analyst": "日常 Copilot", "full": "评估/治理最坏",
+            "investigate": "账号调查", "duty": "值班日报",
+            "graph": "团伙排查", "strategy": "回测调参"}
+    for name, row in cost["packs"].items():
+        lines.append("| %s | %d | %d | %.1f | %d | %s |" % (
+            name, row["tool_count"], row["schemas_chars"],
+            row["per_tool_chars"], row["miss_floor_tokens"],
+            role.get(name, "")))
+    sample = eff.get("sample_backtest") or {}
+    ops = sample.get("operating_points") or {}
+    lines += ["", "### Decision Plane 效果(手工样本回测)", ""]
+    if ops:
+        lines += ["| 口径 | P | R | F1 | TP/FP/FN | 期望损失 | 拦下欺诈额 |",
+                  "|---|---:|---:|---:|---|---:|---:|"]
+        for point, v in ops.items():
+            c = v.get("cost") or {}
+            lines.append("| %s | %.3f | %.3f | %.3f | %s/%s/%s | %s | %s |" % (
+                point, v.get("precision", 0), v.get("recall", 0), v.get("f1", 0),
+                v.get("tp"), v.get("fp"), v.get("fn"),
+                c.get("expected_loss"), c.get("blocked_fraud_amount")))
+        obs = sample.get("label_observation") or {}
+        lines.append("")
+        lines.append("账号 %s,标签覆盖 %s。手工集只有 6 个账号,P/R=1.0 不能外推;"
+                     "大样本下限在「数据生成 + 大样本回测」层。" % (
+                         sample.get("accounts_evaluated"), obs.get("coverage")))
+    else:
+        lines.append("> 本场评估未写入样本回测快照。")
+    gen = eff.get("gen_backtest") or {}
+    if gen.get("wide"):
+        w, s_ = gen["wide"], gen.get("strict") or {}
+        lines += [
+            "",
+            "### Decision Plane 效果(生成大样本)",
+            "",
+            "| 口径 | P | R | F1 | 账号 |",
+            "|---|---:|---:|---:|---:|",
+            "| 宽(review+reject) | %.3f | %.3f | %.3f | %s |" % (
+                w.get("precision", 0), w.get("recall", 0), w.get("f1", 0),
+                gen.get("accounts")),
+            "| 严(reject_only) | %.3f | %.3f | %.3f | %s |" % (
+                s_.get("precision", 0), s_.get("recall", 0), s_.get("f1", 0),
+                gen.get("accounts")),
+        ]
+    ag = eff.get("agent_layer") or {}
+    lines += ["", "### Agent Plane 效果(黄金案例四维)", ""]
+    if ag.get("ran"):
+        lines.append("跑了 %d 案,失败 %d。会话 token %s,缓存命中率 %s。" % (
+            ag.get("total"), ag.get("failures"),
+            (ag.get("session") or {}).get("session"),
+            (ag.get("session") or {}).get("cache_hit_rate")))
+    else:
+        lines.append("> %s" % (ag.get("note") or "未跑 agent 层"))
 
     lines += ["", "## 分层明细", "",
               "| 层 | 断言 | 失败 | 状态 |",
@@ -190,6 +310,15 @@ def write_report(path, records: list, offline: bool = False,
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(render_report(records, offline=offline, failures=failures),
                  encoding="utf-8")
+    # 机器可读的效果×成本卡,给 CI 对比 / 下一次基线,不替代 markdown。
+    import json as _json
+    try:
+        card = collect_scorecard(records)
+        (p.parent / "scorecard.json").write_text(
+            _json.dumps(card, ensure_ascii=False, indent=2, default=str) + "\n",
+            encoding="utf-8")
+    except Exception:  # noqa: BLE001 卡失败不掀翻 markdown
+        pass
 
 
 def _assert_total(records) -> int:

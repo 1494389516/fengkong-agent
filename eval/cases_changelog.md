@@ -45,3 +45,5 @@
 | 2026-08 | (本提交) | 全库注入稳定 case_id,建立本变更日志与版本纪律 |
 | 2026-08 | 487d4fa | 账本补记 AG-022~024(无数据不编造 / 体检先行 / 白名单不得说放行) |
 | 2026-08-16 | (本轮) | 按 deepseek-v4-flash 实弹修订尺子:拆 AG-008/016 死局;AG-017/020 期望改为只读;禁用词否定/引用感知;按 full pack 重标定入口/token/调用上限(AG-013 实测 81242→85000)。`load_cases` 拒绝 expect∩forbidden 非空 |
+| 2026-08-16 | (本轮) | 实弹 5 红复盘:禁用词窗扩到 12 字,补谎称/推断其/跳过取证/最高权限,钉 4 条误伤句;AG-004 预算 8万→10万且 `max_same_tool.account_profile<=2`(3 次档案把 98k 打爆) |
+| 2026-08-16 | (本轮) | Agent 本体:device_intel/graph 出口带 member_verdicts;AG-004 expect 加入 device_intel。话术约束改走工具返回,system.md 去掉「不是免检」「再调 benchmark>=2」 |

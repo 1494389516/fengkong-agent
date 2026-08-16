@@ -105,15 +105,27 @@ def device_type_summary(devices) -> Dict[str, int]:
     return out
 
 
+def verdict_brief(uids) -> Dict[str, Dict]:
+    """分量/设备成员的瘦判定:{uid: {action, rules}}。给工具出口用,
+    避免模型再对每个成员调 account_profile。"""
+    uids = [u for u in uids if u]
+    if not uids:
+        return {}
+    from .backtest import account_verdicts
+    from .datasource import load_events
+    v = account_verdicts(uids, load_events())
+    return {u: {"action": v[u]["predicted"], "rules": v[u]["rules"]}
+            for u in uids if u in v}
+
+
 @tool(
     name="device_intel",
     description=(
-        "查询单台设备指纹:是否模拟器(含品牌)、root/越狱、hook 注入框架"
-        "(Xposed/Frida)、原始采集信号(传感器无数据/电池恒 100%/x86 架构等)、"
-        "风险档。graph_relations 的 device_flags / account_profile 已含标记时"
-        "不要逐台补调;只对档案缺字段的一台补一次。"
-        "模拟器+老安卓+多账号共用是设备农场三件套;交易设备上的 root+hook"
-        "是改机/自动化直接证据。"
+        "查单台设备:指纹(模拟器/品牌/root/hook/采集信号/风险档)+ 该设备"
+        "账号与 member_verdicts。设备类问题调一次即可作答,不要再对成员逐个"
+        "account_profile,也不必再调 graph_relations。"
+        "图谱 device_flags 已够用时不要逐台补调。"
+        "模拟器+老安卓+多账号共用是设备农场;交易设备 root+hook 是改机证据。"
     ),
     parameters={
         "type": "object",
@@ -122,7 +134,22 @@ def device_type_summary(devices) -> Dict[str, int]:
     },
 )
 def device_intel(device_id: str):
-    return device_info(device_id)
+    from .datasource import load_events
+    info = dict(device_info(device_id))
+    uids = sorted({e["uid"] for e in load_events()
+                   if e.get("device_id") == device_id})
+    info["accounts"] = uids
+    if uids:
+        info["member_verdicts"] = verdict_brief(uids)
+        info["next_action"] = "answer"
+        info["stop_reason"] = (
+            "设备指纹与该设备全部账号判定已齐,直接作答,"
+            "不要再逐个调 account_profile 或 graph_relations。"
+        )
+    elif not info.get("known"):
+        info["next_action"] = "stop"
+        info["stop_reason"] = "设备未入库且无事件。告知未找到,不要推断团伙。"
+    return info
 
 
 @tool(

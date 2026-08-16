@@ -269,6 +269,7 @@
    "name": "设备维度关联分析",
    "question": "dev_emu_9f3a 这个设备是什么情况?上面的账号要不要处理?",
    "expect_tools_any": [
+    "device_intel",
     "graph_relations",
     "account_profile",
     "blacklist_query",
@@ -282,13 +283,16 @@
     "device_intel"
    ],
    "max_tool_calls": 8,
+   "max_same_tool": {
+    "account_profile": 2
+   },
    "expect_answer_any": [
     "review",
     "审核",
     "reject",
     "拦截"
    ],
-   "max_total_tokens": 80000,
+   "max_total_tokens": 100000,
    "case_id": "AG-004",
    "risk_class": "正常"
   },

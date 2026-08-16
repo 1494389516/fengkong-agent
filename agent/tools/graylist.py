@@ -99,3 +99,77 @@ def graylist_review():
         "entries": entries,
         "note": "升黑:blacklist_add(list=black);出灰:blacklist_remove。均需 /approve 生效",
     }
+
+
+def _dwell_pct(days: list, q: float) -> float:
+    if not days:
+        return 0.0
+    xs = sorted(days)
+    i = min(len(xs) - 1, max(0, int(round((len(xs) - 1) * q))))
+    return xs[i]
+
+
+def _audit_transitions() -> Dict:
+    """从审批审计 squint 升黑/出灰次数。无审计则诚实标 snapshot。"""
+    import json as _json
+    from .datasource import audit_log_path
+    p = audit_log_path()
+    if not p.exists():
+        return {"promote_n": 0, "release_n": 0, "source": "none"}
+    promote = release = 0
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = _json.loads(line)
+        except _json.JSONDecodeError:
+            continue
+        if rec.get("decision") != "approve":
+            continue
+        action = rec.get("action") or {}
+        kind = rec.get("kind") or action.get("kind")
+        if kind == "blacklist_add" and action.get("list") == "black":
+            if "升黑" in (action.get("reason") or ""):
+                promote += 1
+        if kind == "blacklist_remove" and action.get("list") == "gray":
+            release += 1
+    return {"promote_n": promote, "release_n": release, "source": "audit"}
+
+
+@tool(
+    name="graylist_metrics",
+    description=(
+        "灰名单快照指标:建议分布、停留天数、关联误伤成本。"
+        "无审批历史时升黑/出灰率标 snapshot,不编转化率。"
+    ),
+    parameters={"type": "object", "properties": {}},
+)
+def graylist_metrics():
+    from .backtest import CHURN_RISK
+    from .datasource import load_accounts, load_labels
+    rev = graylist_review()
+    days = [e.get("days_observed") or 0 for e in rev.get("entries") or []]
+    labels = load_labels()
+    accts = load_accounts()
+    fp_ltv = 0.0
+    for e in rev.get("entries") or []:
+        for uid in e.get("flagged_accounts") or []:
+            if (labels.get(uid) or {}).get("label") == "normal":
+                fp_ltv += (accts.get(uid) or {}).get("ltv", 0.0)
+    hist = _audit_transitions()
+    n = max(rev.get("gray_total") or 0, 1)
+    mix = rev.get("recommendations") or {}
+    return {
+        "gray_active": rev.get("gray_total") or 0,
+        "recommendation_mix": mix,
+        "dwell_days": {"p50": _dwell_pct(days, 0.5), "p90": _dwell_pct(days, 0.9)},
+        "fp_cost_est": round(CHURN_RISK * fp_ltv, 2),
+        "promote_n": hist["promote_n"],
+        "release_n": hist["release_n"],
+        "promote_rate": None if hist["source"] == "none" else round(hist["promote_n"] / n, 4),
+        "release_rate": None if hist["source"] == "none" else round(hist["release_n"] / n, 4),
+        "rate_basis": hist["source"],
+        "note": ("snapshot=当前建议分布;历史转化只在有审批审计时计数。"
+                 "无变迁日志时不要把 recommendation 当已发生升黑率"),
+    }

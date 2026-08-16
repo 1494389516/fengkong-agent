@@ -59,6 +59,10 @@ def clear_user_text() -> None:
     _current_user_text.set("")
 
 
+def get_user_text() -> str:
+    return _current_user_text.get() or ""
+
+
 def user_requests_write(text: str) -> bool:
     """当前用户原话是否点名要求写入。否定窗内的动词不算。"""
     if not text:
@@ -132,6 +136,7 @@ CAPABILITY = {
     "incident_resolve": "execute",
     # 模拟/回放(零写)
     "rule_backtest": "simulate",
+    "slice_eval": "simulate",
     "shadow_backtest": "simulate",
     "threshold_calibrate": "simulate",
     "rule_draft_test": "simulate",

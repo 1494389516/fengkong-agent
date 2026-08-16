@@ -36,13 +36,14 @@ _INVESTIGATE = frozenset({
     "device_intel", "ip_intel", "report_query",
     "appeal_review", "appeal_resolve",
     "chart_account_timeline", "decision_explain", "decision_trace",
-    "audit_query", "policy_history", "graylist_review",
+    "audit_query", "policy_history", "graylist_review", "graylist_metrics",
 })
 
 _DUTY = frozenset({
     "daily_brief", "duty_ops", "scan_all",
     "feature_drift", "rule_drift", "adversary_watch", "chart_drift_dashboard",
-    "graylist_review", "appeal_review",
+    "graylist_review", "graylist_metrics", "appeal_review",
+    "integration_status",
     "mismatch_queue", "incident_list", "incident_open", "incident_update",
     "feedback_pipeline", "decision_drift", "agent_behavior_drift",
     "feature_health_check", "production_readiness_check",
@@ -54,7 +55,7 @@ _GRAPH = frozenset({
 })
 
 _STRATEGY = frozenset({
-    "rule_backtest", "shadow_backtest", "threshold_calibrate",
+    "rule_backtest", "slice_eval", "shadow_backtest", "threshold_calibrate",
     "threshold_propose", "chart_threshold_sweep", "chart_cohort_features",
     "feature_risk", "rule_draft_test", "feature_catalog",
     "policy_history", "feature_drift", "rule_drift",

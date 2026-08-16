@@ -24,16 +24,42 @@ sys.path.insert(0, str(ROOT))
 # 随工具数上调,但人均 schema 约 500 chars 的纪律不放松;历史见 run_cost_layer 注释。
 SCHEMA_BUDGET = 40500
 SYSTEM_PROMPT_BUDGET = 5700
+# 日常 Copilot 默认 analyst 包。full 是评估/治理最坏底价;研究员每次 ask
+# 实际随行的是 analyst。两套都要闸,只闸 full 会让日常底价偷偷涨。
+PER_TOOL_SCHEMA_CHARS = 500
+ANALYST_SCHEMA_BUDGET = 30000  # 60 工具 × 500;现约 27421,余量约 5 个工具
 
 
-def structural_sizes():
-    """schema / system prompt 的字符量(数据集无关)。"""
+def _system_chars() -> int:
+    return len((ROOT / "agent" / "prompts" / "system.md").read_text(encoding="utf-8"))
+
+
+def miss_floor_tokens(sizes: dict) -> int:
+    """cache miss 时的结构性底价(chars/2,与 core.py ⑥ 同口径)。"""
+    return (int(sizes.get("schemas_chars") or 0)
+            + int(sizes.get("system_chars") or 0)) // 2
+
+
+def structural_sizes(pack=None):
+    """schema / system prompt 的字符量(数据集无关)。
+    pack=None 用进程内当前包(eval 默认 full);显式传 pack 不改全局状态。"""
     from agent import tools
-    schemas_json = json.dumps(tools.schemas(), ensure_ascii=False)
-    system_md = (ROOT / "agent" / "prompts" / "system.md").read_text(encoding="utf-8")
-    return {"tool_count": len(tools.schemas()),
-            "schemas_chars": len(schemas_json),
-            "system_chars": len(system_md)}
+    schemas = tools.schemas(pack=pack) if pack is not None else tools.schemas()
+    schemas_json = json.dumps(schemas, ensure_ascii=False)
+    system_md = _system_chars()
+    out = {"tool_count": len(schemas),
+           "schemas_chars": len(schemas_json),
+           "system_chars": system_md,
+           "pack": pack or "current"}
+    out["per_tool_chars"] = round(out["schemas_chars"] / max(out["tool_count"], 1), 1)
+    out["miss_floor_tokens"] = miss_floor_tokens(out)
+    return out
+
+
+def pack_structural_sizes():
+    """六个工具包各自的结构性底价。日常看 analyst,评估最坏看 full。"""
+    from agent.tools.packs import PACK_NAMES
+    return {name: structural_sizes(pack=name) for name in PACK_NAMES}
 
 
 def tool_result_sizes():
@@ -148,11 +174,15 @@ def main():
     if args.dataset == "gen":
         os.environ["FK_DATASET"] = "gen"
 
-    s = structural_sizes()
+    packs = pack_structural_sizes()
+    s = packs["full"]
     print("== 结构性成本(每请求随行,prefix 缓存可吸收)==")
-    print("  工具数: %d" % s["tool_count"])
-    print("  schema 总量: %d chars ≈ %d tokens" % (s["schemas_chars"], s["schemas_chars"] // 2))
     print("  system prompt: %d chars ≈ %d tokens" % (s["system_chars"], s["system_chars"] // 2))
+    print("  pack           tools  schema  人均   miss底价(tok)")
+    for name, row in packs.items():
+        print("  %-13s %5d %7d %6.1f %8d" % (
+            name, row["tool_count"], row["schemas_chars"],
+            row["per_tool_chars"], row["miss_floor_tokens"]))
 
     rows = tool_result_sizes()
     print("\n== 工具结果大小(数据集: %s,经 dispatch 限幅后)==" % args.dataset)

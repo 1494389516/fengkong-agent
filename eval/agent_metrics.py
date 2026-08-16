@@ -78,9 +78,12 @@ def aggregate(path: Path, budgets: Dict[str, float] = None) -> dict:
     tok_budget = budgets.get("per_case_token_budget", 60000)
     lat_budget = budgets.get("per_case_latency_ms", 120000)
     violations = []
+    case_totals = []
     for r in records:
         t = r.get("tokens") or {}
-        case_tokens = t.get("prompt", 0) + t.get("completion", 0)
+        # prompt 已含 cache_hit+cache_miss,不能再把四键相加,否则均 token 虚高约一倍。
+        case_tokens = int(t.get("prompt") or 0) + int(t.get("completion") or 0)
+        case_totals.append(case_tokens)
         if case_tokens > tok_budget:
             violations.append({"case": r.get("ts"), "kind": "token_budget",
                                "value": case_tokens, "budget": tok_budget})
@@ -93,7 +96,7 @@ def aggregate(path: Path, budgets: Dict[str, float] = None) -> dict:
         "api_calls": sum(int(r.get("api_calls") or 0) for r in records),
         "tokens": dict(tokens),
         "cache_hit_rate": round(hit / (hit + miss), 4) if (hit + miss) else 0.0,
-        "avg_tokens_per_case": round(sum(tokens.values()) / n, 1) if n else 0.0,
+        "avg_tokens_per_case": round(sum(case_totals) / n, 1) if n else 0.0,
         "avg_tool_rounds": round(sum(rounds) / n, 2) if n else 0.0,
         "max_tool_rounds": max(rounds, default=0),
         "budget_compactions": compactions,

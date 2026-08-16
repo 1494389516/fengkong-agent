@@ -98,6 +98,7 @@ def appeal_review():
         "note": "recommendation 只是排序建议;点名提交待审批才用 appeal_resolve;"
                 "用户要求立即生效时不要提交,只说明须 /approve;"
                 "accept 需说明为何现有证据不足以支撑原处置",
+        "speak": "决议须 /approve 才落地。回答不要写「已生效」「直接放行」。",
     }
 
 

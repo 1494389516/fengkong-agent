@@ -15,7 +15,7 @@
 """
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from . import tool
@@ -200,7 +200,8 @@ def blacklist_remove(dimension: str, value: str, reason: str, **kw):
         "/approve 后才写入策略版本表。用户要求立即生效/不用审批时不要调用。"
         "values 键同 rule_backtest 的 overrides 及 monitor/自身基线阈值;"
         "单参数变幅超过 ±50% 会被限速拒绝(需分步提案)。"
-        "可回测键会在提交时强制跑影子回测并绑定指标/数据指纹,影子失败则拒提案。"
+        "可回测键会在提交时强制跑影子回测,完整证据落成独立产物,"
+        "pending 只绑 artifact_id+哈希;影子失败则拒提案。"
     ),
     parameters={
         "type": "object",
@@ -229,7 +230,7 @@ def threshold_propose(values: Dict, reason: str):
                         "被养过的基线一次带飞),现值为 0 的键任何非零变更都超限,"
                         "确需大改请分步提案并逐步验证" % int(policy.MAX_CHANGE_RATIO * 100)}
     from .backtest import OVERRIDABLE, shadow_compare
-    from .dataset import dataset_fingerprint
+    from .shadow_store import write_threshold_artifact
     shadow_keys = {k: v for k, v in values.items() if k in OVERRIDABLE}
     shadow_bind = None
     if shadow_keys:
@@ -237,16 +238,7 @@ def threshold_propose(values: Dict, reason: str):
         if "error" in shadow:
             return {"status": "rejected_shadow", "detail": shadow["error"],
                     "note": "可回测参数必须先完成影子回测"}
-        from .readiness import _git_commit
-        now = datetime.now(timezone.utc)
-        shadow_bind = {
-            "changed_accounts": shadow.get("changed_accounts"),
-            "delta": shadow.get("delta"),
-            "dataset_fingerprint": dataset_fingerprint(),
-            "git_commit": _git_commit() or "unknown",
-            "shadowed_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "expires_at": (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
+        shadow_bind = write_threshold_artifact(shadow_keys, shadow)
 
     def _prop(pending):
         dup = [a for a in pending if a.get("kind") == "threshold_change"
@@ -265,8 +257,11 @@ def threshold_propose(values: Dict, reason: str):
         if shadow_bind:
             rec["shadow"] = shadow_bind
         pending.append(rec)
-        return {"status": "pending_confirmation", "action_id": action_id,
-                "note": "已提交待审批,需研究员在 CLI 执行 /approve %d 后生效" % action_id}
+        out = {"status": "pending_confirmation", "action_id": action_id,
+               "note": "已提交待审批,需研究员在 CLI 执行 /approve %d 后生效" % action_id}
+        if shadow_bind:
+            out["artifact_id"] = shadow_bind.get("artifact_id")
+        return out
 
     return mutate_pending(_prop)
 
@@ -306,9 +301,14 @@ def decide(action_id: int, approve: bool, operator: Optional[str] = None) -> Opt
         # 先落盘、后出队:apply 抛异常时申请留在队列可重试。
         if approve:
             if kind == "threshold_change":
-                exp = (action.get("shadow") or {}).get("expires_at")
-                if exp and exp < _now_iso():
-                    raise ValueError("影子证据已过期(%s),请重新提案" % exp)
+                bind = action.get("shadow") or {}
+                if bind.get("artifact_id") or bind.get("sha256"):
+                    from .shadow_store import verify_threshold_artifact
+                    verify_threshold_artifact(bind)
+                else:
+                    exp = bind.get("expires_at")
+                    if exp and exp < _now_iso():
+                        raise ValueError("影子证据已过期(%s),请重新提案" % exp)
                 applied_version = policy.apply_change(action)["version"]
             elif kind == "appeal_resolve":
                 from .feedback import apply_appeal_decision  # 惰性:防导入环

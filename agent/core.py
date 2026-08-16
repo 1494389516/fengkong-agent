@@ -251,11 +251,13 @@ class Agent:
         on_notice(text)      —— ⑥ 兜底等内部动作的提示,CLI 可打印告知用户。
         """
         # propose 硬门看的是用户原话,必须在进 LLM / 脱敏之前挂上。
-        from .tools import capability as _cap_mod
+        from .tools import ask_state, capability as _cap_mod
         _cap_mod.set_user_text(user_input)
+        ask_state.begin_ask()
         try:
             return self._ask_loop(user_input, on_tool, on_usage, on_notice)
         finally:
+            ask_state.end_ask()
             _cap_mod.clear_user_text()
 
     def _ask_loop(self, user_input: str,

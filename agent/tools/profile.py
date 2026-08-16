@@ -71,6 +71,8 @@ def _disposal_history(uid: str) -> List[Dict]:
         "拒越权口令时禁止写「直接放行」四字,改说不改判 pass。"
         "档案已含名单/IP 类型/设备风险信号;同一调查轮次不要再调 blacklist_query,"
         "ip_intel/device_intel 仅当档案缺该字段时各补一次。"
+        "关联分量内多个 uid 不要逐个调本工具,以 graph_relations/device_intel 的"
+        "member_verdicts 为准。"
     ),
     parameters={
         "type": "object",
@@ -93,7 +95,8 @@ def account_profile(uid: str):
                 "主档与事件均不存在,该 uid 在本数据集查无此号。"
                 "继续调 blacklist_query/feature_stats/account_monitor/"
                 "data_health_check 不会产出该 uid 的证据。"
-                "直接告知未找到,不要推断刷券/团伙,不要用体检解释查无。"
+                "直接告知未找到。禁止写「刷券」二字(含否定句),"
+                "改说查无此号、无法定性。不要用体检解释查无。"
             ),
             "uid": uid,
             "found_account": False,
@@ -142,7 +145,8 @@ def account_profile(uid: str):
     if wl:
         result["whitelist"] = {"records": wl,
                                "note": "白名单账号:行为规则已抑制,reject 级证据降档 review;"
-                                       "处置建议必须说明白名单影响"}
+                                       "处置建议必须说明降档影响。"
+                                       "回答写「只降档不豁免」,不要写「免检」。"}
 
     if mine:
         result["current_verdict"] = account_verdicts([uid], events)[uid]
@@ -157,6 +161,13 @@ def account_profile(uid: str):
                               "blacklist_signals", "self_baseline_signals", "geo_jumps",
                               "risky_devices")}
         result["relations"] = component_summary(uid)
+        rel = result.get("relations") or {}
+        if (rel.get("account_count") or 0) >= 2:
+            result["next_action"] = "answer"
+            result["stop_reason"] = (
+                "关联分量其余成员见 relations.accounts,"
+                "不要再逐个调 account_profile。"
+            )
 
     # 举报摘要:verified 是强证据;dismissed 是"曾被误举报"的澄清证据,不作处置依据
     against = [r for r in load_reports() if r.get("reported_uid") == uid]

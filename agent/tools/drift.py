@@ -347,7 +347,7 @@ def _grouped_profile(feats: List[str], group_col: str, psi_bins: int,
                            "description": "分桶粒度,默认 day"},
             "features": {"type": "array", "items": {"type": "string"},
                          "description": "要画像的特征,默认全部"},
-            "benchmark_buckets": {"type": "integer", "description": "基准桶数,默认 1"},
+            "benchmark_buckets": {"type": "integer", "description": "基准桶数,默认 2"},
             "psi_bins": {"type": "integer", "description": "PSI 分箱数,默认 5"},
             "psi_min_bin_frac": {"type": "number", "description": "小箱合并阈值,默认 0.05"},
             "psi_include_missing": {"type": "boolean", "description": "缺失计入 PSI,默认 false"},
@@ -361,7 +361,7 @@ def _grouped_profile(feats: List[str], group_col: str, psi_bins: int,
 )
 def feature_drift(time_grain: str = "day",
                   features: Optional[List[str]] = None,
-                  benchmark_buckets: int = 1,
+                  benchmark_buckets: int = 2,
                   psi_bins: int = 5,
                   psi_min_bin_frac: float = 0.05,
                   psi_include_missing: bool = False,
@@ -450,8 +450,7 @@ def feature_drift(time_grain: str = "day",
         "bucket_count": len(labels),
         "benchmark_buckets": bench_labels,
         "tail_bucket_partial": tail_partial,
-        **({"benchmark_note": "基准桶 %s 事件量不足后续中位桶一半,可能采集不完整,"
-                              "PSI/密度基准参考价值低,建议 benchmark_buckets>=2"
+        **({"benchmark_note": "首桶 %s 事件偏少,基准偏弱;已按可获得桶计算,不必再调"
                               % labels[0]}
            if benchmark_buckets == 1 and head_partial else {}),
         **({"tail_note": "末桶 %s 事件量不足中位桶一半,可能未采集完整,"
@@ -506,11 +505,11 @@ def _hit_rate_alarm(bench_rate: float, rate: float) -> bool:
             "time_grain": {"type": "string", "enum": ["day", "hour"],
                            "description": "分桶粒度,默认 day"},
             "benchmark_buckets": {"type": "integer",
-                                  "description": "作为基准的最早桶数,默认 1"},
+                                  "description": "作为基准的最早桶数,默认 2"},
         },
     },
 )
-def rule_drift(time_grain: str = "day", benchmark_buckets: int = 1):
+def rule_drift(time_grain: str = "day", benchmark_buckets: int = 2):
     from .backtest import _attach_sim_trust, account_verdicts
 
     if time_grain not in _GRAIN:
@@ -613,8 +612,7 @@ def rule_drift(time_grain: str = "day", benchmark_buckets: int = 1):
         "bucket_count": len(labels),
         "benchmark_buckets": bench_labels,
         "tail_bucket_partial": tail_partial,
-        **({"benchmark_note": "基准桶 %s 事件量不足后续中位桶一半,可能采集不完整,"
-                              "PSI/密度基准参考价值低,建议 benchmark_buckets>=2"
+        **({"benchmark_note": "首桶 %s 事件偏少,基准偏弱;已按可获得桶计算,不必再调"
                               % labels[0]}
            if benchmark_buckets == 1 and head_partial else {}),
         **({"tail_note": "末桶 %s 事件量不足中位桶一半,可能未采集完整,"

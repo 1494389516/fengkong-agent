@@ -115,7 +115,14 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
         return {"error": "tool pack denied: %s 不在当前工具包 %s 中(CLI /pack 切换)"
                 % (name, _packs.current())}
     try:
-        return _cap(_REGISTRY[name]["fn"](**arguments))  # ② 结果回填前统一限幅
+        from . import ask_state
+        if name == "account_profile":
+            sc = ask_state.profile_short_circuit(arguments.get("uid") or "")
+            if sc:
+                return _cap(ask_state.attach_speak(sc))
+        result = _cap(_REGISTRY[name]["fn"](**arguments))  # ② 结果回填前统一限幅
+        ask_state.note_tool_result(name, result)
+        return ask_state.attach_speak(result)
     except Exception as e:  # noqa: BLE001
         return {"error": "%s: %s" % (type(e).__name__, e)}
 
