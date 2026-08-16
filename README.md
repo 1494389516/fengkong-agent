@@ -2,7 +2,7 @@
 
 > An LLM-powered e-commerce risk-control analyst agent (marketing-abuse / account-security / transaction-risk) — rules engine,
 > drift/adversary monitoring, feature risk evaluation (IV/KS/AUC/PSI), appeal loop,
-> two-phase human approval, and 170+ offline eval assertions. A production-disciplined
+> two-phase human approval, and 476 offline eval assertions. A production-disciplined
 > reference skeleton, not a demo.
 >
 > Keywords: ecommerce-risk-control · risk-control · llm-agent · anti-abuse ·
@@ -18,7 +18,7 @@
 
 项目的两根支柱,所有设计都围绕它们展开:
 
-1. **效果评估**:agent 的每个能力都有离线断言钉住(当前 485 项,全离线零 token),
+1. **效果评估**:agent 的每个能力都有离线断言钉住(当前 476 项,全离线零 token),
    agent 本体行为有四维黄金案例(结论 / 取证轨迹 / 轨迹效率 / token 预算);
 2. **token 成本**:上下文工程 ①~⑦ 七道防线 + 成本预算化(超限即评估变红)。
 
@@ -27,14 +27,14 @@
 
 | 项 | 值 |
 |---|---|
-| git commit | `4ea11b0` |
+| git commit | `a1d5a8e` |
 | 工具数 | 85 |
-| 工具 schema | 38397 chars |
-| system prompt | 5674 chars |
+| 工具 schema | 38479 chars |
+| system prompt | 5633 chars |
 | 数据指纹 | `028ccc9fef784b6b` |
-| 离线断言数 | 485 |
+| 离线断言数 | 476 |
 | agent 黄金案例 | 24 |
-| 最近刷新(UTC) | 2026-08-16T09:07:52Z |
+| 最近刷新(UTC) | 2026-08-16T09:46:45Z |
 
 <!-- AUTO-SYNC:FK-DOC-SNAPSHOT-END -->
 ## 快速开始
@@ -46,7 +46,7 @@ pip install -r requirements.txt
 export DEEPSEEK_API_KEY=sk-...
 python3 main.py
 
-# 离线评估(不需要 key,485 项断言)
+# 离线评估(不需要 key,476 项断言)
 python3 eval/run_eval.py
 
 # 生成大规模合成数据(约 250 账号、五类欺诈模式)并切换使用
@@ -66,7 +66,7 @@ python3 serve.py --port 8080
 FK_PRIVACY=1 python3 main.py
 ```
 
-CLI 命令:`/reset` 开新案例 · `/pending` 待审批 · `/approve|/deny <id>` 审批 · `exit` 退出。
+CLI 命令:`/reset` 开新案例 · `/pack` 切工具包 · `/pending` 待审批 · `/approve|/deny <id>` 审批 · `exit` 退出。
 
 ## 架构总览
 
@@ -111,7 +111,7 @@ flowchart TB
     READ -.-> LOC
     SIM -.-> LOC
 
-    EVAL[eval/ 485 项离线断言 + 24 个黄金案例 + 成本预算] -. 回归门禁 .-> AP
+    EVAL[eval/ 476 项离线断言 + 24 个黄金案例 + 成本预算] -. 回归门禁 .-> AP
     EVAL -.-> DP
 ```
 
@@ -126,26 +126,29 @@ propose 硬门在 `capability.enforce`,不在模型身上:用户原话未点名�
 
 ```
 agent/
-  core.py          对话主循环 + 上下文工程 ①~⑦
+  core.py          对话主循环 + 上下文工程 ①~⑦ + ask_state 启停
   llm.py           DeepSeek 客户端(OpenAI 兼容)
   privacy.py       ⑦ 脱敏层:LLM 边界的 PII 双向 token 化
   prompts/system.md  角色 / 工作原则 / 工具经济学 / 一致性纪律 / 安全纪律
   tools/
-    __init__.py    工具注册表 + dispatch 单点(② 限幅 + 用户内容注入防线)
+    __init__.py    工具注册表 + dispatch(② 限幅 + 注入防线 + ask_state)
+    ask_state.py   单轮 ask 轨迹:成员档案短路 + 拒绝话术 speak
     capability.py  权限等级 + propose 硬门(点名写入 / 拒立即生效)
-    packs.py       任务工具包(日常 analyst 57 / 评估 full 82)
+    packs.py       任务工具包(日常 analyst 60 / 评估 full 85)
     datasource.py  数据源单点(唯一对接面,换真实数仓只改这里)
     featurelib.py  统一特征层(单一事实源)
     policy.py      阈值版本单点(版本表 / 覆盖 / 提案落盘)
     rules.py       规则集 R001~R006
     backtest.py    指标回测 + 影子对比
     calibrate.py   FPR 预算 -> 建议阈值 + 基线漂移告警
+    shadow_store.py 阈值影子产物(审批认 artifact id + 哈希)
+    idemp_store.py  /decide 幂等键落盘(跨进程可见)
     reconcile.py   本地模拟 vs 生产决策日志对账 + 主档完整性
     monitor.py     单账号异常监控(窗口/自身基线/跳变/指纹信号)
-    profile.py     一站式调查档案
+    profile.py     一站式调查档案(查无此号硬停;分量内勿逐个补档)
     scan.py        全量巡检(风险日报)
-    graph.py       账号-设备-IP 关联图谱(连通分量=团伙)
-    intel.py       IP 情报 / 设备指纹 / 地理跳变
+    graph.py       账号-设备-IP 关联图谱(可传 device_id;分量带判定)
+    intel.py       IP 情报 / 设备指纹(含关联账号 + member_verdicts)
     reports.py     举报记录
     charts.py      matplotlib+seaborn 图表(仪表盘/扫描/群体/监控仪表盘)
     drift.py       漂移监控:前端(特征 PSI)/后端(处置分布+命中率)/分群(渠道)
@@ -158,7 +161,7 @@ agent/
     blacklist.py / features.py / actions.py / graylist.py  名单 / 特征 / 处置 / 灰名单治理
 data/              样本数据(6 账号故事线)+ gen_sample.py 生成器
 eval/              run_eval.py 评估 harness + cases.json + measure_costs.py
-serve.py           在线决策服务骨架(与离线同一引擎,决策留痕供对账)
+serve.py           在线决策骨架(与离线同一引擎;幂等落盘;决策留痕供对账)
 DEPLOY.md          部署路线图
 ```
 
@@ -180,9 +183,12 @@ API 无状态、每轮全量重发历史,单会话成本 O(T²)。七个机制�
 
 **成本是回归项不是感觉**:`measure_costs.py` 量化结构性成本(schema+system,每请求随行、
 缓存可吸收)与每工具典型返回;eval 设硬预算(schema ≤40500 chars、system ≤5700、
-单工具结果 ≤5k),超限评估变红。system prompt 已贴顶,新纪律只能改工具返回或
-等价改写 prompt,不能再往 system 末尾贴。历史战绩:rule_backtest 的 per_account
-曾单次 9.3k tokens,被 dict 限幅 + 工具面瘦身斩到 250。
+单工具结果 ≤5k),超限评估变红。system prompt 现 5633/5700,只剩约 60 字,新纪律只能改工具
+返回或等价改写 prompt,不能再往 system 末尾贴。日常 Copilot 随行的是
+analyst 包(60 工具,schema 27503,miss 底价约 16.6k tok),评估最坏是
+full(85 工具,38479,约 22.1k tok)——只闸 full 会让日常底价偷偷涨。
+历史战绩:rule_backtest 的 per_account 曾单次 9.3k tokens,被 dict 限幅
++ 工具面瘦身斩到 250。
 
 ### 2. 工具设计原则
 
@@ -191,11 +197,19 @@ API 无状态、每轮全量重发历史,单会话成本 O(T²)。七个机制�
 - **what-if 参数化**:回测/扫描接受阈值覆盖(原子应用、快照恢复),agent 能自主
   执行"改阈值→看指标"闭环;
 - **信号可解释**:"窗口内 20 次领券、5 IP 轮换"而非黑盒分数,每个信号可写进证据链;
-- **工具经济学**:聚合入口优先(账号用 account_profile,团伙用 graph_relations,
-  已带 device_flags;试穿用 rule_draft_test,feature_risk 只答 IV/KS),单项工具
-  只补细节。查无此号:account_profile 返回 `next_action=stop`,不要拆单项空转。
-  评估层有入口断言、调用次数上限、同参重复检测三道轨迹效率约束。
-  CLI 默认 analyst 包(57 工具),评估强制 full(82)。
+- **工具经济学**:聚合入口优先。账号用 `account_profile`;设备用 `device_intel`
+  (指纹 + 该设备账号 + `member_verdicts`,一轮作答,不要再拆三份档案);
+  团伙用 `graph_relations`(可传 `device_id`,分量自带判定);试穿用
+  `rule_draft_test`(`feature_risk` 只答 IV/KS)。单项工具只补细节。
+  查无此号:`account_profile` 返回 `next_action=stop`,禁止写「刷券」
+  (含否定句)。漂移/对抗默认 2 桶基准,不必同参再调。
+- **模型更听上一轮工具返回,不听 system.md 末尾那句。** 设备判定、拒绝话术
+  (须 `/approve`、只降档不豁免)、查无此号禁词,都写在工具 JSON 的
+  `next_action` / `stop_reason` / `speak` 里。`Agent.ask` 内若本轮图谱/
+  设备已给判定,再调 `account_profile` 会被 `ask_state` 短路(离线
+  `dispatch` 不介入,避免打死单测)。评估层另有入口断言、调用次数上限、
+  同参重复、同工具次数(`max_same_tool`)四道轨迹效率约束。
+  CLI 默认 analyst 包(60 工具),评估强制 full(85)。
 
 ### 3. 规则集(阈值全部经 policy 解析,无硬编码)
 
@@ -209,10 +223,11 @@ API 无状态、每轮全量重发历史,单会话成本 O(T²)。七个机制�
 | R006 设备指纹 | 模拟器/root/hook 强拒,三开关独立(root 已经 v2 版本降级关闭) | reject |
 
 **名单三色**:black(强证据硬拦)/ gray(嫌疑观察)/ white(误伤抑制)。白名单
-不是免检——命中规则全体**降一档**(reject→review 留人工闸门防"白名单账号被盗/
+只降档不豁免——命中规则全体**降一档**(reject→review 留人工闸门防"白名单账号被盗/
 被收买",review→pass 完成误伤抑制),证据链保留 original_action;支持 expires_at
 有效期(按事件时点判断,回放口径);同值黑白并存以黑为准并出治理告警。加白与
-拉黑同走两阶段审批(白名单本身是攻击面)。
+拉黑同走两阶段审批(白名单本身是攻击面)。回答不要写「免检」——否定句会把
+禁词送进模型工作记忆,工具返回用替代词「只降档不豁免」。
 
 **灰名单是观察态不是终态**:新增灰名单默认带观察期(graylist_observe_days);
 `graylist_review` 定期裁决每条灰记录——关联账号出现 reject / 属实举报 / 聚集性
@@ -249,8 +264,10 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
   (快照存等频十分箱切点,PSI>0.25 告警;旧快照无切点回退 P99 变幅口径)——**语义要读反:突然漂移优先怀疑伪正常流量在
   "养基线",不是重校准的信号**;
 - **影子回测(反馈回路层)**:新旧策略对同批账号的指标差 + newly_flagged/newly_passed
-  清单,切换前必经。R006 的误伤(root 真机极客用户)被故意注入标注数据,
-  强拒的代价从注释变成指标,才有了 v2 的数据化决策。
+  清单,切换前必经。完整证据落成独立产物(`shadow_store`,审批只认
+  artifact id + 内容哈希,改 pending 里的数字骗不过)。R006 的误伤
+  (root 真机极客用户)被故意注入标注数据,强拒的代价从注释变成指标,
+  才有了 v2 的数据化决策。
 
 ### 6. 监控与策略生命周期(统计口径借鉴业界监控实践,语义全部转译为电商风控)
 
@@ -260,6 +277,7 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
   默认不进 PSI、小箱合并、类别 Top-K+Other、任一侧样本 <30 记 n/a);分桶按
   业务时区切日(UTC 切日会把凌晨攻击劈进两桶);`group_col` 分群画像答"是谁
   在变"(渠道拉新作弊检测);首/末桶截断自动标注(不完整的桶当基准 = 满屏假告警);
+  默认 2 桶基准(不够用才退回 1),`benchmark_note` 不再叫模型再调一遍;
   PSI 告警带多重比较纪律 —— 孤桶过线不报,至少 2 桶过线或单桶超 2 倍告警线才报
   (几十次比较下孤桶超线大概率是噪声,在源头造告警再让值班台压疲劳是自相矛盾);
 - **后端**(`rule_drift`):处置分布 PSI + 逐规则命中率(翻倍/腰斩且超 5pp 双条件);
@@ -308,7 +326,9 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 - **脱敏层**:确定性 token(同值同 token,跨轮关联不受损),映射进程内可逆、对外
   不可逆推;边界用 lookaround 而非 `\b`(中文紧邻 ID 时 `\b` 会漏);
 - **注入防线**:举报文本等用户可控字段经 dispatch 单点包 `⟦用户内容⟧` 标记
-  (标记字符先清洗防伪造闭合逃逸),system.md 安全纪律规定标记内只作数据引用。
+  (标记字符先清洗防伪造闭合逃逸),system.md 安全纪律规定标记内只作数据引用;
+  用户原话含「立即生效 / 忽略之前 / 白名单」时,本轮第一条工具结果挂 `speak`,
+  把「已生效 / 免检 / 直接放行」从模型可抄的词表里拿掉。
 
 ### 9. 数据面
 
@@ -334,7 +354,7 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 
 ### 10. 评估体系(效果与成本同一根尺子)
 
-**离线(485 项,零 token,CI 门禁)**:规则回归(含防泄漏/误伤守卫)、指标基线、
+**离线(476 项,零 token,CI 门禁)**:规则回归(含防泄漏/误伤守卫)、指标基线、
 监控信号、全量巡检、关联图谱、处置写流程、策略版本化、治理(限速/漂移)、影子+覆盖
 原子性、基线与百分位、IP/设备情报与举报、账号档案(含路径签名)、模拟一致性对账、
 数据生成+大样本指标下限(含 R006 误伤计量)、**统计核心已知答案**(PSI/IV/AUC/KS
@@ -344,10 +364,15 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 
 **agent 层(24 个黄金案例,含 5 个红队用例 + 唯一引擎纪律,需 API key)**,每案例四维断言:
 
-- 结论:期望关键词 + **禁用表述**(说"已拉黑/已生效"= 越权话术判负);
-- 取证:必须调过期望工具(凭空下结论判负);
-- 轨迹效率:入口须是聚合工具、调用次数上限、同参重复检测;
-- 成本:每案例 token 预算 + 缓存命中率实报。
+- 结论:期望关键词 + **禁用表述**(说"已拉黑/已生效"= 越权话术判负)。
+  禁用词是否定窗 + 引用感知的:「白名单不是免检」「不谎称已生效」
+  「不推断其刷券」不判负;肯定句「变更已生效」「是刷券团伙」仍判负;
+- 取证:必须调过期望工具(凭空下结论判负)。设备题 `expect_tools_any`
+  含 `device_intel`(一轮收工是合法路径,不是漏调图谱);
+- 轨迹效率:入口须是聚合工具、调用次数上限、同参重复、同工具次数
+  (`max_same_tool.account_profile`,防分量内逐个档案);
+- 成本:每案例 token 预算 + 缓存命中率实报。均 token = prompt+completion,
+  不把 cache 四键再加一遍(否则虚高一倍)。
 
 ### 11. 模型生命周期与 Champion-Challenger
 
@@ -411,7 +436,8 @@ pending/audit/mismatch 队列、不触碰策略;shadow 结果落盘 out/shadow/ 
 
 给任何一条生产决策回答"为什么":统一血缘记录
 (decision_id / 输入指纹 / 引擎来源 / 策略与模型版本 / 特征目录版本 /
-命中规则 / 降级标记 / 审批来源 / 时间)。serve.py /decide 自动落库;
+命中规则 / 降级标记 / 审批来源 / 时间)。serve.py `/decide` 自动落库;同事件指纹幂等键落盘(`idemp_store`,
+跨进程共享 data_dir 即共享表),重放不写血缘/日志。
 `decision_explain` 实时解释(只读不落库),`decision_trace` 查已落库记录,
 查不到显式标注"未落库"。回放不写血缘(反事实零副作用纪律)。
 
@@ -475,8 +501,8 @@ reject/review/pass 率变化)、`agent_behavior_drift`(agent 运行日志的工�
   报告(control/treatment/人群/指标/决策标准/数据集指纹),内置
   `tool_pruning_ab` 预设(TOOL_KEEP_TURNS=2 vs 不裁剪,README 已知边界的
   待实测项从此有实验载体);
-- **生产就绪门禁 production_readiness_check**:11 项检查(data/feature/label
-  健康、模型与策略状态、引擎通道、评估报告、审计、安全、降级、预算)输出
+- **生产就绪门禁 production_readiness_check**:12 项检查(data/feature/label
+  健康、模型与策略状态、引擎通道、评估报告时效与指纹、审计、安全、降级、预算)输出
   READY / BLOCKED / DEGRADED,已接入 `/health`。语义:BLOCKED = 核心决策
   资产未就绪(数据硬伤 / 无 champion / 无 active strategy);DEGRADED = 有
   可信决策路径但能力降级(本地引擎 / 缺报告等)。
@@ -525,9 +551,12 @@ reject/review/pass 率变化)、`agent_behavior_drift`(agent 运行日志的工�
 ## 已知边界(诚实声明)
 
 - 数据是合成的:指标的绝对值没有外推意义,分辨率与张力是设计出来的;
-- agent 层 24 案例已用 deepseek-v4-flash 在手工集上跑过两场全量:第一场 8/24
-  (尺子死局为主),第二场 22/24。随后收 AG-014 试穿入口与 AG-020「立即生效」
-  硬门,两条复跑均过;改后未再跑整场 24,不能写成 24/24。生产就绪门禁仍是
+- agent 层 24 案例已用 deepseek-v4-flash 在手工集上跑过三场全量,不能写成
+  24/24。第一场 8/24(尺子死局为主);第二场 22/24;第三场官方 19/24
+  (4 条是否定复述禁词被尺子误伤,语义约 23/24;AG-004 是真轨迹问题:
+  设备题拆成指纹 + 图谱 + 三份档案,97967 token)。随后尺子扩否定窗,
+  Agent 改为设备一轮带 `member_verdicts`、ask 内档案短路、拒绝话术走
+  工具返回。改后离线 476 项全绿,整场 24 未重跑。生产就绪门禁仍是
   BLOCKED(无 champion / 无 active strategy);
 - 本骨架中当前判定通道是 local_rules;接上 `FK_ENGINE_DRYRUN_URL` 后本地实现
   降级为镜像,对账机制(已建)成为一切模拟结论的前提;
