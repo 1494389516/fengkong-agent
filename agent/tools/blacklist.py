@@ -53,6 +53,7 @@ def active_records(dimension: str, value: str, as_of_ts: Optional[float] = None,
         "list 字段:black(黑,强证据硬拦)/ gray(灰,嫌疑观察)/ white(白,"
         "误伤抑制:行为规则失效、硬证据降档 review,不是免检)。带 expires_at 的"
         "记录到期即失效(expired=true 标注)。未命中时 hit=false。"
+        "account_profile 已判目标 uid 不存在时不要再调本工具核同一 uid。"
     ),
     parameters={
         "type": "object",

@@ -102,9 +102,11 @@ def _enums(events: List[Dict]) -> Dict:
 @tool(
     name="feature_health_check",
     description=(
-        "特征健康检查:建模/回测/策略分析前的门槛 —— 缺失率、新鲜度、分布"
-        "漂移(对比策略基线快照)、取值域、枚举漂移,输出 ok/warn/fail 与"
-        "明细。发现 fail 时必须先修数据面再下结论。"
+        "特征健康检查:缺失率、新鲜度、分布漂移、取值域、枚举漂移,"
+        "输出 ok/warn/fail。不是阈值 what-if 的入口 —— 放宽/收紧阈值先调"
+        "chart_threshold_sweep 或 shadow_backtest;本工具只在用户问数据面,"
+        "或回测返回 warn 后补调。fail 必须先修数据面再下结论。"
+        "account_profile 已判目标 uid 不存在时不要用本工具解释查无。"
     ),
     parameters={"type": "object", "properties": {}},
 )

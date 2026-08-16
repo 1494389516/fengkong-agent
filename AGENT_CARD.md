@@ -80,13 +80,13 @@
 
 | 指标 | 值 |
 |---|---|
-| git commit | `e2fe81b` |
-| 数据指纹 | `7be5e1485fcf2744` |
+| git commit | `487d4fa` |
+| 数据指纹 | `5b3985a39325008d` |
 | 工具数 | 82 |
-| 离线断言 | 367 项 |
-| 工具 schema | 36397 chars(预算 40500) |
-| system prompt | 5653 chars(预算 5700) |
-| 最近刷新(UTC) | 2026-08-16T02:33:52Z |
+| 离线断言 | 380 项 |
+| 工具 schema | 37297 chars(预算 40500) |
+| system prompt | 5677 chars(预算 5700) |
+| 最近刷新(UTC) | 2026-08-16T03:55:01Z |
 
 > 完整评估报告:`python3 eval/run_eval.py --offline --report out/eval_report.md`
 > 案例库账本:`eval/cases_changelog.md`(24 个黄金案例,含红队与唯一引擎纪律)。

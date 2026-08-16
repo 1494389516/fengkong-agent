@@ -108,10 +108,12 @@ def device_type_summary(devices) -> Dict[str, int]:
 @tool(
     name="device_intel",
     description=(
-        "查询设备指纹:是否模拟器(含品牌)、root/越狱、hook 注入框架"
+        "查询单台设备指纹:是否模拟器(含品牌)、root/越狱、hook 注入框架"
         "(Xposed/Frida)、原始采集信号(传感器无数据/电池恒 100%/x86 架构等)、"
-        "风险档。模拟器+老安卓版本+多账号共用是设备农场三件套;"
-        "root+hook 出现在交易设备上是改机/自动化的直接证据。"
+        "风险档。graph_relations 的 device_flags / account_profile 已含标记时"
+        "不要逐台补调;只对档案缺字段的一台补一次。"
+        "模拟器+老安卓+多账号共用是设备农场三件套;交易设备上的 root+hook"
+        "是改机/自动化直接证据。"
     ),
     parameters={
         "type": "object",
@@ -126,10 +128,10 @@ def device_intel(device_id: str):
 @tool(
     name="ip_intel",
     description=(
-        "查询 IP 情报:网段类型(residential 家宽 / mobile 基站 / idc 机房 / "
+        "查询单个 IP 情报:网段类型(residential 家宽 / mobile 基站 / idc 机房 / "
         "proxy 代理秒拨 / unknown)、运营商、城市与经纬度、风险等级。"
-        "登录/下单出现 idc 或 proxy 段本身就是强风险信号;"
-        "同样的去重 IP 数,家宽和机房是两个物种。"
+        "图谱 weak_ips 或档案 IP 类型分布已够用时不要对每个 IP 补调;"
+        "登录/下单出现 idc 或 proxy 段本身就是强风险信号。"
     ),
     parameters={
         "type": "object",

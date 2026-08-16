@@ -326,10 +326,10 @@ def chart_account_timeline(uid: str):
     name="chart_threshold_sweep",
     description=(
         "对单个规则阈值扫描回测:逐候选值画 precision/recall/F1 曲线 + 该规则"
-        "自身命中归因曲线(命中欺诈/误伤正常,右轴)。aggregate_insensitive=true "
+        "自身命中归因曲线(命中欺诈/误伤正常,右轴)。阈值 what-if 的首选入口,"
+        "不要先跑 feature_health_check。aggregate_insensitive=true "
         "= 聚合指标全程无变化(被其他规则遮蔽/无边界样本),无 best 值;"
         "nothing_to_plot=true = 连归因也平直,不出图,把 note 原因转告研究员。"
-        "可选参数见 param 枚举。"
     ),
     parameters={
         "type": "object",

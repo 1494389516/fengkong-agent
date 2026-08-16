@@ -21,6 +21,7 @@ from .featurelib import account_features, accounts_per, behavior_paths, percenti
         "as_of_ts 取证时点(只统计该时刻之前的事件,评估历史事件时必传,防止"
         "偷看未来);window_seconds 时间窗(只统计最近 N 秒,行为模式类判断用)。"
         "两者都不传 = 全历史。"
+        "account_profile 已判目标 uid 不存在时不要再调。"
     ),
     parameters={
         "type": "object",
@@ -54,4 +55,9 @@ def feature_stats(uid: str, as_of_ts: Optional[float] = None,
                       "min_gap_seconds", "order_amount_max")
             if r.get(f) is not None
         }
+        return r
+    r["next_action"] = "stop"
+    r["stop_reason"] = (
+        "该 uid 无事件,特征为空。若 account_profile 已判不存在则停止,"
+        "不要再拆监控/体检。")
     return r

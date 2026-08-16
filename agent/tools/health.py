@@ -320,7 +320,10 @@ def _check_jsonl(path: Path, f: _File) -> None:
     description=(
         "对当前数据集做体检:JSON 解析/必填字段/枚举/重复/乱序/主档覆盖率/"
         "jsonl 损坏行。issue 分 error(硬伤,让规则静默失真)/warning(软伤)。"
-        "换数据集/接真实数据后应先跑本工具再下结论。"
+        "仅当用户明确要求体检或刚换数据集时调用;团伙/日报/账号调查/阈值"
+        "what-if 不要以本工具开头。summary=ok 后查账号用 account_profile,"
+        "不要再拆 blacklist_query 或重复调用 ip_intel。"
+        "account_profile 已返回双 false 时不要用本工具解释查无。"
     ),
     parameters={"type": "object", "properties": {}},
 )

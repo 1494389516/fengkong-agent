@@ -275,7 +275,8 @@ def shadow_compare(overrides: Dict):
     description=(
         "影子回测:当前生效策略 vs 候选阈值,对同一批标注账号的差异对比 —— "
         "双方指标、指标增量、以及哪些账号会'新被拦下'(newly_flagged)/"
-        "'新被放过'(newly_passed)。提议或批准任何阈值变更前必须先看这个。"
+        "'新被放过'(newly_passed)。阈值放宽/收紧的 what-if 先调本工具或"
+        "chart_threshold_sweep,不要先跑 feature_health_check。"
         "overrides 键同 rule_backtest。"
     ),
     parameters={

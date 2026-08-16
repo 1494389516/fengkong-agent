@@ -22,7 +22,7 @@ import networkx as nx
 from . import tool
 from .charts import LABEL_COLORS, PALETTE, _save, _t, plt
 from .datasource import load_blacklist, load_events, load_labels
-from .intel import ip_info
+from .intel import device_risk_flags, device_type_summary, ip_info
 
 MAX_DRAW_COMPONENTS = 9  # 最多画的分量面板数:每个分量独立一个子图,超出只画最大的前 N 个
 
@@ -61,11 +61,14 @@ def _expand_weak(g: nx.Graph, strong_nodes) -> set:
 
 def _component_info(strong_nodes, all_nodes, blacklisted: dict, labels: dict) -> dict:
     accounts = sorted(v for k, v in strong_nodes if k == "uid")
+    devices = sorted(v for k, v in strong_nodes if k == "device_id")
     strong_ips = {v for k, v in strong_nodes if k == "ip"}
     return {
         "accounts": accounts,
         "account_count": len(accounts),
-        "devices": sorted(v for k, v in strong_nodes if k == "device_id"),
+        "devices": devices,
+        "device_flags": {d: device_risk_flags(d) for d in devices},
+        "device_summary": device_type_summary(devices),
         "ips": sorted(strong_ips),
         "weak_ips": sorted(v for k, v in all_nodes if k == "ip" and v not in strong_ips),
         "blacklist_hits": sorted(
@@ -96,8 +99,11 @@ def component_summary(uid: str):
         "并组只认强证据:共享设备、共享家宽/基站 IP;机房/代理 IP 是公共出口,"
         "只在 weak_ips 里展示、不作团伙依据(引用关联结论时说明纽带是什么)。"
         "不传参数返回所有多账号分量(按账号数降序)+ 全图 PNG;传 uid 只返回该"
-        "账号所在分量 + 该分量的 PNG。返回内容含各分量的成员账号、共用设备/IP、"
-        "名单命中与已知标签。适合'有没有团伙''这个账号和谁有关联'类问题。"
+        "账号所在分量 + 该分量的 PNG。返回已含成员、共用设备/IP、device_flags"
+        "(模拟器/root/hook)、device_summary、名单命中与标签。"
+        "'有没有团伙'类问题直接调本工具,不要先 data_health_check,也不要对每个"
+        "设备/IP 再拆 device_intel/ip_intel。调查只报告,未点名写入时不要"
+        "blacklist_add。account_profile 已判目标 uid 不存在时不要为查团伙再调。"
     ),
     parameters={
         "type": "object",
@@ -119,7 +125,8 @@ def graph_relations(uid: Optional[str] = None, min_accounts: int = 2):
     if uid is not None:
         node = ("uid", uid)
         if node not in g:
-            return {"uid": uid, "found": False}
+            return {"uid": uid, "found": False, "next_action": "stop",
+                    "stop_reason": "图上无此 uid。若 account_profile 已判不存在则停止。"}
         comps = [nx.node_connected_component(sg, node)]
     else:
         comps = [c for c in nx.connected_components(sg)

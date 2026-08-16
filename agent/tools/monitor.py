@@ -36,6 +36,7 @@ from .policy import active_policy
         "(burst 高频 / ip_churn IP 轮换 / rapid_repeat 机打节奏),并检查设备共用"
         "(团伙聚集)与黑灰名单关联。返回 signal_types 汇总与逐窗口明细,"
         "只列异常窗口。适合排查'这个账号有没有问题'类问题。"
+        "account_profile 已判目标 uid 不存在时不要再调。"
     ),
     parameters={
         "type": "object",
@@ -57,7 +58,8 @@ def account_monitor(uid: str, window_seconds: int = 300):
     events = load_events()
     mine = sorted((e for e in events if e["uid"] == uid), key=lambda e: e["ts"])
     if not mine:
-        return {"uid": uid, "found": False}
+        return {"uid": uid, "found": False, "next_action": "stop",
+                "stop_reason": "该 uid 无事件可监控。若 account_profile 已判不存在则停止。"}
 
     # 1) 时间窗扫描(翻滚窗,锚定首事件)
     t0 = mine[0]["ts"]

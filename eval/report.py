@@ -149,9 +149,17 @@ def render_report(records: list, offline: bool = False,
         lines.append("无。")
     lines += ["", "## agent 层(第 2+3 层)", ""]
     agent = [r for r in records if r["layer"].startswith("agent 层")]
-    if agent and agent[0].get("note"):
-        lines.append("> %s — 四维基线(结论/取证轨迹/轨迹效率/token 预算)"
-                     "待实弹运行后回填本段。" % agent[0]["note"])
+    if agent and agent[0].get("checks"):
+        lines += ["| 案例 | 结果 | 问题 |", "|---|---|---|"]
+        for c in agent[0]["checks"]:
+            status = "PASS" if c.get("ok") else "FAIL"
+            probs = c.get("problems") or []
+            note = "; ".join(probs) if probs else "-"
+            lines.append("| %s | %s | %s |" % (c["name"], status, note))
+        if agent[0].get("note"):
+            lines += ["", "> %s" % agent[0]["note"]]
+    elif agent and agent[0].get("note"):
+        lines.append("> %s" % agent[0]["note"])
     else:
         lines.append("> 见逐案例打印;四维指标待 agent_runs.jsonl 聚合"
                      "(eval/agent_metrics.py)。")

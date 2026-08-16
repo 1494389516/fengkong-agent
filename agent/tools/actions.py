@@ -66,9 +66,10 @@ def _limit_violations(values: Dict, current: Dict) -> List[str]:
     name="blacklist_add",
     description=(
         "提交名单写入申请(black/gray/white),进待审批队列,需 /approve 才生效。"
-        "reason 写清证据(命中规则/信号/数值),进审计日志。white 建议必带 "
-        "expires_days;gray 未带时按默认观察期提交。同值同色已在名单/队列返回"
-        "现状;不同色允许提交(灰升黑、黑值申诉加白)。三色语义见系统纪律。"
+        "仅当研究员明确要求加名单/升黑/加白时才调用;调查、日报、团伙排查"
+        "只给文字建议,禁止主动提交。reason 写清证据,进审计日志。"
+        "white 建议必带 expires_days;gray 未带时按默认观察期提交。"
+        "同值同色已在名单/队列返回现状;不同色允许提交(灰升黑、黑值申诉加白)。"
     ),
     parameters={
         "type": "object",
