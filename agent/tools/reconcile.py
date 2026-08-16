@@ -157,8 +157,8 @@ def _load_queue():
 
 
 def _save_queue(items) -> None:
-    mismatch_queue_path().write_text(
-        json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+    from .datasource import atomic_write_json
+    atomic_write_json(mismatch_queue_path(), items)
 
 
 def _now_iso() -> str:

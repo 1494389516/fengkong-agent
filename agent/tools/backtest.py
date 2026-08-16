@@ -25,9 +25,11 @@ from .rules import rule_eval
 # 排序比较(哪个阈值更亏),不是财务口径 —— 真实流失率应由业务侧回填。
 CHURN_RISK = 0.2
 
-# 可被 what-if 覆盖的阈值键(规则组;monitor 组不在列,回测不跑监控)。
+# 可被 what-if 覆盖的阈值键(规则组 + 编排枚举;monitor 组不在列)。
 # 覆盖经 policy.set_overrides 生效:先全量校验后原子应用,finally 恢复旧快照。
-OVERRIDABLE = policy.RULE_KEYS
+# 阈值扫描只扫 SWEEPABLE,decision_combine 可回测但不可数值扫图。
+OVERRIDABLE = policy.OVERRIDABLE
+SWEEPABLE = policy.SWEEPABLE
 
 # 标签口径(target 规则):有效值只有这两个,其他值直接报错
 # 而不是静默当 normal —— "Fraud"/"suspect"/1 混进来会无声污染混淆矩阵,

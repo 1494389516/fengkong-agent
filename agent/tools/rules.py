@@ -35,6 +35,20 @@ def _weight_score(hits: List[Dict], policy: Dict) -> float:
     return score
 
 
+def _is_pass_hit(h: Dict) -> bool:
+    return (h.get("action") or "pass") == "pass"
+
+
+def _is_gray_observation(h: Dict) -> bool:
+    """灰名单观察态:不当 sequential 的先命中。白名单降档带 whitelisted,
+    不是观察态。优先认 list/observation_only,兼容旧 hit 的 R001+review。"""
+    if h.get("whitelisted"):
+        return False
+    if h.get("observation_only") or h.get("list") == "gray":
+        return True
+    return h.get("rule_id") == "R001" and h.get("action") == "review"
+
+
 def combine_hits(hits: List[Dict], policy: Dict) -> Tuple[str, Dict[str, Any]]:
     """按 decision_combine 把 hits 合成最终 action。非法模式回退 worst,
     并在 meta 里打 combine_fallback(不静默)。hits 本身不改。"""
@@ -46,15 +60,30 @@ def combine_hits(hits: List[Dict], policy: Dict) -> Tuple[str, Dict[str, Any]]:
         mode = "worst"
 
     if mode == "sequential":
+        # 灰名单是观察态不是档位:延后 gray,跳过 pass(含白名单降档后的
+        # R001-pass),否则后续 R002/R006 硬证据被盖掉。无其他证据时回退
+        # gray 的 review,不能把纯观察变成 pass。
+        deferred = None
         action = "pass"
         for rid in RULE_COMBINE_ORDER:
+            chosen = None
             for h in hits:
-                if h.get("rule_id") == rid:
-                    action = h.get("action") or "pass"
-                    break
-            else:
-                continue
-            break
+                if h.get("rule_id") != rid:
+                    continue
+                if _is_pass_hit(h):
+                    continue
+                if _is_gray_observation(h):
+                    if deferred is None:
+                        deferred = h
+                    continue
+                chosen = h
+                break
+            if chosen:
+                action = chosen.get("action") or "pass"
+                break
+        else:
+            if deferred:
+                action = deferred.get("action") or "review"
     elif mode == "vote":
         counts: Dict[str, int] = {}
         for h in hits:
@@ -145,9 +174,12 @@ def _uid_features(uid: str, as_of_ts: Optional[float] = None,
     return r if r.get("found") else None
 
 
-def _hit(hits: List[Dict[str, str]], rule_id: str, reason: str, action: str) -> None:
+def _hit(hits: List[Dict[str, str]], rule_id: str, reason: str, action: str,
+         **extra: Any) -> None:
     """追加一条命中记录。action 必须是 pass/review/reject 之一。"""
-    hits.append({"rule_id": rule_id, "reason": reason, "action": action})
+    rec: Dict[str, Any] = {"rule_id": rule_id, "reason": reason, "action": action}
+    rec.update(extra)
+    hits.append(rec)
 
 
 @tool(
@@ -196,12 +228,14 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
 
 
 def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False,
-                      threshold_overrides: Dict[str, Any] = None):
+                      threshold_overrides: Dict[str, Any] = None,
+                      enabled_rules: Optional[List[str]] = None):
     """本地 R001-R006 实现 —— 骨架替身/降级备份,不是独立引擎。
     公开判定入口是 agent.engine.evaluate_event(经上方的 rule_eval 工具)。
     threshold_overrides:active strategy 的阈值覆盖(引擎层解析后传入,
-    函数级参数传递,不动全局 _OVERRIDES —— 线程安全的局部覆盖;what-if
-    覆盖生效时跳过,用户显式实验优先)。"""
+    函数级参数传递;what-if 覆盖生效时跳过,用户显式实验优先)。
+    enabled_rules:active strategy 声明的规则集;空/None = 全开。"""
+    from . import policy as P
     hits: List[Dict[str, str]] = []
     uid = event.get("uid", "")
     ip = event.get("ip", "")
@@ -215,10 +249,14 @@ def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False,
     # 用当前策略评估历史数据 —— 否则批准了新版本,回测指标永远照不进
     p = active_policy(None if use_current_policy else as_of)
     # active strategy 的阈值覆盖(引擎层传入):策略注册表治理的阈值真正进入
-    # 判定。函数级参数,不碰全局 _OVERRIDES(线程安全);what-if 覆盖生效时
-    # 跳过(用户显式实验优先于策略覆盖,与远程模式语义一致)。
+    # 判定。函数级参数;what-if 覆盖生效时跳过(用户显式实验优先)。
     if threshold_overrides and not p.get("_overridden"):
         p.update(threshold_overrides)
+    rules_on = enabled_rules if enabled_rules is not None else P.enabled_rules()
+    enabled = set(rules_on) if rules_on else None
+
+    def _on(rid: str) -> bool:
+        return enabled is None or rid in enabled
 
     # ------------------------------------------------------------------
     # R001 名单硬拦截:uid / ip / device_id 三个维度带值的全查。
@@ -240,13 +278,18 @@ def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False,
                 white_conflict = True
 
     gray_hit = False
-    for dim, val in (("uid", uid), ("ip", ip), ("device_id", device_id)):
-        if not val:
-            continue
-        for rec in _blacklist_records(dim, val, as_of):
-            action = "reject" if rec["list"] == "black" else "review"
-            gray_hit = gray_hit or rec["list"] == "gray"
-            _hit(hits, "R001", "%s=%s 命中%s名单: %s" % (dim, val, rec["list"], rec["reason"]), action)
+    if _on("R001"):
+        for dim, val in (("uid", uid), ("ip", ip), ("device_id", device_id)):
+            if not val:
+                continue
+            for rec in _blacklist_records(dim, val, as_of):
+                action = "reject" if rec["list"] == "black" else "review"
+                gray_hit = gray_hit or rec["list"] == "gray"
+                extra = {"list": rec["list"]}
+                if rec["list"] == "gray":
+                    extra["observation_only"] = True
+                _hit(hits, "R001", "%s=%s 命中%s名单: %s" % (
+                    dim, val, rec["list"], rec["reason"]), action, **extra)
 
     # ------------------------------------------------------------------
     # R006 设备指纹硬拦截:模拟器 / root / hook 一律 reject(业务拍板的强硬
@@ -257,7 +300,7 @@ def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False,
     # 强拒是拦截收益 > 误伤代价的业务取舍,误伤走申诉通道;
     # 关掉某开关的影响用 shadow_backtest 覆盖 r006_reject_rooted=0 量化。
     # ------------------------------------------------------------------
-    if device_id:
+    if device_id and _on("R006"):
         dinfo = device_info(device_id)
         fp_hits = []
         if p["r006_reject_emulator"] and dinfo.get("is_emulator"):
@@ -277,7 +320,7 @@ def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False,
     # 高频之上再叠加多 IP 轮换时升级 reject —— 单纯高频最多 review,
     # 因为极端活跃的真人无法完全排除,而"高频 + 换 IP"基本只能是脚本。
     # ------------------------------------------------------------------
-    if feats and event_type == "coupon_claim":
+    if feats and event_type == "coupon_claim" and _on("R002"):
         # 间隔与计数都必须是领券口径:全事件流的 event_count/min_gap 会把
         # "登录多、下单快"的活跃正常账号当成刷券 bot(实锤误伤过,见 backtest
         # 的 R002 fp),证据文案里的"领券 N 次"也会变成编造数字。
@@ -301,7 +344,7 @@ def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False,
     # 非 order 或未带 amount 的事件不评估。
     # ------------------------------------------------------------------
     # reason 文案里的阈值必须读同一份 p:override/版本生效时,证据链数字要和实际判定一致
-    if event_type == "order" and amount is not None:
+    if event_type == "order" and amount is not None and _on("R003"):
         if amount >= p["r003_high_amount"]:
             _hit(hits, "R003", "订单金额 %.2f 达到大额阈值 %.0f" % (amount, p["r003_high_amount"]), "review")
         elif amount <= p["r003_cashout_max_amount"]:
@@ -325,11 +368,13 @@ def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False,
         acct = load_accounts().get(uid)
         if acct:
             age = as_of - acct["registered_at"]
-            if amount >= p["r004_min_amount"] and 0 <= age <= p["r004_max_account_age_seconds"]:
+            if (_on("R004") and amount >= p["r004_min_amount"]
+                    and 0 <= age <= p["r004_max_account_age_seconds"]):
                 _hit(hits, "R004", "注册仅 %.1f 小时即下单 %.2f(新号大额)"
                      % (age / 3600, amount), "review")
             score = acct.get("register_risk_score")
-            if (score is not None and score >= p["r005_min_register_score"]
+            if (_on("R005") and score is not None
+                    and score >= p["r005_min_register_score"]
                     and 0 <= age <= p["r005_max_account_age_seconds"]):
                 _hit(hits, "R005", "注册风险分 %d(阈值 %d)的新号下单 %.2f,账龄 %.1f 小时"
                      % (score, p["r005_min_register_score"], amount, age / 3600), "review")

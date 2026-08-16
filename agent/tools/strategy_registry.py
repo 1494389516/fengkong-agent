@@ -14,15 +14,16 @@
   - 每个版本记录 dataset_fingerprint,回放口径有据。
 
 策略是元数据(数据/策略文件下的 strategy_registry.json,gitignored);
-真正的阈值生效仍由 policy 版本表 + engine 适配器负责,本注册表不参与
-判定,只治理"哪个策略版本处于什么状态"。
+阈值与规则集都经 engine 适配器进入判定:active 策略的 thresholds 覆盖
+阈值,非空 rules 限制本地 R001-R006 启用集(空 rules = 全开)。R007 是
+champion 模型信号,由引擎层独立注入,不受 rules 字段裁剪。
 """
 import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from . import tool
-from .datasource import data_dir, pending_actions_path
+from .datasource import atomic_write_json, data_dir
 from .dataset import dataset_fingerprint
 from .featurelib import FEATURE_CATALOG
 from .policy import DEFAULTS, ENUM_KEYS, SWITCH_KEYS
@@ -31,7 +32,8 @@ from .rules import RULE_COUNT
 REGISTRY_FILE = "strategy_registry.json"
 
 STATES = ("draft", "validated", "shadow", "active", "deprecated", "rollback")
-_KNOWN_RULES = frozenset("R%03d" % i for i in range(1, RULE_COUNT + 1))
+# R007 可登记为依赖声明;本地启用集仍是 R001-R006,R007 由引擎注入。
+_KNOWN_RULES = frozenset("R%03d" % i for i in range(1, RULE_COUNT + 2))
 _FEATURE_KEYS = frozenset(c["key"] for c in FEATURE_CATALOG)
 
 
@@ -49,8 +51,7 @@ def _load() -> List[Dict]:
 
 
 def _save(items: List[Dict]) -> None:
-    _path().write_text(json.dumps(items, ensure_ascii=False, indent=1),
-                       encoding="utf-8")
+    atomic_write_json(_path(), items)
 
 
 def _find(items: List[Dict], name: str, version: str) -> Optional[Dict]:
@@ -60,22 +61,15 @@ def _find(items: List[Dict], name: str, version: str) -> Optional[Dict]:
     return None
 
 
-def _pending() -> List[Dict]:
-    p = pending_actions_path()
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
-
-
-def _save_pending(items: List[Dict]) -> None:
-    pending_actions_path().write_text(
-        json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
-
-
 def _submit_pending(entry: Dict) -> int:
-    pending = _pending()
-    action_id = max((a["action_id"] for a in pending), default=0) + 1
-    pending.append({"action_id": action_id, **entry})
-    _save_pending(pending)
-    return action_id
+    from .actions import mutate_pending
+
+    def _fn(pending):
+        action_id = max((a["action_id"] for a in pending), default=0) + 1
+        pending.append({"action_id": action_id, **entry})
+        return action_id
+
+    return mutate_pending(_fn)
 
 
 def validate_strategy(entry: Dict) -> Dict:
@@ -401,10 +395,12 @@ def _replay_against(entry: Dict, uids: List[str]) -> Dict:
     labels = load_labels()
     target = uids or sorted(labels.keys())
     prev = policy.set_overrides(entry["thresholds"])
+    prev_rules = policy.set_enabled_rules(entry.get("rules") or [])
     try:
         new_v = account_verdicts(target, events, use_current_policy=True)
     finally:
         policy.restore_overrides(prev)
+        policy.restore_enabled_rules(prev_rules)
     base_v = account_verdicts(target, events, use_current_policy=True)
 
     order_sum: Dict[str, float] = {}
@@ -525,8 +521,8 @@ def strategy_shadow(strategy_name: str, version: str,
                   / "out" / "shadow")
     shadow_dir.mkdir(parents=True, exist_ok=True)
     path = shadow_dir / ("%s-%s.json" % (strategy_name, version))
-    path.write_text(json.dumps(out, ensure_ascii=False, indent=1),
-                    encoding="utf-8")
+    from .datasource import atomic_write_json
+    atomic_write_json(path, out)
     return {"shadow_path": str(path), **{k: out[k] for k in
             ("what_if", "changed_count", "change_rate", "cost_delta",
              "compared", "created_at")}}

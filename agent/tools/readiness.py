@@ -9,12 +9,60 @@ security_status / degraded_status / budget_status。
 strategy / 数据硬伤 = BLOCKED(判定路径没有完整资产);引擎本地模式、
 缺评估报告等 = DEGRADED(判定路径在,只是降级态)。
 """
+import os
+import re
+import subprocess
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Tuple
 
 from . import tool
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _git_commit() -> str:
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        return (out.stdout or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _evaluation_status() -> Tuple[str, str]:
+    """评估报告必须对应当前 commit/数据指纹,失败报告与陈旧报告都不能当 ok。"""
+    report = ROOT / "out" / "eval_report.md"
+    if not report.exists():
+        return "warn", "report=缺(out/eval_report.md)"
+    try:
+        text = report.read_text(encoding="utf-8")
+    except OSError:
+        return "warn", "report=不可读"
+    issues = []
+    m = re.search(r"git commit \| `([^`]+)`", text)
+    report_commit = m.group(1) if m else ""
+    head = _git_commit()
+    if head and report_commit and report_commit not in ("unknown", head):
+        issues.append("report=陈旧(report=%s, HEAD=%s)" % (report_commit, head))
+    m_fail = re.search(r"失败 (\d+)", text)
+    if m_fail and int(m_fail.group(1)) > 0:
+        issues.append("report=未通过(失败%s)" % m_fail.group(1))
+    # 临时 FK_DATA_DIR 是评估隔离,不能拿它跟主报告指纹对质
+    if not os.environ.get("FK_DATA_DIR"):
+        m_fp = re.search(r"数据指纹 \| `([^`]+)`", text)
+        report_fp = m_fp.group(1) if m_fp else ""
+        try:
+            from .dataset import dataset_fingerprint
+            cur_fp = dataset_fingerprint()
+        except Exception:  # noqa: BLE001
+            cur_fp = ""
+        if report_fp and cur_fp and report_fp != cur_fp:
+            issues.append("report=数据指纹过期(report=%s, now=%s)"
+                          % (report_fp, cur_fp))
+    if issues:
+        return "warn", "; ".join(issues)
+    return "ok", "report=有 commit=%s" % (report_commit or "未标注")
 
 
 def _readiness() -> Dict:
@@ -59,9 +107,8 @@ def _readiness() -> Dict:
     es = engine_status()
     add("engine_status", "ok" if es["mode"] == "remote_engine" else "degraded",
         es["mode"])
-    report = ROOT / "out" / "eval_report.md"
-    add("evaluation_status", "ok" if report.exists() else "warn",
-        "report=%s" % ("有" if report.exists() else "缺(out/eval_report.md)"))
+    ev_level, ev_detail = _evaluation_status()
+    add("evaluation_status", ev_level, ev_detail)
     audit = data_dir() / "audit.jsonl"
     add("audit_status", "ok" if audit.exists() else "warn",
         "audit=%s" % ("有" if audit.exists() else "尚无审批记录"))

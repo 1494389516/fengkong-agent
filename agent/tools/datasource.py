@@ -8,15 +8,24 @@
 
 读缓存按 (路径, mtime_ns) 失效 —— 大样本下 rule_eval 每事件都要读全量事件,
 不缓存就是 O(N^2) 次 JSON 解析。
+
+落盘纪律(骨架期):JSON 状态文件必须 os.replace 原子写,跨线程/进程用 flock。
+崩溃或磁盘满时旧文件仍是合法 JSON,不能半截覆盖。
 """
+import fcntl
 import json
 import os
+import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
 _cache: Dict[Path, Tuple[int, Any]] = {}
+_cache_lock = threading.RLock()
+_io_lock = threading.RLock()
 
 
 def data_dir() -> Path:
@@ -29,13 +38,84 @@ def data_dir() -> Path:
 
 
 def _load_json(path: Path):
-    mtime = path.stat().st_mtime_ns
-    hit = _cache.get(path)
-    if hit and hit[0] == mtime:
-        return hit[1]
-    obj = json.loads(path.read_text(encoding="utf-8"))
-    _cache[path] = (mtime, obj)
-    return obj
+    with _cache_lock:
+        try:
+            mtime = path.stat().st_mtime_ns
+        except FileNotFoundError:
+            raise
+        hit = _cache.get(path)
+        if hit and hit[0] == mtime:
+            return hit[1]
+        try:
+            obj = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as e:
+            raise ValueError("JSON 损坏: %s (%s)" % (path, e)) from e
+        _cache[path] = (mtime, obj)
+        return obj
+
+
+def invalidate_cache(path: Path = None) -> None:
+    with _cache_lock:
+        if path is None:
+            _cache.clear()
+        else:
+            _cache.pop(path, None)
+
+
+def atomic_write_json(path: Path, obj: Any, *, mkdir: bool = True) -> None:
+    """写临时文件 + fsync + os.replace。失败时原文件不变。
+    mkdir=False 时父目录必须已存在(审批名单落盘失败要能原样抛 OSError,
+    申请留在队列)。"""
+    path = Path(path)
+    if mkdir:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp",
+                               dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=1, default=str)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        tmp = None
+        invalidate_cache(path)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+@contextmanager
+def file_lock(path: Path, *, mkdir: bool = True) -> Iterator[None]:
+    """同进程 RLock + 跨进程 flock。锁文件是 path + '.lock'。
+    mkdir=False 时父目录必须已存在(名单审批失败要能原样抛 OSError)。"""
+    path = Path(path)
+    if mkdir:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.parent / (path.name + ".lock")
+    with _io_lock:
+        lf = open(lock_path, "a+", encoding="utf-8")
+        try:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            finally:
+                lf.close()
+
+
+def append_jsonl(path: Path, rec: Any) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(rec, ensure_ascii=False) + "\n"
+    with file_lock(path):
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
 
 
 def load_events() -> List[Dict]:

@@ -30,8 +30,8 @@ def _load() -> List[Dict]:
 
 
 def _save(items: List[Dict]) -> None:
-    _path().write_text(json.dumps(items, ensure_ascii=False, indent=1),
-                       encoding="utf-8")
+    from .datasource import atomic_write_json
+    atomic_write_json(_path(), items)
 
 
 @tool(

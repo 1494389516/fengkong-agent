@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from . import tool
-from .datasource import data_dir, load_labels, pending_actions_path
+from .datasource import atomic_write_json, data_dir, load_labels
 
 REGISTRY_FILE = "model_registry.json"
 
@@ -62,8 +62,7 @@ def _load() -> List[Dict]:
 
 
 def _save(items: List[Dict]) -> None:
-    _path().write_text(json.dumps(items, ensure_ascii=False, indent=1),
-                       encoding="utf-8")
+    atomic_write_json(_path(), items)
 
 
 def _find(items: List[Dict], name: str, version: str) -> Optional[Dict]:
@@ -73,22 +72,15 @@ def _find(items: List[Dict], name: str, version: str) -> Optional[Dict]:
     return None
 
 
-def _pending() -> List[Dict]:
-    p = pending_actions_path()
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
-
-
-def _save_pending(items: List[Dict]) -> None:
-    pending_actions_path().write_text(
-        json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
-
-
 def _submit_pending(entry: Dict) -> int:
-    pending = _pending()
-    action_id = max((a["action_id"] for a in pending), default=0) + 1
-    pending.append({"action_id": action_id, **entry})
-    _save_pending(pending)
-    return action_id
+    from .actions import mutate_pending
+
+    def _fn(pending):
+        action_id = max((a["action_id"] for a in pending), default=0) + 1
+        pending.append({"action_id": action_id, **entry})
+        return action_id
+
+    return mutate_pending(_fn)
 
 
 @tool(

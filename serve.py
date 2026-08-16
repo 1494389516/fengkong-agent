@@ -31,16 +31,27 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 LOG_PATH = ROOT / "out" / "serve_decisions.jsonl"
+MAX_BODY = 64 * 1024
 _log_lock = threading.Lock()
 # 同输入指纹返回同一条决策(Ojuri: idempotent on transaction_id)。
 # 进程内缓存:骨架够用;重放不写血缘/日志,避免重复事件灌爆对账。
 _idemp: dict = {}
 
 
+def _public_view(decision: dict, replay: bool) -> dict:
+    public = {k: decision.get(k) for k in (
+        "action", "rules", "policy_version", "latency_ms",
+        "reason_codes", "escalate_to_human", "degraded",
+        "agent_cannot_override", "decision_combine")}
+    public["idempotent_replay"] = replay
+    return public
+
+
 def _decide(event: dict) -> dict:
     from agent.tools.lineage import event_fingerprint, write_lineage
     from agent.tools.rules import rule_eval
     fp = event_fingerprint(event)
+    # 锁内 double-check + 计算:并发同指纹只判定一次,只写一行日志/血缘。
     with _log_lock:
         cached = _idemp.get(fp)
         if cached is not None:
@@ -48,39 +59,34 @@ def _decide(event: dict) -> dict:
             out["idempotent_replay"] = True
             out["latency_ms"] = 0.0
             return out
-    t0 = time.time()
-    r = rule_eval(event, use_current_policy=True)
-    decision = {
-        "ts": time.time(),
-        "event": event,
-        "action": r["action"],
-        "rules": sorted({h["rule_id"] for h in r["hits"]}),
-        "policy_version": r["policy_version"],
-        # Decision Plane 血缘(P0-2/P0-3):判定实际用的策略与模型版本
-        "strategy_version": r.get("strategy_version"),
-        "model_version": r.get("model_version"),
-        "model_score": r.get("model_score"),
-        "source": r.get("source"),
-        "degraded": bool(r.get("degraded")),
-        "reason_codes": list(r.get("reason_codes") or []),
-        "escalate_to_human": bool(r.get("escalate_to_human")),
-        "agent_cannot_override": True,
-        "decision_combine": r.get("decision_combine"),
-        "combine_score": r.get("combine_score"),
-        "latency_ms": round(1000 * (time.time() - t0), 1),
-    }
-    write_lineage(event, decision, approver="serve")
-    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with _log_lock:
+        t0 = time.time()
+        r = rule_eval(event, use_current_policy=True)
+        decision = {
+            "ts": time.time(),
+            "event": event,
+            "action": r["action"],
+            "rules": sorted({h["rule_id"] for h in r["hits"]}),
+            "hits": list(r.get("hits") or []),
+            "policy_version": r["policy_version"],
+            "strategy_version": r.get("strategy_version"),
+            "model_version": r.get("model_version"),
+            "model_score": r.get("model_score"),
+            "source": r.get("source"),
+            "degraded": bool(r.get("degraded")),
+            "reason_codes": list(r.get("reason_codes") or []),
+            "escalate_to_human": bool(r.get("escalate_to_human")),
+            "agent_cannot_override": True,
+            "decision_combine": r.get("decision_combine"),
+            "combine_score": r.get("combine_score"),
+            "latency_ms": round(1000 * (time.time() - t0), 1),
+        }
+        write_lineage(event, decision, approver="serve")
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(decision, ensure_ascii=False) + "\n")
-        public = {k: decision[k] for k in (
-            "action", "rules", "policy_version", "latency_ms",
-            "reason_codes", "escalate_to_human", "degraded",
-            "agent_cannot_override", "decision_combine")}
-        public["idempotent_replay"] = False
+        public = _public_view(decision, False)
         _idemp[fp] = dict(public)
-    return public
+        return public
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -114,7 +120,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "unknown path"})
             return
         try:
-            length = int(self.headers.get("Content-Length", 0))
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            self._json(400, {"error": "body 必须是 JSON 事件"})
+            return
+        if length > MAX_BODY:
+            self._json(413, {"error": "body too large"})
+            return
+        try:
             event = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
             self._json(400, {"error": "body 必须是 JSON 事件"})
@@ -124,8 +137,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             self._json(200, _decide(event))
-        except Exception as e:  # noqa: BLE001 决策异常必须显式 500,不能静默放行
-            self._json(500, {"error": "%s: %s" % (type(e).__name__, e)})
+        except Exception:  # noqa: BLE001 决策异常必须显式 500,细节不回给调用方
+            self._json(500, {"error": "internal_error"})
 
 
 def main() -> None:

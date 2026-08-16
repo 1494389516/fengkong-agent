@@ -11,6 +11,7 @@ data/model_registry.json
 data/security_audit.jsonl
 data/analyst_overrides.jsonl
 data/decision_lineage.jsonl
+data/*.lock
 data/incidents.json
 data/feature_versions.json
 data/label_snapshots.json

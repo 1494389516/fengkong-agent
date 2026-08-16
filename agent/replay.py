@@ -65,11 +65,7 @@ def replay_event(event: Dict[str, Any], policy_version: Optional[int] = None,
         override.update(entry["thresholds"])
         src.append("strategy:%s" % strategy_version)
     if policy_version is not None:
-        versions = P._versions()
-        v = [x for x in versions if x.get("version") == policy_version]
-        if not v:
-            raise ValueError("策略版本不存在: v%d" % policy_version)
-        override.update(v[0].get("values", {}))
+        override.update(P.snapshot_at_version(policy_version))
         src.append("policy:v%d" % policy_version)
     if model_version:
         from .tools.model_registry import _find as _mfind

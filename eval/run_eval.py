@@ -495,6 +495,34 @@ def run_readiness_layer() -> int:
             checks.append(("数据硬伤:BLOCKED 且 data_health=fail",
                            r2.get("overall") == "BLOCKED"
                            and r2["checks"]["data_health"]["level"] == "fail"))
+            from agent.tools.readiness import _evaluation_status, _git_commit
+            report = ROOT / "out" / "eval_report.md"
+            backup = report.read_text(encoding="utf-8") if report.exists() else None
+            try:
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text(
+                    "| git commit | `deadbeef` |\n"
+                    "| 数据指纹 | `00` |\n"
+                    "**x** — 断言 1 项,通过 1,失败 0\n",
+                    encoding="utf-8")
+                lv, dt = _evaluation_status()
+                checks.append(("陈旧评估报告不得标 ok",
+                               lv == "warn" and "陈旧" in dt))
+                report.write_text(
+                    "| git commit | `%s` |\n"
+                    "**x** — 断言 1 项,通过 0,失败 3\n" % (_git_commit() or "unknown"),
+                    encoding="utf-8")
+                lv2, dt2 = _evaluation_status()
+                checks.append(("未通过评估报告不得标 ok",
+                               lv2 == "warn" and "未通过" in dt2))
+            finally:
+                if backup is None:
+                    try:
+                        report.unlink()
+                    except OSError:
+                        pass
+                else:
+                    report.write_text(backup, encoding="utf-8")
         finally:
             os.environ.pop("FK_DATA_DIR", None)
     return _report("生产就绪门禁(离线,临时目录)", checks)
@@ -1116,7 +1144,6 @@ def run_pack_layer() -> int:
 def run_job_layer() -> int:
     """离线:Job 模型 —— 提交/轮询/取产物/取消,线程执行零网络。"""
     checks = []
-    from agent.tools.jobs import _gate
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
         for f in ("events_sample.json", "labels.json", "blacklist.json",
@@ -1160,7 +1187,6 @@ def run_job_layer() -> int:
                            .get("result", {}).get("records") >= 1))
             # 取消:测试钩子让执行线程等 gate
             os.environ["FK_JOB_TEST_GATE"] = "1"
-            _gate.clear()
             j3 = registry.dispatch("job_submit", {"type": "dataset_build"})
             jid3 = j3["job_id"]
             time.sleep(0.5)
@@ -1183,7 +1209,6 @@ def run_job_layer() -> int:
         finally:
             os.environ.pop("FK_DATA_DIR", None)
             os.environ.pop("FK_JOB_TEST_GATE", None)
-            _gate.clear()
     return _report("Job 模型(离线,临时目录)", checks)
 
 
@@ -1229,6 +1254,8 @@ def run_replay_engine_layer() -> int:
                       "ts": 1784109840}
             r3 = replay_event(ev_emu, strategy_version="rep_s:1.0")
             r4 = replay_event(ev, policy_version=1)
+            from agent.tools.policy import snapshot_at_version
+            snap3 = snapshot_at_version(3)
             checks += [
                 ("回放:策略注册表版本生效且溯源",
                  r3["action"] == "review" and r3["strategy_version"] == "rep_s:1.0"
@@ -1236,6 +1263,9 @@ def run_replay_engine_layer() -> int:
                 ("回放:策略版本表生效且溯源",
                  r4["action"] == "reject" and r4["policy_version_used"] == 1
                  and r4["threshold_sources"] == ["policy:v1"]),
+                ("回放:v3 快照累积 v2(rooted=0)而不只是 v3 delta",
+                 snap3["r006_reject_rooted"] == 0
+                 and snap3["r003_high_amount"] == 1500.0),
             ]
             try:
                 replay_event(ev, policy_version=1, strategy_version="rep_s:1.0")
@@ -1957,16 +1987,39 @@ def run_engine_layer() -> int:
                        and r3.get("degraded") is True
                        and bool(r3.get("engine_error"))
                        and r3["action"] == "reject"))
+        engine.reset_circuit()
+
+        def bad_allow(req, timeout=None):
+            return _Resp(_json.dumps({"action": "ALLOW"}).encode("utf-8"))
+
+        _ur.urlopen = bad_allow
+        r_allow = registry.dispatch("rule_eval", {"event": ev})
+        checks.append(("远程非法 action 显式降级并熔断",
+                       r_allow.get("source") == "local_rules_fallback"
+                       and r_allow.get("degraded") is True
+                       and "非法 action" in (r_allow.get("engine_error") or "")))
+        engine.reset_circuit()
+
+        def bad_hits(req, timeout=None):
+            return _Resp(_json.dumps({"action": "reject", "hits": "oops"}).encode("utf-8"))
+
+        _ur.urlopen = bad_hits
+        r_hits = registry.dispatch("rule_eval", {"event": ev})
+        checks.append(("远程畸形 hits 显式降级",
+                       r_hits.get("source") == "local_rules_fallback"
+                       and r_hits.get("degraded") is True
+                       and "hits 必须是 list" in (r_hits.get("engine_error") or "")))
+        engine.reset_circuit()
 
         _ur.urlopen = fake_urlopen
-        policy._OVERRIDES.update({"r003_high_amount": 100})
+        prev_ov = policy.set_overrides({"r003_high_amount": 100})
         try:
             r4 = registry.dispatch("rule_eval", {"event": ev})
             checks.append(("what-if 覆盖强制本地且注明原因",
                            r4.get("source") == "local_rules"
                            and bool(r4.get("source_note"))))
         finally:
-            policy._OVERRIDES.clear()
+            policy.restore_overrides(prev_ov)
 
         from agent.tools.backtest import account_verdicts
         from agent.tools.datasource import load_events
@@ -2068,7 +2121,20 @@ def run_decision_plane_layer() -> int:
                  and r1["action"] == "reject"),
                 ("active strategy:结果携带覆盖阈值供证据链溯源",
                  r1.get("strategy_thresholds") == {"r003_high_amount": 999999.0}),
+                ("active strategy:规则集裁掉未声明的 R006",
+                 r1.get("strategy_rules") == ["R001", "R002", "R003"]
+                 and not any(h["rule_id"] == "R006" for h in r1["hits"])),
             ]
+            ev_hook = {"uid": "u_cut", "type": "login",
+                       "device_id": "dev_pixel_z9", "ts": 1784099100}
+            r_cut = registry.dispatch("rule_eval", {"event": ev_hook,
+                                                    "use_current_policy": True})
+            r_cut_asof = registry.dispatch("rule_eval", {"event": ev_hook})
+            checks.append(("active strategy:本会命中的 R006 被规则集裁掉",
+                           r_cut.get("strategy_rules") == ["R001", "R002", "R003"]
+                           and not any(h["rule_id"] == "R006" for h in r_cut["hits"])
+                           and any(h["rule_id"] == "R006"
+                                   for h in r_cut_asof["hits"])))
             r_u1 = registry.dispatch("rule_eval", {"event": {
                 "uid": "u_1001", "type": "order", "amount": 5000.0,
                 "ts": 1784099100}, "use_current_policy": True})
@@ -2440,6 +2506,16 @@ def run_whitelist_layer() -> int:
                  and any(h["rule_id"] == "R006" and h.get("original_action") == "reject"
                          for h in r_hook["hits"])),
             ]
+            from agent.tools.policy import restore_overrides, set_overrides
+            prev_seq = set_overrides({"decision_combine": "sequential"})
+            try:
+                r_hook_seq = ev("t_hook", i=0, ip="10.0.0.9", dev="d_hook")
+            finally:
+                restore_overrides(prev_seq)
+            checks.append(
+                ("sequential 不让白名单降档 pass 吞掉 R006 review",
+                 r_hook_seq["action"] == "review"
+                 and any(h["rule_id"] == "R006" for h in r_hook_seq["hits"])))
             # 审批流:白名单带有效期落盘;同值不同色允许提交(灰升黑/黑值申诉加白)
             r_w = registry.dispatch("blacklist_add", {
                 "dimension": "device_id", "value": "d_new", "list": "white",
@@ -2611,6 +2687,9 @@ def run_governance_layer() -> int:
                                    {"values": {"r002_min_events": 12}, "reason": "eval:测试"})
             r_limit = registry.dispatch("threshold_propose",
                                         {"values": {"r002_max_gap_seconds": 300}, "reason": "eval:大改"})
+            pending_prop = [a for a in actions.list_pending()
+                            if a.get("kind") == "threshold_change"]
+            sh = (pending_prop[0].get("shadow") if pending_prop else None) or {}
             actions.decide(r1.get("action_id", -1), approve=True)
             from agent.tools.policy import active_policy
             pol = active_policy()
@@ -2623,6 +2702,9 @@ def run_governance_layer() -> int:
             cal = registry.dispatch("threshold_calibrate", {})
             checks = [
                 ("提案进入待审批", r1.get("status") == "pending_confirmation"),
+                ("提案绑定影子证据/指纹/commit/过期",
+                 bool(sh.get("dataset_fingerprint")) and "delta" in sh
+                 and bool(sh.get("git_commit")) and bool(sh.get("expires_at"))),
                 ("超幅提案被限速拒绝", r_limit.get("status") == "rejected_rate_limit"),
                 ("批准后新版本生效", pol["r002_min_events"] == 12 and pol["_version"] == 1),
                 ("版本历史可审计", len(hist.get("versions", [])) == 1),
@@ -2929,6 +3011,25 @@ def run_regression_layer() -> int:
         "combine_weight_review": 1.0, "combine_weight_reject": 2.0})
     a_w2, _ = combine_hits(two_review, {"decision_combine": "worst"})
     a_bad, m_bad = combine_hits(hits_div, {"decision_combine": "nope"})
+    hits_gray = [
+        {"rule_id": "R001", "action": "review", "reason": "gray"},
+        {"rule_id": "R006", "action": "reject", "reason": "fp"},
+    ]
+    a_gseq, _ = combine_hits(hits_gray, {"decision_combine": "sequential"})
+    a_gwor, _ = combine_hits(hits_gray, {"decision_combine": "worst"})
+    hits_gray_only = [{"rule_id": "R001", "action": "review", "reason": "gray",
+                       "list": "gray", "observation_only": True}]
+    a_gone, _ = combine_hits(hits_gray_only, {"decision_combine": "sequential"})
+    hits_white_gray = [
+        {"rule_id": "R001", "action": "pass", "reason": "gray",
+         "list": "gray", "observation_only": True, "whitelisted": True,
+         "original_action": "review"},
+        {"rule_id": "R006", "action": "review", "reason": "fp",
+         "whitelisted": True, "original_action": "reject"},
+    ]
+    a_wseq, _ = combine_hits(hits_white_gray, {"decision_combine": "sequential"})
+    from agent.tools.backtest import shadow_compare
+    sh_vote = shadow_compare({"decision_combine": "vote"})
     v_ok = validate_strategy({"rules": ["R001"],
                               "thresholds": {"decision_combine": "vote"}})
     v_bad = validate_strategy({"rules": ["R001"],
@@ -2960,6 +3061,14 @@ def run_regression_layer() -> int:
         ("编排:非法模式回退 worst 且打 combine_fallback",
          a_bad == "reject" and m_bad["decision_combine"] == "worst"
          and m_bad.get("combine_fallback") == "nope"),
+        ("编排:sequential 跳过灰名单观察态,后续硬拒仍生效",
+         a_gseq == "reject" and a_gwor == "reject"),
+        ("编排:sequential 纯灰名单回退 review 而不是 pass",
+         a_gone == "review"),
+        ("编排:sequential 跳过白名单降档 pass,保留 R006 review",
+         a_wseq == "review"),
+        ("编排:decision_combine 可进影子回测",
+         "error" not in sh_vote and "delta" in sh_vote),
         ("编排:strategy_validate 认枚举、拒非法字面量",
          v_ok.get("valid") is True and v_bad.get("valid") is False),
         ("编排:默认 worst 与现口径零分叉(u_1009 reject + decision_combine)",
@@ -3355,6 +3464,17 @@ def run_serve_layer() -> int:
         code2, online2 = _req("/decide", event)
         n2 = len(logp.read_text(encoding="utf-8").splitlines()) if logp.exists() else 0
         bad_code, _ = _req("/decide", {"type": "order"})  # 缺 uid
+        huge = urllib.request.Request(
+            base + "/decide", data=b"x" * (70 * 1024),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(huge, timeout=5) as resp:
+                huge_code = resp.status
+        except urllib.error.HTTPError as e:
+            huge_code = e.code
+        from agent.tools.lineage import _load_lineage
+        lin = [r for r in _load_lineage() if r.get("approver") == "serve"]
+        last = lin[-1] if lin else {}
         return _report("在线决策服务冒烟(离线)", [
             ("健康检查带策略版本", health is not None and health[1].get("ok") is True
              and health[1].get("policy_version") is not None),
@@ -3370,6 +3490,10 @@ def run_serve_layer() -> int:
              and online2["action"] == online["action"]
              and n1 == n0 + 1 and n2 == n1),
             ("坏请求 400 而非 500", bad_code == 400),
+            ("超大 body 413", huge_code == 413),
+            ("生产血缘含 hits 明细",
+             bool(last.get("hits"))
+             and any(h.get("rule_id") for h in last.get("hits") or [])),
             ("决策留痕(serve_decisions.jsonl)", logp.exists()),
         ])
     finally:

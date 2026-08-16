@@ -69,8 +69,8 @@ def _load_snapshots() -> List[Dict]:
 
 
 def _save_snapshots(items: List[Dict]) -> None:
-    _snapshots_path().write_text(json.dumps(items, ensure_ascii=False, indent=1),
-                                 encoding="utf-8")
+    from .datasource import atomic_write_json
+    atomic_write_json(_snapshots_path(), items)
 
 
 def _snapshot_record(note: str) -> Dict:
@@ -167,17 +167,15 @@ def write_label_lineage(uid: str, old_label: Optional[str], new_label: str,
     """标签修正血缘:feedback.apply_appeal_decision 在修正标签时调用。
     尽力而为:血缘写失败不掀翻审批流程。"""
     try:
-        p = _lineage_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "ts": _now_iso(),
-                "uid": uid,
-                "old_label": old_label,
-                "new_label": new_label,
-                "source": source,
-                "appeal_id": appeal_id,
-                "decided_by": decided_by,
-            }, ensure_ascii=False) + "\n")
+        from .datasource import append_jsonl
+        append_jsonl(_lineage_path(), {
+            "ts": _now_iso(),
+            "uid": uid,
+            "old_label": old_label,
+            "new_label": new_label,
+            "source": source,
+            "appeal_id": appeal_id,
+            "decided_by": decided_by,
+        })
     except Exception:  # noqa: BLE001
         pass

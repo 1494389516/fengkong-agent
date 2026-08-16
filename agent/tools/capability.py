@@ -160,8 +160,8 @@ def audit(kind: str, tool_name: str, level: str, reason: str) -> None:
             "level": level,
             "reason": reason,
         }
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        from .datasource import append_jsonl
+        append_jsonl(p, rec)
     except Exception:  # noqa: BLE001
         pass
 

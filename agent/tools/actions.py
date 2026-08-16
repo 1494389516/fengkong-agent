@@ -15,13 +15,16 @@
 """
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from . import tool
 from . import policy
 from .blacklist import VALID_LISTS, active_records
-from .datasource import audit_log_path, blacklist_path, load_blacklist, pending_actions_path
+from .datasource import (
+    append_jsonl, atomic_write_json, audit_log_path, blacklist_path,
+    data_dir, file_lock, load_blacklist, pending_actions_path,
+)
 
 VALID_DIMENSIONS = ("uid", "ip", "device_id")
 
@@ -36,8 +39,17 @@ def _load_pending() -> List[Dict]:
 
 
 def _save_pending(items: List[Dict]) -> None:
-    pending_actions_path().write_text(
-        json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+    atomic_write_json(pending_actions_path(), items)
+
+
+def mutate_pending(fn):
+    """在 pending 文件锁内读-改-写。fn(items) 就地修改并返回结果。"""
+    p = pending_actions_path()
+    with file_lock(p):
+        items = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+        result = fn(items)
+        atomic_write_json(p, items)
+        return result
 
 
 def _limit_violations(values: Dict, current: Dict) -> List[str]:
@@ -103,36 +115,33 @@ def blacklist_add(dimension: str, value: str, reason: str, expires_days: int = 0
     existing = active_records(dimension, value, lists=(target_list,))
     if existing:
         return {"status": "already_listed", "records": existing}
-    pending = _load_pending()
-    dup = [a for a in pending if a.get("kind", "blacklist_add") == "blacklist_add"
-           and a["dimension"] == dimension and a["value"] == value
-           and a.get("list") == target_list]
-    if dup:
-        return {"status": "already_pending", "action_id": dup[0]["action_id"]}
-    action_id = max((a["action_id"] for a in pending), default=0) + 1
-    entry = {
-        "action_id": action_id,
-        "kind": "blacklist_add",
-        "dimension": dimension,
-        "value": value,
-        "list": target_list,
-        "reason": reason,
-        "requested_at": _now_iso(),
-    }
-    note = "已提交待审批,需研究员在 CLI 执行 /approve %d 后生效" % action_id
-    if expires_days and expires_days > 0:
-        entry["expires_days"] = int(expires_days)
-    elif target_list == "gray":
-        # 灰名单必须带观察期:灰是观察态不是终态,不允许默认永久挂着
-        entry["expires_days"] = int(policy.active_policy()["graylist_observe_days"])
-        note += ";灰名单未指定有效期,已按默认观察期 %d 天提交" % entry["expires_days"]
-    pending.append(entry)
-    _save_pending(pending)
-    return {
-        "status": "pending_confirmation",
-        "action_id": action_id,
-        "note": note,
-    }
+
+    def _add(pending):
+        dup = [a for a in pending if a.get("kind", "blacklist_add") == "blacklist_add"
+               and a["dimension"] == dimension and a["value"] == value
+               and a.get("list") == target_list]
+        if dup:
+            return {"status": "already_pending", "action_id": dup[0]["action_id"]}
+        action_id = max((a["action_id"] for a in pending), default=0) + 1
+        entry = {
+            "action_id": action_id,
+            "kind": "blacklist_add",
+            "dimension": dimension,
+            "value": value,
+            "list": target_list,
+            "reason": reason,
+            "requested_at": _now_iso(),
+        }
+        note = "已提交待审批,需研究员在 CLI 执行 /approve %d 后生效" % action_id
+        if expires_days and expires_days > 0:
+            entry["expires_days"] = int(expires_days)
+        elif target_list == "gray":
+            entry["expires_days"] = int(policy.active_policy()["graylist_observe_days"])
+            note += ";灰名单未指定有效期,已按默认观察期 %d 天提交" % entry["expires_days"]
+        pending.append(entry)
+        return {"status": "pending_confirmation", "action_id": action_id, "note": note}
+
+    return mutate_pending(_add)
 
 
 @tool(
@@ -161,25 +170,27 @@ def blacklist_remove(dimension: str, value: str, reason: str, **kw):
                 and r["value"] == value and r["list"] == target_list]
     if not existing:
         return {"status": "not_listed", "note": "该值不在 %s 名单中,无需移除" % target_list}
-    pending = _load_pending()
-    dup = [a for a in pending if a.get("kind") == "blacklist_remove"
-           and a["dimension"] == dimension and a["value"] == value
-           and a.get("list") == target_list]
-    if dup:
-        return {"status": "already_pending", "action_id": dup[0]["action_id"]}
-    action_id = max((a["action_id"] for a in pending), default=0) + 1
-    pending.append({
-        "action_id": action_id,
-        "kind": "blacklist_remove",
-        "dimension": dimension,
-        "value": value,
-        "list": target_list,
-        "reason": reason,
-        "requested_at": _now_iso(),
-    })
-    _save_pending(pending)
-    return {"status": "pending_confirmation", "action_id": action_id,
-            "note": "已提交待审批,需研究员在 CLI 执行 /approve %d 后移除" % action_id}
+
+    def _rm(pending):
+        dup = [a for a in pending if a.get("kind") == "blacklist_remove"
+               and a["dimension"] == dimension and a["value"] == value
+               and a.get("list") == target_list]
+        if dup:
+            return {"status": "already_pending", "action_id": dup[0]["action_id"]}
+        action_id = max((a["action_id"] for a in pending), default=0) + 1
+        pending.append({
+            "action_id": action_id,
+            "kind": "blacklist_remove",
+            "dimension": dimension,
+            "value": value,
+            "list": target_list,
+            "reason": reason,
+            "requested_at": _now_iso(),
+        })
+        return {"status": "pending_confirmation", "action_id": action_id,
+                "note": "已提交待审批,需研究员在 CLI 执行 /approve %d 后移除" % action_id}
+
+    return mutate_pending(_rm)
 
 
 @tool(
@@ -189,7 +200,7 @@ def blacklist_remove(dimension: str, value: str, reason: str, **kw):
         "/approve 后才写入策略版本表。用户要求立即生效/不用审批时不要调用。"
         "values 键同 rule_backtest 的 overrides 及 monitor/自身基线阈值;"
         "单参数变幅超过 ±50% 会被限速拒绝(需分步提案)。"
-        "提交前必须先用 shadow_backtest 验证影响,reason 里写清指标证据。"
+        "可回测键会在提交时强制跑影子回测并绑定指标/数据指纹,影子失败则拒提案。"
     ),
     parameters={
         "type": "object",
@@ -217,23 +228,47 @@ def threshold_propose(values: Dict, reason: str):
                         "数值键单次变幅限速 ±%d%%(防被极端数据/"
                         "被养过的基线一次带飞),现值为 0 的键任何非零变更都超限,"
                         "确需大改请分步提案并逐步验证" % int(policy.MAX_CHANGE_RATIO * 100)}
-    pending = _load_pending()
-    dup = [a for a in pending if a.get("kind") == "threshold_change"
-           and set(a["values"]) & set(values)]
-    if dup:
-        return {"status": "already_pending", "action_id": dup[0]["action_id"]}
-    action_id = max((a["action_id"] for a in pending), default=0) + 1
-    pending.append({
-        "action_id": action_id,
-        "kind": "threshold_change",
-        "values": values,
-        "current": {k: current[k] for k in values},
-        "reason": reason,
-        "requested_at": _now_iso(),
-    })
-    _save_pending(pending)
-    return {"status": "pending_confirmation", "action_id": action_id,
-            "note": "已提交待审批,需研究员在 CLI 执行 /approve %d 后生效" % action_id}
+    from .backtest import OVERRIDABLE, shadow_compare
+    from .dataset import dataset_fingerprint
+    shadow_keys = {k: v for k, v in values.items() if k in OVERRIDABLE}
+    shadow_bind = None
+    if shadow_keys:
+        shadow = shadow_compare(shadow_keys)
+        if "error" in shadow:
+            return {"status": "rejected_shadow", "detail": shadow["error"],
+                    "note": "可回测参数必须先完成影子回测"}
+        from .readiness import _git_commit
+        now = datetime.now(timezone.utc)
+        shadow_bind = {
+            "changed_accounts": shadow.get("changed_accounts"),
+            "delta": shadow.get("delta"),
+            "dataset_fingerprint": dataset_fingerprint(),
+            "git_commit": _git_commit() or "unknown",
+            "shadowed_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "expires_at": (now + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    def _prop(pending):
+        dup = [a for a in pending if a.get("kind") == "threshold_change"
+               and set(a["values"]) & set(values)]
+        if dup:
+            return {"status": "already_pending", "action_id": dup[0]["action_id"]}
+        action_id = max((a["action_id"] for a in pending), default=0) + 1
+        rec = {
+            "action_id": action_id,
+            "kind": "threshold_change",
+            "values": values,
+            "current": {k: current[k] for k in values},
+            "reason": reason,
+            "requested_at": _now_iso(),
+        }
+        if shadow_bind:
+            rec["shadow"] = shadow_bind
+        pending.append(rec)
+        return {"status": "pending_confirmation", "action_id": action_id,
+                "note": "已提交待审批,需研究员在 CLI 执行 /approve %d 后生效" % action_id}
+
+    return mutate_pending(_prop)
 
 
 # ---------------------------------------------------------------------------
@@ -244,84 +279,113 @@ def list_pending() -> List[Dict]:
     return _load_pending()
 
 
+def _write_blacklist(records: List[Dict]) -> None:
+    """名单落盘:文件锁 + 原子替换。mkdir=False 让父目录缺失仍抛 OSError,
+    审批失败时申请留队(eval 审批原子性钉依赖此语义)。"""
+    path = blacklist_path()
+    with file_lock(path, mkdir=False):
+        atomic_write_json(path, records, mkdir=False)
+
+
 def decide(action_id: int, approve: bool, operator: Optional[str] = None) -> Optional[Dict]:
     """审批一条申请:按 kind 分派落盘(名单库 / 策略版本表),统一记审计。
     返回该申请,查无返回 None。
     审计身份:operator 参数 > FK_OPERATOR 环境变量 > "cli"。接 SSO/飞书后
     由网关把审批人身份注入 FK_OPERATOR —— 审批必须有可追溯的人。"""
-    pending = _load_pending()
-    matched = [a for a in pending if a["action_id"] == action_id]
-    if not matched:
-        return None
-    action = matched[0]
     decided_by = operator or os.environ.get("FK_OPERATOR") or "cli"
-    kind = action.get("kind", "blacklist_add")
-    applied_version = None
-    applied_detail = None
-    # 先落盘、后出队:apply 抛异常(磁盘满/权限/文件损坏)时申请留在队列可重试,
-    # 不会静默丢失一次审批。之前"先出队再 apply"在写失败时会永久吞掉批准。
-    if approve:
-        if kind == "threshold_change":
-            applied_version = policy.apply_change(action)["version"]
-        elif kind == "appeal_resolve":
-            from .feedback import apply_appeal_decision  # 惰性:防导入环
-            applied_detail = apply_appeal_decision(action)
-        elif kind == "model_promote":
-            from .model_registry import apply_champion_promote  # 惰性
-            applied_detail = apply_champion_promote(action, decided_by)
-        elif kind == "model_rollback":
-            from .model_registry import apply_rollback  # 惰性
-            applied_detail = apply_rollback(action, decided_by)
-        elif kind == "strategy_promote":
-            from .strategy_registry import apply_active  # 惰性
-            applied_detail = apply_active(action, decided_by)
-        elif kind == "strategy_rollback":
-            from .strategy_registry import apply_strategy_rollback  # 惰性
-            applied_detail = apply_strategy_rollback(action, decided_by)
-        elif kind == "blacklist_remove":
-            records = [r for r in load_blacklist()
-                       if not (r["dimension"] == action["dimension"]
-                               and r["value"] == action["value"]
-                               and r["list"] == action["list"])]
-            blacklist_path().write_text(
-                json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
-        else:
-            # load_blacklist() 返回 datasource 的缓存对象,直接 append 会就地污染
-            # 进程内缓存(写盘失败也留下幻影名单),必须先拷贝
-            records = list(load_blacklist())
-            rec = {
-                "dimension": action["dimension"],
-                "value": action["value"],
-                "list": action["list"],
-                "reason": action["reason"],
-                "added_at": _now_iso()[:10],
-                "source": "agent_proposed+human_approved",
-            }
-            if action.get("expires_days"):  # 有效期从批准日起算(不是提交日)
-                exp = datetime.now(timezone.utc).timestamp() + action["expires_days"] * 86400
-                rec["expires_at"] = datetime.fromtimestamp(exp, timezone.utc).strftime("%Y-%m-%d")
-            records.append(rec)
-            blacklist_path().write_text(
-                json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
-    _save_pending([a for a in pending if a["action_id"] != action_id])
-    with open(audit_log_path(), "a", encoding="utf-8") as f:
-        f.write(json.dumps({
-            "ts": _now_iso(),
-            "decided_by": decided_by,
-            "decision": "approve" if approve else "deny",
-            "kind": kind,
-            "applied_policy_version": applied_version,
-            **({"applied_detail": applied_detail} if applied_detail else {}),
-            "action": action,
-        }, ensure_ascii=False) + "\n")
+    path = pending_actions_path()
+
+    def _apply(pending):
+        matched = [a for a in pending if a["action_id"] == action_id]
+        if not matched:
+            return None
+        action = matched[0]
+        kind = action.get("kind", "blacklist_add")
+        applied_version = None
+        applied_detail = None
+        # 先落盘、后出队:apply 抛异常时申请留在队列可重试。
+        if approve:
+            if kind == "threshold_change":
+                exp = (action.get("shadow") or {}).get("expires_at")
+                if exp and exp < _now_iso():
+                    raise ValueError("影子证据已过期(%s),请重新提案" % exp)
+                applied_version = policy.apply_change(action)["version"]
+            elif kind == "appeal_resolve":
+                from .feedback import apply_appeal_decision  # 惰性:防导入环
+                applied_detail = apply_appeal_decision(action)
+            elif kind == "model_promote":
+                from .model_registry import apply_champion_promote  # 惰性
+                applied_detail = apply_champion_promote(action, decided_by)
+            elif kind == "model_rollback":
+                from .model_registry import apply_rollback  # 惰性
+                applied_detail = apply_rollback(action, decided_by)
+            elif kind == "strategy_promote":
+                from .strategy_registry import apply_active  # 惰性
+                applied_detail = apply_active(action, decided_by)
+            elif kind == "strategy_rollback":
+                from .strategy_registry import apply_strategy_rollback  # 惰性
+                applied_detail = apply_strategy_rollback(action, decided_by)
+            elif kind == "blacklist_remove":
+                records = [r for r in load_blacklist()
+                           if not (r["dimension"] == action["dimension"]
+                                   and r["value"] == action["value"]
+                                   and r["list"] == action["list"])]
+                _write_blacklist(records)
+            else:
+                records = list(load_blacklist())
+                rec = {
+                    "dimension": action["dimension"],
+                    "value": action["value"],
+                    "list": action["list"],
+                    "reason": action["reason"],
+                    "added_at": _now_iso()[:10],
+                    "source": "agent_proposed+human_approved",
+                }
+                if action.get("expires_days"):
+                    exp = datetime.now(timezone.utc).timestamp() + action["expires_days"] * 86400
+                    rec["expires_at"] = datetime.fromtimestamp(
+                        exp, timezone.utc).strftime("%Y-%m-%d")
+                records.append(rec)
+                _write_blacklist(records)
+        leftover = [a for a in pending if a["action_id"] != action_id]
+        pending[:] = leftover
+        return {
+            "action": action, "kind": kind,
+            "applied_version": applied_version,
+            "applied_detail": applied_detail,
+        }
+
+    with file_lock(path):
+        pending = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        result = _apply(pending)
+        if result is None:
+            return None
+        atomic_write_json(path, pending)
+    audit_rec = {
+        "ts": _now_iso(),
+        "decided_by": decided_by,
+        "decision": "approve" if approve else "deny",
+        "kind": result["kind"],
+        "applied_policy_version": result["applied_version"],
+        **({"applied_detail": result["applied_detail"]} if result["applied_detail"] else {}),
+        "action": result["action"],
+    }
+    try:
+        append_jsonl(audit_log_path(), audit_rec)
+    except Exception:  # noqa: BLE001 变更已生效,审计失败转补偿队列
+        try:
+            append_jsonl(data_dir() / "audit_pending.jsonl", {
+                "error": "audit_write_failed", "record": audit_rec})
+        except Exception:  # noqa: BLE001
+            pass
     if not approve:
         from .feedback_pipeline import record_override  # 惰性:否决回灌训练信号
         record_override({
             "kind": "proposal_denied",
-            "action_kind": kind,
-            "action_id": action.get("action_id"),
+            "action_kind": result["kind"],
+            "action_id": result["action"].get("action_id"),
             "decided_by": decided_by,
-            "reason": action.get("reason", ""),
+            "reason": result["action"].get("reason", ""),
             "ts": _now_iso(),
         })
-    return action
+    return result["action"]

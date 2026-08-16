@@ -20,9 +20,8 @@ def record_override(rec: Dict) -> None:
     只追加,不改标签、不进生产。"""
     p = data_dir() / OVERRIDES_FILE
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        from .datasource import append_jsonl
+        append_jsonl(p, rec)
     except Exception:  # noqa: BLE001 回灌失败不掀翻审批
         pass
 

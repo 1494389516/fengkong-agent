@@ -9,8 +9,8 @@ _execute 的调度换成中间件投递,工具接口与 job 文件契约不动�
 每个 job 记录:job_id/type/status/created_at/started_at/finished_at/
 request_fingerprint(参数指纹)/progress/result_path/error。
 
-测试钩子:FK_JOB_TEST_GATE=1 时执行线程在开始前等待一个模块级 Event
-(job_cancel 会释放它) —— 仅 eval 使用,不影响正常路径。
+测试钩子:FK_JOB_TEST_GATE=1 时执行线程在开始前等待该 job 自己的 Event
+(job_cancel 只释放对应 job) —— 仅 eval 使用,不影响正常路径。
 """
 import hashlib
 import json
@@ -22,25 +22,40 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from . import tool
+from .datasource import atomic_write_json, file_lock
 
 JOBS_DIR = Path(__file__).resolve().parent.parent.parent / "out" / "jobs"
 JOB_TYPES = ("backtest", "scan", "replay", "model_eval", "dataset_build")
 STATUSES = ("queued", "running", "success", "failed", "cancelled")
 
-_gate = threading.Event()  # 测试钩子:执行前等待
+_gates: Dict[int, threading.Event] = {}
+_gates_mu = threading.Lock()
+
+
+def _gate_for(job_id: int) -> threading.Event:
+    with _gates_mu:
+        ev = _gates.get(job_id)
+        if ev is None:
+            ev = threading.Event()
+            _gates[job_id] = ev
+        return ev
 
 
 def _next_job_id() -> int:
-    """跨进程/重启安全:job id 从既有文件推导 —— 内存计数器在重启后会
-    重新从 1 开始,覆盖同名 job 文件(产物与状态一起丢)。"""
+    """跨进程/重启安全:job id 从既有文件推导。分配时立刻占位文件,
+    避免并发扫目录得到同一个 id。"""
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
-    ids = []
-    for p in JOBS_DIR.glob("job_*.json"):
-        try:
-            ids.append(int(p.stem.split("_")[1]))
-        except (ValueError, IndexError):
-            continue
-    return (max(ids) if ids else 0) + 1
+    lockp = JOBS_DIR / ".id.lock"
+    with file_lock(lockp):
+        ids = []
+        for p in JOBS_DIR.glob("job_*.json"):
+            try:
+                ids.append(int(p.stem.split("_")[1]))
+            except (ValueError, IndexError):
+                continue
+        n = (max(ids) if ids else 0) + 1
+        atomic_write_json(_job_path(n), {"job_id": n, "status": "allocating"})
+        return n
 
 
 def _now_iso() -> str:
@@ -62,9 +77,7 @@ def _load_job(job_id: int) -> Dict:
 
 
 def _save_job(job: Dict) -> None:
-    JOBS_DIR.mkdir(parents=True, exist_ok=True)
-    _job_path(job["job_id"]).write_text(
-        json.dumps(job, ensure_ascii=False, indent=1), encoding="utf-8")
+    atomic_write_json(_job_path(job["job_id"]), job)
 
 
 def _execute(job_id: int, job_type: str, params: Dict) -> None:
@@ -75,7 +88,7 @@ def _execute(job_id: int, job_type: str, params: Dict) -> None:
     job["progress"] = 0
     _save_job(job)
     if os.environ.get("FK_JOB_TEST_GATE") == "1":
-        _gate.wait(timeout=30)
+        _gate_for(job_id).wait(timeout=30)
     job = _load_job(job_id)
     if job.get("status") == "cancelled":  # cancel 在启动前标记
         job["finished_at"] = _now_iso()
@@ -112,9 +125,7 @@ def _execute(job_id: int, job_type: str, params: Dict) -> None:
         job["status"] = "success"
         job["progress"] = 1
         job["result_path"] = str(JOBS_DIR / ("job_%06d.result.json" % job_id))
-        (JOBS_DIR / ("job_%06d.result.json" % job_id)).write_text(
-            json.dumps(result, ensure_ascii=False, indent=1, default=str),
-            encoding="utf-8")
+        atomic_write_json(JOBS_DIR / ("job_%06d.result.json" % job_id), result)
     except Exception as e:  # noqa: BLE001 任务失败落 error,不中断其他 job
         job = _load_job(job_id)
         if job.get("status") != "cancelled":  # 已取消的 job 不写 failed
@@ -238,5 +249,5 @@ def job_cancel(job_id: int):
         return {"status": "cancelled", "job_id": job_id}
     job["status"] = "cancelled"
     _save_job(job)
-    _gate.set()  # 释放测试钩子,让执行线程尽快走到取消检查
+    _gate_for(job_id).set()
     return {"status": "cancelled", "job_id": job_id}

@@ -18,12 +18,12 @@
   也不得缓存"文件不存在"(审批新建文件后同进程要立刻读到)。
 - 模块级依赖只允许 stdlib + datasource:rules 每事件热路径经过这里,禁 pandas。
 """
-import json
+import contextvars
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import tool
-from .datasource import _load_json, thresholds_path
+from .datasource import _load_json, atomic_write_json, file_lock, thresholds_path
 
 # 全部阈值的缺省值(隐式 v0)。注释保留原 rules/monitor 的定阈依据。
 # 值以数值为主;decision_combine 是枚举字面量(见 ENUM_KEYS),不当数字限速。
@@ -113,9 +113,23 @@ ENUM_KEYS = {
     "decision_combine": ("worst", "sequential", "vote", "weight"),
 }
 
+# 影子回测/what-if 可覆盖:规则数值 + 枚举编排。阈值扫描只扫 SWEEPABLE
+# (字符串扫图无意义),但 decision_combine 必须能进 shadow_compare。
+OVERRIDABLE: Tuple[str, ...] = RULE_KEYS + tuple(ENUM_KEYS)
+SWEEPABLE: Tuple[str, ...] = RULE_KEYS
+
 MAX_CHANGE_RATIO = 0.5  # 提案限速:单参数变幅超 ±50% 拒绝,防一次校准被极端数据带飞
 
-_OVERRIDES: Dict[str, Any] = {}
+# what-if 覆盖用 ContextVar:serve 多线程 + job 后台线程不能共享一份全局 dict。
+_overrides_var: contextvars.ContextVar[Dict[str, Any]] = contextvars.ContextVar(
+    "fk_overrides", default=None)
+_enabled_rules_var: contextvars.ContextVar[Optional[Tuple[str, ...]]] = (
+    contextvars.ContextVar("fk_enabled_rules", default=None))
+
+
+def _overrides() -> Dict[str, Any]:
+    cur = _overrides_var.get()
+    return cur if cur is not None else {}
 
 
 def _versions() -> List[Dict]:
@@ -135,9 +149,26 @@ def active_policy(as_of_ts: Optional[float] = None) -> Dict:
         if as_of_ts is None or v["effective_from"] <= as_of_ts:
             p.update(v["values"])
             p["_version"] = v["version"]
-    p["_overridden"] = bool(_OVERRIDES)
-    p.update(_OVERRIDES)
+    ov = _overrides()
+    p["_overridden"] = bool(ov)
+    p.update(ov)
     return p
+
+
+def snapshot_at_version(version: int) -> Dict[str, Any]:
+    """重建策略版本表在 version N 时的完整快照(DEFAULTS ⊕ v1…vN 累积)。
+    回放不能只取 vN 的 delta,否则会漏掉中间版本已生效的键。"""
+    versions = _versions()
+    snap = dict(DEFAULTS)
+    found = False
+    for v in versions:
+        snap.update(v.get("values") or {})
+        if v.get("version") == version:
+            found = True
+            break
+    if not found:
+        raise ValueError("策略版本不存在: v%d" % version)
+    return {k: snap[k] for k in DEFAULTS}
 
 
 def set_overrides(overrides: Dict) -> Dict:
@@ -148,21 +179,37 @@ def set_overrides(overrides: Dict) -> Dict:
     bad = [k for k in overrides if k not in DEFAULTS]
     if bad:
         raise ValueError("未知阈值参数: %s" % ", ".join(bad))
-    prev = dict(_OVERRIDES)
-    _OVERRIDES.clear()
-    _OVERRIDES.update(overrides)
+    prev = dict(_overrides())
+    _overrides_var.set(dict(overrides))
     return prev
 
 
 def restore_overrides(prev: Dict) -> None:
-    _OVERRIDES.clear()
-    _OVERRIDES.update(prev)
+    _overrides_var.set(dict(prev))
+
+
+def set_enabled_rules(rules: Optional[List[str]]) -> Optional[Tuple[str, ...]]:
+    """策略规则集覆盖:非空 = 只启用这些规则;空/None = 全开(未声明)。"""
+    prev = _enabled_rules_var.get()
+    if rules:
+        _enabled_rules_var.set(tuple(rules))
+    else:
+        _enabled_rules_var.set(None)
+    return prev
+
+
+def restore_enabled_rules(prev: Optional[Tuple[str, ...]]) -> None:
+    _enabled_rules_var.set(prev)
+
+
+def enabled_rules() -> Optional[Tuple[str, ...]]:
+    return _enabled_rules_var.get()
 
 
 def overrides_key():
     """当前 what-if 覆盖的指纹(排序元组)。判定缓存的 key 组成部分:
     覆盖生效期间的结果不能和无覆盖的混用。"""
-    return tuple(sorted(_OVERRIDES.items()))
+    return tuple(sorted(_overrides().items()))
 
 
 def latest_baseline_snapshot():
@@ -176,24 +223,26 @@ def latest_baseline_snapshot():
 def apply_change(action: Dict, approved_by: str = "cli") -> Dict:
     """actions.decide 批准 threshold_change 后调用:追加新版本并落盘。
     顺带记录批准时刻的人群基线快照,作为未来漂移告警的参照。"""
-    versions = _versions()
-    entry = {
-        "version": max((v["version"] for v in versions), default=0) + 1,
-        "effective_from": int(time.time()),
-        "approved_by": approved_by,
-        "note": action.get("reason", ""),
-        "values": action["values"],
-    }
+    snap = None
     try:
         from .featurelib import population_baseline  # 惰性:数据缺失不阻塞审批
         snap = population_baseline()
+    except Exception:  # noqa: BLE001
+        snap = None
+    path = thresholds_path()
+    with file_lock(path):
+        versions = _versions()
+        entry = {
+            "version": max((v["version"] for v in versions), default=0) + 1,
+            "effective_from": int(time.time()),
+            "approved_by": approved_by,
+            "note": action.get("reason", ""),
+            "values": action["values"],
+        }
         if snap:
             entry["baseline_snapshot"] = snap
-    except Exception:  # noqa: BLE001
-        pass
-    versions.append(entry)
-    thresholds_path().write_text(
-        json.dumps(versions, ensure_ascii=False, indent=1), encoding="utf-8")
+        versions.append(entry)
+        atomic_write_json(path, versions)
     return entry
 
 

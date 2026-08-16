@@ -65,10 +65,8 @@ def write_lineage(event: Dict[str, Any], decision: Dict[str, Any],
         "timestamp": _now_iso(),
     }
     try:
-        p = _lineage_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        from .datasource import append_jsonl
+        append_jsonl(_lineage_path(), rec)
     except Exception:  # noqa: BLE001
         pass
     return rec["decision_id"]

@@ -362,8 +362,8 @@ def _load_versions() -> List[Dict]:
 
 
 def _save_versions(items: List[Dict]) -> None:
-    _version_path().write_text(json.dumps(items, ensure_ascii=False, indent=1),
-                               encoding="utf-8")
+    from .datasource import atomic_write_json
+    atomic_write_json(_version_path(), items)
 
 
 def _entry_meta(c: Dict) -> Dict:

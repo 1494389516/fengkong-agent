@@ -38,6 +38,7 @@ Decision Plane 接入(P0-2/P0-3,骨架的"治理 -> 判定"打通):
 """
 import json
 import os
+import threading
 import time
 import urllib.request
 from typing import Any, Dict, List
@@ -64,13 +65,17 @@ _RULE_CODES = {
     "ENGINE": "ENGINE_REMOTE",
 }
 
+VALID_ACTIONS = ("pass", "review", "reject")
+
 # closed → 连续失败达阈值 → open → 冷却结束 half_open 探活 → 成功回 closed
 _circuit: Dict[str, Any] = {"failures": 0, "opened_at": 0.0, "state": "closed"}
+_circuit_lock = threading.Lock()
 
 
 def reset_circuit() -> None:
     """测试/显式恢复:清掉熔断计数。生产靠冷却自动 half-open,不靠这个。"""
-    _circuit.update(failures=0, opened_at=0.0, state="closed")
+    with _circuit_lock:
+        _circuit.update(failures=0, opened_at=0.0, state="closed")
 
 
 def _circuit_threshold() -> int:
@@ -82,14 +87,15 @@ def _circuit_cooldown() -> float:
 
 
 def _circuit_allow_remote() -> bool:
-    if _circuit["state"] == "closed":
-        return True
-    if _circuit["state"] == "open":
-        if time.monotonic() - _circuit["opened_at"] >= _circuit_cooldown():
-            _circuit["state"] = "half_open"
+    with _circuit_lock:
+        if _circuit["state"] == "closed":
             return True
-        return False
-    return True
+        if _circuit["state"] == "open":
+            if time.monotonic() - _circuit["opened_at"] >= _circuit_cooldown():
+                _circuit["state"] = "half_open"
+                return True
+            return False
+        return True
 
 
 def _circuit_on_success() -> None:
@@ -97,10 +103,11 @@ def _circuit_on_success() -> None:
 
 
 def _circuit_on_failure() -> None:
-    _circuit["failures"] = int(_circuit["failures"]) + 1
-    if _circuit["state"] == "half_open" or _circuit["failures"] >= _circuit_threshold():
-        _circuit["state"] = "open"
-        _circuit["opened_at"] = time.monotonic()
+    with _circuit_lock:
+        _circuit["failures"] = int(_circuit["failures"]) + 1
+        if _circuit["state"] == "half_open" or _circuit["failures"] >= _circuit_threshold():
+            _circuit["state"] = "open"
+            _circuit["opened_at"] = time.monotonic()
 
 
 def annotate_decision(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -166,14 +173,37 @@ def _post_json(url: str, payload: Dict[str, Any],
 def _map_remote(raw: Dict[str, Any]) -> Dict[str, Any]:
     """把引擎 dry-run 的返回映射成本项目 rule_eval 的规范形状(工具层契约)。
 
-    引擎没回 hits 明细时,合成一条 ENGINE 命中保证证据链字段不缺失 ——
-    rule_id 用 ENGINE 明确标注"判定来自引擎,本地规则未参与"。
+    严格校验 action 枚举与 hits 结构:畸形响应必须抛错,由调用方熔断并
+    显式降级,不能把 ALLOW/None/'oops' 送进判定面。
+    引擎没回 hits 明细时,合成一条 ENGINE 命中保证证据链字段不缺失。
     """
-    action = raw.get("action", "pass")
+    if not isinstance(raw, dict):
+        raise ValueError("远程引擎返回非对象: %s" % type(raw).__name__)
+    action = raw.get("action")
+    if action not in VALID_ACTIONS:
+        raise ValueError("远程引擎非法 action: %r(只接受 pass/review/reject)"
+                         % action)
     hits = raw.get("hits")
     if hits is None:
         hits = [{"rule_id": "ENGINE", "reason": "生产引擎 dry-run 判定",
                  "action": action}]
+    elif not isinstance(hits, list):
+        raise ValueError("远程引擎 hits 必须是 list,收到 %s"
+                         % type(hits).__name__)
+    else:
+        cleaned = []
+        for i, h in enumerate(hits):
+            if not isinstance(h, dict):
+                raise ValueError("远程引擎 hits[%d] 非对象" % i)
+            ha = h.get("action", action)
+            if ha not in VALID_ACTIONS:
+                raise ValueError("远程引擎 hits[%d] 非法 action: %r" % (i, ha))
+            rec = dict(h)
+            rec["action"] = ha
+            rec.setdefault("rule_id", "ENGINE")
+            rec.setdefault("reason", "生产引擎 dry-run 判定")
+            cleaned.append(rec)
+        hits = cleaned
     return {
         "hits": hits,
         "action": action,
@@ -208,6 +238,7 @@ def _active_strategy() -> Dict:
     out = {
         "strategy_version": "%s %s" % (s["strategy_name"], s["version"]),
         "strategy_thresholds": s.get("thresholds") or {},
+        "strategy_rules": list(s.get("rules") or []),
     }
     if len(actives) > 1:
         out["strategy_ambiguity"] = (
@@ -331,12 +362,17 @@ def _local_eval(event: Dict[str, Any], use_current_policy: bool,
     from .tools.rules import _local_rule_eval  # 惰性:防导入环
     overrides = (strategy.get("strategy_thresholds")
                  if use_current_policy and strategy else None)
+    rules = (strategy.get("strategy_rules")
+             if use_current_policy and strategy else None)
     r = _local_rule_eval(event, use_current_policy=use_current_policy,
-                         threshold_overrides=overrides)
+                         threshold_overrides=overrides,
+                         enabled_rules=rules or None)
     if strategy:
         r["strategy_version"] = strategy["strategy_version"]
         if use_current_policy:
             r["strategy_thresholds"] = strategy["strategy_thresholds"]
+            if rules:
+                r["strategy_rules"] = rules
         else:
             r["strategy_note"] = ("回放口径:active strategy 阈值覆盖未应用,"
                                   "判定来自 policy 版本表(as-of)")
@@ -397,7 +433,9 @@ def evaluate_event(event: Dict[str, Any],
         r["source"] = "local_rules_fallback"
         r["degraded"] = True
         r["engine_error"] = "%s: %s" % (type(e).__name__, e)
-        if _circuit["state"] == "open":
+        with _circuit_lock:
+            opened = _circuit["state"] == "open"
+        if opened:
             r["circuit_open"] = True
             r["degraded_reason"] = "circuit_open"
         return annotate_decision(r)
@@ -455,7 +493,8 @@ def evaluate_batch(events: List[Dict[str, Any]],
     except Exception as e:  # noqa: BLE001
         _circuit_on_failure()
         out = []
-        opened = _circuit["state"] == "open"
+        with _circuit_lock:
+            opened = _circuit["state"] == "open"
         for ev in events:
             r = _local_eval(ev, use_current_policy, strategy)
             r.update({"source": "local_rules_fallback", "degraded": True,

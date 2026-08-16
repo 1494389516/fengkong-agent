@@ -163,8 +163,8 @@ def apply_appeal_decision(action: Dict) -> Dict:
     for a in appeals:
         if a["appeal_id"] == appeal_id:
             a["status"] = "accepted" if decision == "accept" else "rejected"
-    appeals_path().write_text(json.dumps(appeals, ensure_ascii=False, indent=1),
-                              encoding="utf-8")
+    from .datasource import append_jsonl, atomic_write_json
+    atomic_write_json(appeals_path(), appeals)
     applied = {"appeal_status": "accepted" if decision == "accept" else "rejected"}
     if decision == "accept":
         # ① 解除 uid 维度的黑/灰记录(ip/设备维度不动:资源可能仍被他人滥用;
@@ -173,8 +173,7 @@ def apply_appeal_decision(action: Dict) -> Dict:
         kept = [r for r in records if not (r["dimension"] == "uid" and r["value"] == uid
                                            and r["list"] != "white")]
         if len(kept) != len(records):
-            blacklist_path().write_text(json.dumps(kept, ensure_ascii=False, indent=1),
-                                        encoding="utf-8")
+            atomic_write_json(blacklist_path(), kept)
             applied["blacklist_removed"] = len(records) - len(kept)
         # ② 标签修正:申诉核实 = 人工审核结论,这就是标签回填的正规渠道
         raw = json.loads(labels_path().read_text(encoding="utf-8")) \
@@ -182,22 +181,20 @@ def apply_appeal_decision(action: Dict) -> Dict:
         old_label = (raw.get(uid) or {}).get("label")
         raw[uid] = {"label": "normal",
                     "note": "申诉 #%d 核实误伤: %s" % (appeal_id, action["reason"][:80])}
-        labels_path().write_text(json.dumps(raw, ensure_ascii=False, indent=1),
-                                 encoding="utf-8")
+        atomic_write_json(labels_path(), raw)
         applied["label_set"] = "normal"
         from .label_lifecycle import write_label_lineage  # 标签修正血缘
         write_label_lineage(uid, old_label, "normal", source="appeal",
                             appeal_id=appeal_id)
         # ③ 复盘沉淀:教训写进 jsonl,研究员定期转 eval 误伤守卫用例
-        with open(postmortems_path(), "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "ts": action.get("requested_at"),
-                "kind": "false_positive_appeal",
-                "uid": uid,
-                "appeal_id": appeal_id,
-                "rules_involved": action.get("rules_at_resolution", []),
-                "reason": action["reason"],
-                "followup": "建议将该账号行为模式补进 eval 误伤守卫用例",
-            }, ensure_ascii=False) + "\n")
+        append_jsonl(postmortems_path(), {
+            "ts": action.get("requested_at"),
+            "kind": "false_positive_appeal",
+            "uid": uid,
+            "appeal_id": appeal_id,
+            "rules_involved": action.get("rules_at_resolution", []),
+            "reason": action["reason"],
+            "followup": "建议将该账号行为模式补进 eval 误伤守卫用例",
+        })
         applied["postmortem_logged"] = True
     return applied

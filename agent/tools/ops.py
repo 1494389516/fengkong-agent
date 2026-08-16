@@ -29,14 +29,14 @@ def _load(path) -> List[Dict]:
 
 
 def _save(path, items: List[Dict]) -> None:
-    path.write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
+    from .datasource import atomic_write_json
+    atomic_write_json(path, items)
 
 
 def _audit(entry: Dict) -> None:
     from .actions import _now_iso
-    with open(audit_log_path(), "a", encoding="utf-8") as f:
-        f.write(json.dumps({"ts": _now_iso(), "decision": "duty_ops", **entry},
-                           ensure_ascii=False) + "\n")
+    from .datasource import append_jsonl
+    append_jsonl(audit_log_path(), {"ts": _now_iso(), "decision": "duty_ops", **entry})
 
 
 def alarm_fingerprint(alarm: str) -> str:
