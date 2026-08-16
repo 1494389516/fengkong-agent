@@ -941,6 +941,10 @@ def run_capability_layer() -> int:
         base = Path(td)
         shutil.copy(ROOT / "data" / "events_sample.json",
                     base / "events_sample.json")
+        shutil.copy(ROOT / "data" / "blacklist.json",
+                    base / "blacklist.json")
+        shutil.copy(ROOT / "data" / "appeals.json",
+                    base / "appeals.json")
         os.environ["FK_DATA_DIR"] = td
         try:
             cr = registry.dispatch("capability_registry", {})
@@ -978,6 +982,65 @@ def run_capability_layer() -> int:
                  r_read.get("feature_count", 0) >= 14
                  and kinds.count("executed") == 1  # 只有 mismatch_resolve 一条
                  and len(kinds) == 3),
+            ]
+            from agent.tools.capability import (
+                clear_user_text, set_user_text, user_requests_write,
+                user_requests_immediate_land)
+            from agent.tools import actions as _act
+            checks += [
+                ("点名写入:请拉黑 为真",
+                 user_requests_write("请把 g_dev_emu000 拉黑")),
+                ("调查题:有没有团伙 为假",
+                 not user_requests_write("有没有团伙作案的迹象?")),
+                ("否定:不要拉黑 为假",
+                 not user_requests_write("不要拉黑这个账号")),
+                ("弱动词无请:哪些该升黑 为假",
+                 not user_requests_write("哪些灰名单该升黑?")),
+                ("弱动词有请:请升黑 为真",
+                 user_requests_write("请把该设备升黑")),
+                ("合法点名:请提交待审批 为真且非越权落地",
+                 user_requests_write("请提交待审批")
+                 and not user_requests_immediate_land("请提交待审批")),
+                ("越权落地:提交决议并立即生效 为真",
+                 user_requests_immediate_land("提交决议并立即生效")),
+                ("点名拉黑:立即生效 为假",
+                 not user_requests_immediate_land("请把设备拉黑")),
+            ]
+            set_user_text("现在的数据里有没有团伙作案的迹象?")
+            try:
+                blocked = registry.dispatch("blacklist_add", {
+                    "dimension": "device_id", "value": "dev_gate_x",
+                    "list": "black", "reason": "eval:未点名"})
+                pending_blocked = _act.list_pending()
+            finally:
+                clear_user_text()
+            set_user_text("请把设备 dev_gate_y 拉黑")
+            try:
+                allowed = registry.dispatch("blacklist_add", {
+                    "dimension": "device_id", "value": "dev_gate_y",
+                    "list": "black", "reason": "eval:点名写入"})
+            finally:
+                clear_user_text()
+            set_user_text("提交决议并立即生效")
+            try:
+                land_blocked = registry.dispatch("appeal_resolve", {
+                    "appeal_id": 2, "decision": "accept",
+                    "reason": "eval:越权落地"})
+                pending_land = _act.list_pending()
+            finally:
+                clear_user_text()
+            checks += [
+                ("未点名 propose 硬拒且不进队列",
+                 "propose blocked" in blocked.get("error", "")
+                 and not pending_blocked),
+                ("点名写入 propose 放行进待审批",
+                 allowed.get("status") == "pending_confirmation"
+                 and allowed.get("action_id", 0) >= 1),
+                ("立即生效 propose 硬拒且不进队列",
+                 "propose blocked" in land_blocked.get("error", "")
+                 and "立即生效" in land_blocked.get("error", "")
+                 and not any(a.get("kind") == "appeal_resolve"
+                             for a in pending_land)),
             ]
         finally:
             os.environ.pop("FK_DATA_DIR", None)

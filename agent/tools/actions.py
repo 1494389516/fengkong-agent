@@ -67,7 +67,8 @@ def _limit_violations(values: Dict, current: Dict) -> List[str]:
     description=(
         "提交名单写入申请(black/gray/white),进待审批队列,需 /approve 才生效。"
         "仅当研究员明确要求加名单/升黑/加白时才调用;调查、日报、团伙排查"
-        "只给文字建议,禁止主动提交。reason 写清证据,进审计日志。"
+        "只给文字建议。未点名或要求立即生效/不用审批时运行时硬拒,不进队列。"
+        "reason 写清证据,进审计日志。"
         "white 建议必带 expires_days;gray 未带时按默认观察期提交。"
         "同值同色已在名单/队列返回现状;不同色允许提交(灰升黑、黑值申诉加白)。"
     ),
@@ -179,8 +180,9 @@ def blacklist_remove(dimension: str, value: str, reason: str, **kw):
     name="threshold_propose",
     description=(
         "提交阈值变更申请(不会立即生效):进入待审批队列,需研究员在 CLI 执行 "
-        "/approve 后才写入策略版本表。values 键同 rule_backtest 的 overrides 及 "
-        "monitor/自身基线阈值;单参数变幅超过 ±50% 会被限速拒绝(需分步提案)。"
+        "/approve 后才写入策略版本表。用户要求立即生效/不用审批时不要调用。"
+        "values 键同 rule_backtest 的 overrides 及 monitor/自身基线阈值;"
+        "单参数变幅超过 ±50% 会被限速拒绝(需分步提案)。"
         "提交前必须先用 shadow_backtest 验证影响,reason 里写清指标证据。"
     ),
     parameters={

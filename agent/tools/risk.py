@@ -235,7 +235,8 @@ def _risk_trend(feats: List[str], labels: Dict[str, str],
         "include_bins 附逐箱明细(欺诈率/WOE/Lift,阈值切在 WOE 跳变处);"
         "time_grain 附逐桶欺诈率与 IV 趋势,IV 跌破峰值一半报区分度衰减"
         "(对手在适应)。只算已标注账号,类样本 <10 记 n/a。"
-        "答'哪个特征值钱''阈值切哪''特征还灵不灵'。"
+        "只答'哪个特征值钱/IV/KS''阈值切哪''特征还灵不灵';"
+        "试穿/候选新规则不要先调本工具,入口是 rule_draft_test。"
     ),
     parameters={
         "type": "object",

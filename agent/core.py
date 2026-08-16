@@ -250,6 +250,18 @@ class Agent:
         on_usage(usage_dict) —— ① 每次 API 响应后实时回调本轮 token 用量。
         on_notice(text)      —— ⑥ 兜底等内部动作的提示,CLI 可打印告知用户。
         """
+        # propose 硬门看的是用户原话,必须在进 LLM / 脱敏之前挂上。
+        from .tools import capability as _cap_mod
+        _cap_mod.set_user_text(user_input)
+        try:
+            return self._ask_loop(user_input, on_tool, on_usage, on_notice)
+        finally:
+            _cap_mod.clear_user_text()
+
+    def _ask_loop(self, user_input: str,
+                  on_tool: Optional[Callable],
+                  on_usage: Optional[Callable],
+                  on_notice: Optional[Callable]) -> str:
         # ⑦ 用户输入里的真实 uid/IP/设备号在进 LLM 前替换成 token
         self.messages.append({"role": "user", "content":
                               self._tok.tokenize(user_input) if self._privacy else user_input})

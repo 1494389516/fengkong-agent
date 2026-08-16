@@ -48,7 +48,8 @@ def _recent_postmortems(limit: int = 3) -> List[Dict]:
         "误伤申诉队列:列出待处理申诉,逐条联查当前判定/命中规则/标签/LTV/"
         "uid 名单/属实举报,并给出建议(uphold 维持 / release 解除 / investigate "
         "需深查)。申诉核实成立 = 误伤实锤,是标签回路 normal 方向的来源。"
-        "决议用 appeal_resolve 提交,人工 /approve 后生效。"
+        "点名提交待审批才用 appeal_resolve;用户要求立即生效/不用审批时"
+        "不要调 appeal_resolve,只复核并说明须 /approve。"
     ),
     parameters={"type": "object", "properties": {}},
 )
@@ -94,7 +95,8 @@ def appeal_review():
         "pending_count": len(out),
         "queue": out,
         "recent_postmortems": _recent_postmortems(),
-        "note": "recommendation 只是排序建议;决议用 appeal_resolve 提交并写清证据,"
+        "note": "recommendation 只是排序建议;点名提交待审批才用 appeal_resolve;"
+                "用户要求立即生效时不要提交,只说明须 /approve;"
                 "accept 需说明为何现有证据不足以支撑原处置",
     }
 
@@ -102,10 +104,11 @@ def appeal_review():
 @tool(
     name="appeal_resolve",
     description=(
-        "提交申诉决议(不会立即生效):decision=accept(误伤成立)或 reject"
-        "(维持原判),进入待审批队列,研究员 /approve 后落盘 —— accept 生效时"
-        "自动:申诉状态置 accepted、解除该 uid 维度名单、标签修正为 normal、"
-        "教训写入复盘日志。reason 必须引用工具证据,进入审计日志。"
+        "提交申诉决议(不会立即生效,须 /approve):decision=accept(误伤成立)"
+        "或 reject(维持原判),进待审批队列。用户要求立即生效/不用审批时"
+        "不要调用,只 appeal_review 并说明须人工 /approve。"
+        "accept 批准后:申诉 accepted、解除该 uid 名单、标签改 normal、写复盘。"
+        "reason 须引用工具证据。"
     ),
     parameters={
         "type": "object",

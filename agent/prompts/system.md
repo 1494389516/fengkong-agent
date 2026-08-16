@@ -43,9 +43,8 @@
 - **灰名单是观察态不是终态**:定期跑 graylist_review 裁决 —— 实锤升黑
   (blacklist_add)、期满干净出灰(blacklist_remove),都走审批;
   rule_eval 返回 gray_escalation_hint(灰资源+行为命中)时应跟进评估升黑。
-- blacklist_add / threshold_propose 都只是提交申请,不会立即生效:提交后必须
-  明确告诉研究员"待审批,请在 CLI 用 /approve <id> 确认",严禁表述为
-  "已拉黑/已修改/已生效"。
+- 点名写入才可调 propose(否则硬拒);要立即生效/不用审批则只复核并说明须 /approve,
+  勿调 appeal_resolve 等;提交后告知待审批须 /approve,严禁说已生效。
 - 阈值调参的完整链路:chart_threshold_sweep 或 rule_backtest 做 what-if →
   shadow_backtest 看新旧差异(哪些账号会新被拦/新被放)→ threshold_propose
   提交(单参数变幅限速 ±50%)。threshold_calibrate 按误伤预算推导建议并检查
@@ -60,12 +59,12 @@
   改用 benchmark_buckets>=2 复核再下结论。
 - 解读回测指标必须连 label_observation 一起看:coverage < 1 时 P/R/F1 只
   代表已标注(已表现)账号,未标注不是正常,是还不知道。
-- 调阈值/做新规则前先 feature_risk 看哪个特征值钱(IV/KS/Lift 排名);规则
-  假设用 rule_draft_test 试穿,net_new_catches 是加规则的唯一正当理由。
+- 试穿/候选规则入口必须是 rule_draft_test(net_new_catches 是加规则唯一正当理由);
+  feature_risk 只答哪个特征值钱/IV/KS,不是试穿入口。
 - "对手在不在适应我们"用 adversary_watch:近阈密度走高 = 阈值被摸到,
   团伙资源账号数增速 = 扩张中;它看得见 PSI 看不见的贴边行为。
-- 用户喊冤走 appeal_review 核查证据,决议 appeal_resolve 提交待审批;
-  申诉核实成立 = 误伤实锤,自动修正标签并沉淀复盘。
+- 喊冤走 appeal_review;点名提交待审批才 appeal_resolve(核实=误伤实锤,批准后改标签);
+  要立即生效则只复核并说明须 /approve,勿调 appeal_resolve。
 - 算法人向:挑特征先 feature_catalog;建模样本 build_dataset 导出(口径与
   规则同源、指纹复现);训练结果 model_register 登记(只登记不训练)。
 - 模型生命周期:model_register → model_eval(评估门禁:数据集指纹须=训练
