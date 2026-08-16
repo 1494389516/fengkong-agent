@@ -266,9 +266,6 @@ def refresh_agent_card(card_path=None, records=None) -> int:
     if n_cases:
         text, n = re.subn(r"\(\d+ 个黄金案例", "(%d 个黄金案例" % n_cases, text)
         refreshed += n
-        text, n = re.subn(r"agent 层 \d+ 案例尚未实弹",
-                          "agent 层 %d 案例尚未实弹" % n_cases, text)
-        refreshed += n
     p.write_text(text, encoding="utf-8")
     return refreshed
 

@@ -12,6 +12,10 @@
 回测规则、论证调参,并通过两阶段审批执行处置。本仓库是一个**带完整工程纪律的骨架**
 ——数据是合成的,但架构按真实部署设计(对接路线见 [DEPLOY.md](DEPLOY.md))。
 
+两套平面必须拆开:**Decision Plane** 是唯一事实源(在线判定只走引擎 / `local_rules`
+降级,LLM 不进 `/decide`);**Agent Plane** 是调查 Copilot(只读、模拟、点名后才能
+提案)。写操作过 propose 硬门才进 pending,落地只走 CLI `/approve`(不是工具)。
+
 项目的两根支柱,所有设计都围绕它们展开:
 
 1. **效果评估**:agent 的每个能力都有离线断言钉住(当前 391 项,全离线零 token),
@@ -66,37 +70,59 @@ CLI 命令:`/reset` 开新案例 · `/pending` 待审批 · `/approve|/deny <id>
 
 ## 架构总览
 
+两套平面,不是「Agent 在中间、引擎是它的一个工具」。上半面调查,下半面判定;
+中间没有合法边。DeepSeek 只在 Agent Plane 选工具和写分析。
+
 ```mermaid
 flowchart TB
-    subgraph 数据层
-        DS[datasource.py 数据源单点<br/>mtime 缓存 · FK_DATASET/FK_DATA_DIR 切换]
-        D1[(events / accounts / blacklist<br/>ip_intel / device_intel / reports<br/>decisions_log / thresholds)]
-        DS --- D1
+    R[研究员] --> CLI["CLI / HTTP<br/>main.py · serve.py"]
+    CLI --> ASK
+    CLI --> DEC
+
+    subgraph AP["Agent Plane · 调查 Copilot"]
+        ASK["Agent.ask<br/>core.py 挂用户原话"]
+        LLM["DeepSeek<br/>选工具 · 写分析"]
+        DISP["dispatch<br/>capability.enforce"]
+        READ["read 取证"]
+        SIM["simulate 回测/影子/试穿"]
+        PROP["propose 硬门"]
+        ASK --> LLM --> DISP
+        DISP --> READ
+        DISP --> SIM
+        DISP --> PROP
     end
-    subgraph 策略层
-        POL[policy.py 阈值版本单点<br/>版本表 · as-of 回放 · what-if 覆盖]
+
+    PROP -->|"点名写入且未要求立即生效"| PEND[pending]
+    PEND --> APPR["CLI /approve<br/>不是工具"]
+    APPR --> LISTS["名单 / 阈值"]
+
+    subgraph DP["Decision Plane · 唯一事实源"]
+        DEC["POST /decide"]
+        ENG["生产引擎 R001-R006"]
+        LOC["local_rules 降级备份"]
+        R007["R007 有 champion 才有"]
+        DEC --> ENG
+        ENG -.-> LOC
+        ENG -.-> R007
     end
-    subgraph 特征层
-        FL[featurelib.py 统一特征层<br/>point-in-time · 窗口 · 基线/百分位 · 行为路径]
-    end
-    subgraph 工具层["工具层(82 个,dispatch 单点限幅+注入防线)"]
-        T1[查询:profile/monitor/features/<br/>blacklist/ip/device/reports/graph]
-        T2[策略:rule_eval/backtest/shadow/<br/>calibrate/propose/history/consistency]
-        T3[图表:仪表盘/扫描/群体对比]
-        T4[巡检:scan_all/daily_brief/duty_ops]
-        T5[监控:feature_drift/rule_drift/<br/>adversary_watch/feature_risk]
-        T6[生命周期:rule_draft_test/<br/>appeal_review/appeal_resolve]
-    end
-    subgraph AGENT["Agent 层"]
-        CORE[core.py 对话主循环<br/>上下文工程 ①~⑦]
-        PRIV[privacy.py 脱敏层]
-    end
-    CLI[main.py CLI / 未来:飞书机器人] --> CORE
-    CORE --> PRIV --> T1 & T2 & T3 & T4 & T5 & T6
-    T1 & T2 & T3 & T4 & T5 & T6 --> FL --> DS
-    T2 --> POL --> DS
-    EVAL[eval/ 391 项离线断言 + agent 层四维案例 + 成本预算] -. 回归门禁 .-> 工具层 & AGENT
+
+    LLM -.->|禁止: LLM 不进判定| DEC
+    READ --> ENG
+    READ -.-> LOC
+    SIM -.-> LOC
+
+    EVAL[eval/ 391 项离线断言 + 24 个黄金案例 + 成本预算] -. 回归门禁 .-> AP
+    EVAL -.-> DP
 ```
+
+propose 硬门在 `capability.enforce`,不在模型身上:用户原话未点名写入(拉黑/提交/
+请改等)则拒绝,不进队列;原话要求「立即生效 / 不用审批」即使点名了也拒绝。
+直接 `dispatch`(无用户原话,离线单测)不拦,避免打死评估。审批工具不注册,
+模型物理触不到 `/approve`。
+
+当前判定通道是 `local_rules`(未配 `FK_ENGINE_DRYRUN_URL`)。没有 champion、
+没有 active strategy,`production_readiness_check` 为 BLOCKED——这是诚实状态,
+不要把本地备份包装成生产口径。
 
 ```
 agent/
@@ -106,6 +132,8 @@ agent/
   prompts/system.md  角色 / 工作原则 / 工具经济学 / 一致性纪律 / 安全纪律
   tools/
     __init__.py    工具注册表 + dispatch 单点(② 限幅 + 用户内容注入防线)
+    capability.py  权限等级 + propose 硬门(点名写入 / 拒立即生效)
+    packs.py       任务工具包(日常 analyst 57 / 评估 full 82)
     datasource.py  数据源单点(唯一对接面,换真实数仓只改这里)
     featurelib.py  统一特征层(单一事实源)
     policy.py      阈值版本单点(版本表 / 覆盖 / 提案落盘)
@@ -151,9 +179,10 @@ API 无状态、每轮全量重发历史,单会话成本 O(T²)。七个机制�
 | ⑦ | 脱敏层 | privacy | FK_PRIVACY=1 时 uid/IP/设备号在 LLM 边界双向 token 化,PII 不出程序 |
 
 **成本是回归项不是感觉**:`measure_costs.py` 量化结构性成本(schema+system,每请求随行、
-缓存可吸收)与每工具典型返回;eval 设硬预算(schema ≤12k chars、单工具结果 ≤5k),
-超限评估变红。历史战绩:rule_backtest 的 per_account 曾单次 9.3k tokens,被 dict 限幅
-+ 工具面瘦身斩到 250。
+缓存可吸收)与每工具典型返回;eval 设硬预算(schema ≤40500 chars、system ≤5700、
+单工具结果 ≤5k),超限评估变红。system prompt 已贴顶,新纪律只能改工具返回或
+等价改写 prompt,不能再往 system 末尾贴。历史战绩:rule_backtest 的 per_account
+曾单次 9.3k tokens,被 dict 限幅 + 工具面瘦身斩到 250。
 
 ### 2. 工具设计原则
 
@@ -162,8 +191,11 @@ API 无状态、每轮全量重发历史,单会话成本 O(T²)。七个机制�
 - **what-if 参数化**:回测/扫描接受阈值覆盖(原子应用、快照恢复),agent 能自主
   执行"改阈值→看指标"闭环;
 - **信号可解释**:"窗口内 20 次领券、5 IP 轮换"而非黑盒分数,每个信号可写进证据链;
-- **工具经济学**:聚合入口优先(account_profile/scan_all/graph_relations),单项工具
-  只补细节;评估层有入口断言、调用次数上限、同参重复检测三道轨迹效率约束。
+- **工具经济学**:聚合入口优先(账号用 account_profile,团伙用 graph_relations,
+  已带 device_flags;试穿用 rule_draft_test,feature_risk 只答 IV/KS),单项工具
+  只补细节。查无此号:account_profile 返回 `next_action=stop`,不要拆单项空转。
+  评估层有入口断言、调用次数上限、同参重复检测三道轨迹效率约束。
+  CLI 默认 analyst 包(57 工具),评估强制 full(82)。
 
 ### 3. 规则集(阈值全部经 policy 解析,无硬编码)
 
@@ -270,6 +302,9 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 
 - **两阶段处置**:agent 只能提交(blacklist_add / threshold_propose 进 pending),
   人在 CLI 审批后落盘,全程审计日志(jsonl);
+- **propose 硬门**(dispatch 单点,挂用户原话):未点名写入的调查题调用 propose
+  会被拒绝,不进 pending;用户说「立即生效 / 不用审批」即使点名了也拒绝。
+  「请提交待审批」「请把设备拉黑」仍放行,等人 `/approve`。审批不是工具;
 - **脱敏层**:确定性 token(同值同 token,跨轮关联不受损),映射进程内可逆、对外
   不可逆推;边界用 lookaround 而非 `\b`(中文紧邻 ID 时 `\b` 会漏);
 - **注入防线**:举报文本等用户可控字段经 dispatch 单点包 `⟦用户内容⟧` 标记
@@ -291,8 +326,11 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 新号盗卡;名单故意不完整(否则 R001 一条全包,行为规则测不出价值);同参数同种子
 完全可复现。
 
-**数据集切换**:`FK_DATASET=gen` 用生成集,`FK_DATA_DIR=/path` 指定目录(eval 的
-临时目录测试用);策略/名单/审计均按数据集隔离。
+**数据集切换**:`FK_DATASET=gen` 用生成集,`FK_DATA_DIR=/path` 指定目录(优先级最高);
+策略/名单/审计均按数据集隔离。**官方 24 条黄金案例永远对着手工 `data/`**:
+`eval/run_eval.py` 启动会清掉 `FK_DATA_DIR` / `FK_DATASET` / `FK_TOOL_PACK`,
+避免合成集或日常 pack 污染确定性基线(评估强制 full)。大规模实弹把生成数据
+写到仓库外目录,不要进 git。
 
 ### 10. 评估体系(效果与成本同一根尺子)
 
@@ -357,6 +395,8 @@ pending/audit/mismatch 队列、不触碰策略;shadow 结果落盘 out/shadow/ 
 - approve/admin 通道经 dispatch 调用 → 拒绝并写 security audit;
 - 未知工具调用(枚举攻击面)→ 拒绝并审计;
 - execute 级(登记/销单/任务)调用 → 全部留痕;
+- propose 级:用户原话未点名写入 → 拒绝,不进 pending;原话要求立即生效/
+  绕过审批 → 拒绝。无用户原话的直接 dispatch(离线单测)不拦;
 - `capability_registry` 按等级分组查询 + 审计统计。
 审计文件 data/security_audit.jsonl(运行时文件)。
 
@@ -479,15 +519,18 @@ reject/review/pass 率变化)、`agent_behavior_drift`(agent 运行日志的工�
 | `FK_ENGINE_DRYRUN_TIMEOUT` | dry-run 调用超时秒数,默认 10 |
 | `FK_ENGINE_MODEL_URL` | 模型服务端点(P0-2):POST {"uid","event"} -> {"score": 0~1};未配置时走本地 data/model_scores.json(骨架模拟模型服务) |
 | `FK_FEATURE_ONLINE_MODULE` | 在线特征实现注入点(P0-5):"module:function",签名同 account_features;未配置时 feature_parity_check 返回 warn(同源一致,未验证线上) |
-| `FK_TOOL_PACK` | 会话工具包:investigate/duty/graph/strategy/analyst(默认)/full。CLI `/pack` 可切换 |
+| `FK_TOOL_PACK` | 会话工具包:investigate/duty/graph/strategy/analyst(默认)/full。CLI `/pack` 可切换。官方评估启动会清掉此变量并强制 full |
 | `FK_TZ_OFFSET_HOURS` | 分桶业务时区偏移,默认 +8(UTC 切日会把凌晨攻击劈进两桶) |
 
 ## 已知边界(诚实声明)
 
 - 数据是合成的:指标的绝对值没有外推意义,分辨率与张力是设计出来的;
-- agent 层 24 案例(含红队:越权话术/伪指令注入/身份施压/唯一引擎纪律)尚未实弹运行(需 API key),四维基线待第一次真实运行建立;
-- 本骨架中 agent 的规则引擎就是唯一引擎;接真实系统后它降级为镜像,
-  对账机制(已建)成为一切模拟结论的前提;
+- agent 层 24 案例已用 deepseek-v4-flash 在手工集上跑过两场全量:第一场 8/24
+  (尺子死局为主),第二场 22/24。随后收 AG-014 试穿入口与 AG-020「立即生效」
+  硬门,两条复跑均过;改后未再跑整场 24,不能写成 24/24。生产就绪门禁仍是
+  BLOCKED(无 champion / 无 active strategy);
+- 本骨架中当前判定通道是 local_rules;接上 `FK_ENGINE_DRYRUN_URL` 后本地实现
+  降级为镜像,对账机制(已建)成为一切模拟结论的前提;
 - 全量类工具(scan/backtest)是同步实现,真实数据量下须改异步任务(见 DEPLOY.md);
 - ④ 工具裁剪与 DeepSeek 前缀缓存的净收益未实测:裁剪省下的 token 可能小于
   它打断缓存前缀多付的 miss 差价 —— 带 key 后用 ① 的 cache_hit/miss 计量
