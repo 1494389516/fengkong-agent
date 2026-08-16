@@ -32,10 +32,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 LOG_PATH = ROOT / "out" / "serve_decisions.jsonl"
 _log_lock = threading.Lock()
+# 同输入指纹返回同一条决策(Ojuri: idempotent on transaction_id)。
+# 进程内缓存:骨架够用;重放不写血缘/日志,避免重复事件灌爆对账。
+_idemp: dict = {}
 
 
 def _decide(event: dict) -> dict:
+    from agent.tools.lineage import event_fingerprint, write_lineage
     from agent.tools.rules import rule_eval
+    fp = event_fingerprint(event)
+    with _log_lock:
+        cached = _idemp.get(fp)
+        if cached is not None:
+            out = dict(cached)
+            out["idempotent_replay"] = True
+            out["latency_ms"] = 0.0
+            return out
     t0 = time.time()
     r = rule_eval(event, use_current_policy=True)
     decision = {
@@ -50,16 +62,25 @@ def _decide(event: dict) -> dict:
         "model_score": r.get("model_score"),
         "source": r.get("source"),
         "degraded": bool(r.get("degraded")),
+        "reason_codes": list(r.get("reason_codes") or []),
+        "escalate_to_human": bool(r.get("escalate_to_human")),
+        "agent_cannot_override": True,
+        "decision_combine": r.get("decision_combine"),
+        "combine_score": r.get("combine_score"),
         "latency_ms": round(1000 * (time.time() - t0), 1),
     }
-    from agent.tools.lineage import write_lineage  # 决策血缘:为什么
     write_lineage(event, decision, approver="serve")
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _log_lock:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(decision, ensure_ascii=False) + "\n")
-    # 返回体不含 features_snapshot(那是调查素材,不是决策接口的一部分)
-    return {k: decision[k] for k in ("action", "rules", "policy_version", "latency_ms")}
+        public = {k: decision[k] for k in (
+            "action", "rules", "policy_version", "latency_ms",
+            "reason_codes", "escalate_to_human", "degraded",
+            "agent_cannot_override", "decision_combine")}
+        public["idempotent_replay"] = False
+        _idemp[fp] = dict(public)
+    return public
 
 
 class Handler(BaseHTTPRequestHandler):

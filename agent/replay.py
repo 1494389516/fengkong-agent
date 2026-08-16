@@ -20,9 +20,24 @@ import json
 from typing import Any, Dict, List, Optional
 
 
+def _canon_event(obj: Any) -> Any:
+    """指纹口径:整数值的 int/float 视为同一事件(JSON 里 1 与 1.0 字面量不同)。
+    bool 是 int 子类,必须先排除,否则 True 会变成 1。"""
+    if isinstance(obj, dict):
+        return {k: _canon_event(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_canon_event(v) for v in obj]
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, float) and obj.is_integer() and abs(obj) < 2 ** 53:
+        return int(obj)
+    return obj
+
+
 def event_fingerprint(event: Dict[str, Any]) -> str:
     """事件规范化指纹:同一事件的语义等价序列化 -> 同一指纹。"""
-    blob = json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)
+    blob = json.dumps(_canon_event(event), ensure_ascii=False,
+                      sort_keys=True, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 

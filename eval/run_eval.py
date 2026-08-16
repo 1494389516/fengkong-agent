@@ -395,6 +395,18 @@ def run_feedback_pipeline_layer() -> int:
                 ("候选:显式标注只供人审,不自动进生产",
                  "人审" in fp["note"] and "审批链" in fp["note"]),
             ]
+            (base / "analyst_overrides.jsonl").write_text(
+                json.dumps({"kind": "proposal_denied", "action_kind": "blacklist_add",
+                            "action_id": 1, "decided_by": "eval",
+                            "reason": "误伤", "ts": "2026-08-01T00:00:00Z"},
+                           ensure_ascii=False) + "\n", encoding="utf-8")
+            fp2 = registry.dispatch("feedback_pipeline", {})
+            checks += [
+                ("分析师否决回灌进入候选且不改标签",
+                 fp2["summary"]["analyst_overrides"] == 1
+                 and any(c["kind"] == "analyst_override" for c in fp2["candidates"])
+                 and "勿自动改标签" in fp2["candidates"][-1]["action"]),
+            ]
         finally:
             os.environ.pop("FK_DATA_DIR", None)
     return _report("反馈管道(离线,临时目录)", checks)
@@ -859,7 +871,9 @@ def run_lineage_layer() -> int:
                  and ex.get("event_id") == ex.get("input_fingerprint")
                  and ex.get("policy_version") is not None
                  and ex.get("feature_snapshot_version") == FEATURE_CATALOG_VERSION
-                 and ex.get("engine_source") in ("local_rules", "remote_engine")),
+                 and ex.get("engine_source") in ("local_rules", "remote_engine")
+                 and ex.get("escalate_to_human") is True
+                 and "R001_LIST" in (ex.get("reason_codes") or [])),
                 ("实时解释:显式标注未落库",
                  "未落库" in ex.get("note", "") and ex.get("found") is not True),
             ]
@@ -1194,6 +1208,9 @@ def run_replay_engine_layer() -> int:
                 ("回放:带 replay 标记与输入指纹",
                  r1.get("replay") is True
                  and r1["input_fingerprint"] == event_fingerprint(ev)),
+                ("回放:整数值 ts 的 int/float 同一指纹",
+                 event_fingerprint({"uid": "u_1002", "ts": 1784109633})
+                 == event_fingerprint({"uid": "u_1002", "ts": 1784109633.0})),
                 ("回放:默认 as-of 口径与 rule_eval 一致",
                  r1["action"] == "reject"),
                 ("回放:无副作用(未写任何生产文件)",
@@ -1558,6 +1575,26 @@ def run_model_lifecycle_layer() -> int:
                            by["xgb_v2"]["status"] == "champion"
                            and by["xgb_demo"]["status"] == "deprecated"
                            and len(st_all["champions"]) == 1))
+            registry.dispatch("model_register", {
+                "name": "xgb_worse", "version": "0.3",
+                "train_fingerprint": train_fp})
+            registry.dispatch("model_promote", {
+                "name": "xgb_worse", "version": "0.3", "to": "shadow"})
+            registry.dispatch("model_eval", {
+                "name": "xgb_worse", "version": "0.3",
+                "scores": eval_scores, "eval_fingerprint": eval_fp})
+            registry.dispatch("model_promote", {
+                "name": "xgb_worse", "version": "0.3", "to": "challenger"})
+            from agent.tools import model_registry as _mr
+            items = _mr._load()
+            worse = _mr._find(items, "xgb_worse", "0.3")
+            worse["metrics"] = dict(worse["metrics"], recall=0.1)
+            _mr._save(items)
+            r_sig = registry.dispatch("model_promote", {
+                "name": "xgb_worse", "version": "0.3", "to": "champion"})
+            checks.append(("显著性门禁:指标劣化的 challenger 不得进审批",
+                           "显著性门禁" in r_sig.get("error", "")
+                           and "recall" in r_sig.get("error", "")))
             r_illegal = registry.dispatch("model_rollback", {
                 "name": "xgb_bad", "version": "0.1", "reason": "x"})
             checks.append(("非法回滚被拒(非 champion)",
@@ -1598,17 +1635,52 @@ def run_model_lifecycle_layer() -> int:
                  and cmp_["champion_sample_count"] == 2
                  and cmp_["challenger_sample_count"] == 2),
             ]
-            from agent.metrics import champion_beats_challenger
+            from agent.metrics import (champion_beats_challenger, mcnemar,
+                                       promotion_significance)
             m_better = {"auc": 0.8, "ks": 0.6, "precision": 0.7, "recall": 0.7,
                         "fpr": 0.1, "fnr": 0.3}
             m_worse_recall = dict(m_better, recall=0.4)
             ok1, bad1 = champion_beats_challenger(m_better, m_worse_recall)
             ok2, bad2 = champion_beats_challenger(m_better, m_better)
+            labs20 = {str(i): ("fraud" if i < 10 else "normal") for i in range(20)}
+            champ_wrong = {str(i): (0.1 if i < 10 else 0.9) for i in range(20)}
+            chall_right = {str(i): (0.9 if i < 10 else 0.1) for i in range(20)}
+            mc_win = mcnemar(champ_wrong, chall_right, labs20)
+            mc_tie = mcnemar(chall_right, chall_right, labs20)
+            from agent.metrics import evaluate as _meval
+            g_win = promotion_significance(
+                _meval(champ_wrong, labs20), _meval(chall_right, labs20),
+                champ_wrong, chall_right, labs20)
+            g_lose = promotion_significance(
+                _meval(chall_right, labs20), _meval(champ_wrong, labs20),
+                chall_right, champ_wrong, labs20)
             checks += [
                 ("评估门禁:recall 劣化被拒且点名指标",
                  ok1 is False and bad1 == ["recall"]),
                 ("评估门禁:全等指标通过", ok2 is True and bad2 == []),
+                ("McNemar:20 对全改进显著且 challenger_better",
+                 mc_win["n_discordant"] == 20 and mc_win["b"] == 20
+                 and mc_win["c"] == 0 and mc_win["significant"] is True
+                 and mc_win["challenger_better"] is True
+                 and mc_win["p_value"] is not None and mc_win["p_value"] < 0.05),
+                ("McNemar:无分歧对诚实返回不可用",
+                 mc_tie["n_discordant"] == 0 and mc_tie["chi2"] is None
+                 and mc_tie["significant"] is False),
+                ("晋升门:显著更好+ΔF1 通过", g_win["ok"] is True
+                 and g_win["delta_f1"] is not None and g_win["delta_f1"] >= 0.01),
+                ("晋升门:全面更差被拒", g_lose["ok"] is False
+                 and g_lose["failed_metrics"]),
             ]
+            labs100 = {str(i): ("fraud" if i < 50 else "normal") for i in range(100)}
+            champ100 = {str(i): (0.1 if i < 50 else 0.9) for i in range(100)}
+            chall100 = {str(i): (0.9 if i < 50 else 0.1) for i in range(100)}
+            mc100 = mcnemar(champ100, chall100, labs100)
+            g100 = promotion_significance(
+                _meval(champ100, labs100), _meval(chall100, labs100),
+                champ100, chall100, labs100)
+            checks.append(("晋升门:p_value=0.0 仍算显著(不把 0 当缺失)",
+                           mc100["p_value"] == 0.0 and mc100["significant"] is True
+                           and g100["ok"] is True and g100["reasons"] == []))
         finally:
             os.environ.pop("FK_DATA_DIR", None)
     return _report("模型生命周期与 Champion-Challenger(离线,临时目录)", checks)
@@ -1807,8 +1879,20 @@ def run_engine_layer() -> int:
     r = registry.dispatch("rule_eval", {"event": ev})
     checks.append(("默认未接引擎:判定来自本地实现且结论 reject",
                    r.get("source") == "local_rules" and r["action"] == "reject"))
+    checks.append(("本地判定带 reason_codes + escalate + 不可覆盖",
+                   "R001_LIST" in (r.get("reason_codes") or [])
+                   and "R003_AMOUNT" in (r.get("reason_codes") or [])
+                   and r.get("escalate_to_human") is True
+                   and r.get("agent_cannot_override") is True))
     st = registry.dispatch("engine_status", {})
     checks.append(("engine_status 报告 local_rules", st.get("mode") == "local_rules"))
+    r_ok = registry.dispatch("rule_eval", {
+        "event": {"uid": "u_1001", "ip": "112.96.100.23",
+                  "device_id": "dev_iphone_a1", "type": "order", "amount": 129.0}})
+    checks.append(("干净放行:escalate=false 且无 CIRCUIT 码",
+                   r_ok.get("action") == "pass"
+                   and r_ok.get("escalate_to_human") is False
+                   and "CIRCUIT_OPEN" not in (r_ok.get("reason_codes") or [])))
 
     calls = []
 
@@ -1902,10 +1986,40 @@ def run_engine_layer() -> int:
         verdicts2 = account_verdicts(["u_1001"], evs)
         checks.append(("批量失败显式降级:仍出结论且不静默",
                        verdicts2["u_1001"]["predicted"] in ("pass", "review", "reject")))
+
+        engine.reset_circuit()
+        os.environ["FK_ENGINE_CIRCUIT_FAILURES"] = "1"
+        os.environ["FK_ENGINE_CIRCUIT_COOLDOWN"] = "60"
+        boom_n = []
+
+        def boom_count(req, timeout=None):
+            boom_n.append(1)
+            raise OSError("connection refused")
+
+        _ur.urlopen = boom_count
+        r_c1 = registry.dispatch("rule_eval", {"event": ev})
+        r_c2 = registry.dispatch("rule_eval", {"event": ev})
+        st3 = registry.dispatch("engine_status", {})
+        checks += [
+            ("熔断:第一次失败显式降级",
+             r_c1.get("degraded") is True
+             and r_c1.get("source") == "local_rules_fallback"),
+            ("熔断打开后跳过远程:第二次不打 urlopen",
+             len(boom_n) == 1
+             and r_c2.get("circuit_open") is True
+             and r_c2.get("degraded_reason") == "circuit_open"
+             and "CIRCUIT_OPEN" in (r_c2.get("reason_codes") or [])
+             and r_c2.get("escalate_to_human") is True),
+            ("engine_status 报告 circuit.open",
+             st3.get("circuit", {}).get("state") == "open"),
+        ]
     finally:
         _ur.urlopen = orig_urlopen
         os.environ.pop("FK_ENGINE_DRYRUN_URL", None)
         os.environ.pop("FK_ENGINE_DRYRUN_TOKEN", None)
+        os.environ.pop("FK_ENGINE_CIRCUIT_FAILURES", None)
+        os.environ.pop("FK_ENGINE_CIRCUIT_COOLDOWN", None)
+        engine.reset_circuit()
     return _report("引擎适配器(离线,打桩 dry-run)", checks)
 
 
@@ -2774,7 +2888,8 @@ def run_regression_layer() -> int:
     ]
 
     # -- actions:限速的 0 值短路与开关取值域 --
-    cur = {"r006_reject_rooted": 0, "r006_reject_hook": 1, "r002_min_events": 10}
+    cur = {"r006_reject_rooted": 0, "r006_reject_hook": 1, "r002_min_events": 10,
+           "decision_combine": "worst"}
     checks += [
         ("限速:现值 0 的开关塞大数值被拒",
          bool(_limit_violations({"r006_reject_rooted": 5000}, cur))),
@@ -2786,6 +2901,78 @@ def run_regression_layer() -> int:
          not _limit_violations({"r002_min_events": 12}, cur)),
         ("限速:数值键超幅仍被拒",
          bool(_limit_violations({"r002_min_events": 99}, cur))),
+        ("限速:枚举键 worst→vote 不限速",
+         not _limit_violations({"decision_combine": "vote"}, cur)),
+        ("限速:枚举键非法值被拒",
+         bool(_limit_violations({"decision_combine": "maybe"}, cur))),
+    ]
+
+    # -- coolGuard 编排:同一套 hits,四种合成已知答案;默认 worst 与现口径零分叉 --
+    from agent.tools.policy import restore_overrides, set_overrides
+    from agent.tools.rules import combine_hits
+    from agent.tools.strategy_registry import validate_strategy
+    hits_div = [
+        {"rule_id": "R001", "action": "reject", "reason": "x"},
+        {"rule_id": "R003", "action": "review", "reason": "y"},
+        {"rule_id": "R004", "action": "review", "reason": "z"},
+    ]
+    two_review = [
+        {"rule_id": "R003", "action": "review", "reason": "a"},
+        {"rule_id": "R004", "action": "review", "reason": "b"},
+    ]
+    a_worst, m_worst = combine_hits(hits_div, {"decision_combine": "worst"})
+    a_vote, m_vote = combine_hits(hits_div, {"decision_combine": "vote"})
+    a_seq, m_seq = combine_hits(hits_div, {"decision_combine": "sequential"})
+    a_w, m_w = combine_hits(two_review, {
+        "decision_combine": "weight",
+        "r003_weight": 1.0, "r004_weight": 1.0,
+        "combine_weight_review": 1.0, "combine_weight_reject": 2.0})
+    a_w2, _ = combine_hits(two_review, {"decision_combine": "worst"})
+    a_bad, m_bad = combine_hits(hits_div, {"decision_combine": "nope"})
+    v_ok = validate_strategy({"rules": ["R001"],
+                              "thresholds": {"decision_combine": "vote"}})
+    v_bad = validate_strategy({"rules": ["R001"],
+                               "thresholds": {"decision_combine": "nope"}})
+    ev1009 = {"uid": "u_1009", "ip": "203.0.113.66",
+              "type": "order", "amount": 4999.0}
+    ev_seq = {"uid": "u_eval_seq", "device_id": "dev_pixel_z9",
+              "type": "order", "amount": 4999.0}
+    r_default = rule_eval(ev1009)
+    prev = set_overrides({"decision_combine": "weight", "r001_weight": 0.1})
+    try:
+        r_weight = rule_eval(ev1009, use_current_policy=True)
+    finally:
+        restore_overrides(prev)
+    prev = set_overrides({"decision_combine": "sequential"})
+    try:
+        r_seq = rule_eval(ev_seq, use_current_policy=True)
+    finally:
+        restore_overrides(prev)
+    r_seq_worst = rule_eval(ev_seq)
+    checks += [
+        ("编排:2 review+1 reject → worst=reject / vote=review / sequential=R001",
+         a_worst == "reject" and m_worst["decision_combine"] == "worst"
+         and a_vote == "review" and m_vote["decision_combine"] == "vote"
+         and a_seq == "reject" and m_seq["decision_combine"] == "sequential"),
+        ("编排:两条 review 默认权重 → weight=reject(加成) / worst=review",
+         a_w == "reject" and m_w.get("combine_score") == 2.0
+         and a_w2 == "review"),
+        ("编排:非法模式回退 worst 且打 combine_fallback",
+         a_bad == "reject" and m_bad["decision_combine"] == "worst"
+         and m_bad.get("combine_fallback") == "nope"),
+        ("编排:strategy_validate 认枚举、拒非法字面量",
+         v_ok.get("valid") is True and v_bad.get("valid") is False),
+        ("编排:默认 worst 与现口径零分叉(u_1009 reject + decision_combine)",
+         r_default.get("action") == "reject"
+         and r_default.get("decision_combine") == "worst"),
+        ("编排:端到端 weight 压低 R001 → u_1009 从 reject 降为 review",
+         r_weight.get("action") == "review"
+         and r_weight.get("decision_combine") == "weight"),
+        ("编排:端到端 sequential 先命中 R003,与 worst 的 R006 reject 分叉",
+         r_seq.get("action") == "review"
+         and r_seq.get("decision_combine") == "sequential"
+         and r_seq_worst.get("action") == "reject"
+         and r_seq_worst.get("decision_combine") == "worst"),
     ]
 
     # -- 阈值扫描:小样本上全部曲线平直 -> 拒绝出图,只解释原因(教训:曾输出
@@ -3161,7 +3348,12 @@ def run_serve_layer() -> int:
             ])
         event = {"uid": "u_1002", "type": "coupon_claim", "ts": 1784109633}
         offline = rule_eval(dict(event), use_current_policy=True)
+        logp = ROOT / "out" / "serve_decisions.jsonl"
+        n0 = len(logp.read_text(encoding="utf-8").splitlines()) if logp.exists() else 0
         code, online = _req("/decide", event)
+        n1 = len(logp.read_text(encoding="utf-8").splitlines()) if logp.exists() else 0
+        code2, online2 = _req("/decide", event)
+        n2 = len(logp.read_text(encoding="utf-8").splitlines()) if logp.exists() else 0
         bad_code, _ = _req("/decide", {"type": "order"})  # 缺 uid
         return _report("在线决策服务冒烟(离线)", [
             ("健康检查带策略版本", health is not None and health[1].get("ok") is True
@@ -3169,8 +3361,16 @@ def run_serve_layer() -> int:
             ("线上决策与离线 rule_eval 一致", code == 200
              and online["action"] == offline["action"]
              and online["rules"] == sorted({h["rule_id"] for h in offline["hits"]})),
+            ("线上带回 reason_codes 与 escalate",
+             code == 200 and online.get("escalate_to_human") is True
+             and online.get("agent_cannot_override") is True
+             and "R002_VELOCITY" in (online.get("reason_codes") or [])),
+            ("同事件幂等:第二次不写日志且标 idempotent_replay",
+             code2 == 200 and online2.get("idempotent_replay") is True
+             and online2["action"] == online["action"]
+             and n1 == n0 + 1 and n2 == n1),
             ("坏请求 400 而非 500", bad_code == 400),
-            ("决策留痕(serve_decisions.jsonl)", (ROOT / "out" / "serve_decisions.jsonl").exists()),
+            ("决策留痕(serve_decisions.jsonl)", logp.exists()),
         ])
     finally:
         proc.terminate()

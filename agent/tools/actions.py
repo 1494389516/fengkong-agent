@@ -43,6 +43,7 @@ def _save_pending(items: List[Dict]) -> None:
 def _limit_violations(values: Dict, current: Dict) -> List[str]:
     """逐参数校验变更幅度,返回违规说明列表(空=全部通过)。
     - 开关键:取值只允许 0/1,其余(含 0.5 这类)一律拒。
+    - 枚举键:只接受 ENUM_KEYS 声明的字面量,不走 ±50%(worst→vote 不是变幅)。
     - 数值键:按 ±MAX_CHANGE_RATIO 限速;现值为 0 时比例无意义,任何非零变更
       都是无穷变幅,一律拒(需先小步离开 0)—— 之前 `and current[k]` 会在
       现值 0 时短路跳过整个检查,让被某版本置 0 的参数(如 r006_reject_rooted=0)
@@ -52,6 +53,11 @@ def _limit_violations(values: Dict, current: Dict) -> List[str]:
         if k in policy.SWITCH_KEYS:
             if v not in (0, 1):
                 bad.append("%s: 开关键只接受 0/1,收到 %s" % (k, v))
+            continue
+        if k in policy.ENUM_KEYS:
+            allowed = policy.ENUM_KEYS[k]
+            if v not in allowed:
+                bad.append("%s: 枚举键只接受 %s,收到 %s" % (k, "/".join(allowed), v))
             continue
         cur = current[k]
         if cur == 0:
@@ -207,7 +213,8 @@ def threshold_propose(values: Dict, reason: str):
     if bad:
         return {"status": "rejected_rate_limit",
                 "detail": bad,
-                "note": "开关键只接受 0/1;数值键单次变幅限速 ±%d%%(防被极端数据/"
+                "note": "开关键只接受 0/1;枚举键只接受声明字面量且不限速;"
+                        "数值键单次变幅限速 ±%d%%(防被极端数据/"
                         "被养过的基线一次带飞),现值为 0 的键任何非零变更都超限,"
                         "确需大改请分步提案并逐步验证" % int(policy.MAX_CHANGE_RATIO * 100)}
     pending = _load_pending()
@@ -307,4 +314,14 @@ def decide(action_id: int, approve: bool, operator: Optional[str] = None) -> Opt
             **({"applied_detail": applied_detail} if applied_detail else {}),
             "action": action,
         }, ensure_ascii=False) + "\n")
+    if not approve:
+        from .feedback_pipeline import record_override  # 惰性:否决回灌训练信号
+        record_override({
+            "kind": "proposal_denied",
+            "action_kind": kind,
+            "action_id": action.get("action_id"),
+            "decided_by": decided_by,
+            "reason": action.get("reason", ""),
+            "ts": _now_iso(),
+        })
     return action

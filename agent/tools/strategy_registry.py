@@ -25,7 +25,7 @@ from . import tool
 from .datasource import data_dir, pending_actions_path
 from .dataset import dataset_fingerprint
 from .featurelib import FEATURE_CATALOG
-from .policy import DEFAULTS, SWITCH_KEYS
+from .policy import DEFAULTS, ENUM_KEYS, SWITCH_KEYS
 from .rules import RULE_COUNT
 
 REGISTRY_FILE = "strategy_registry.json"
@@ -90,7 +90,11 @@ def validate_strategy(entry: Dict) -> Dict:
     if unknown_keys:
         problems.append("未知阈值参数: %s" % unknown_keys)
     for k, v in thr.items():
-        if k in SWITCH_KEYS and v not in (0, 1):
+        if k in ENUM_KEYS:
+            if v not in ENUM_KEYS[k]:
+                problems.append("枚举键 %s 只接受 %s,收到 %r"
+                                % (k, "/".join(ENUM_KEYS[k]), v))
+        elif k in SWITCH_KEYS and v not in (0, 1):
             problems.append("开关键 %s 只接受 0/1,收到 %r" % (k, v))
         elif not isinstance(v, (int, float)) or isinstance(v, bool):
             problems.append("阈值 %s 必须为数值,收到 %r" % (k, v))

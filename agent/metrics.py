@@ -13,6 +13,7 @@
 - 本模块只算数,不读写任何文件 —— 数据面由调用方(model_eval 工具/
   eval 层)负责。
 """
+import math
 from typing import Dict, List, Optional, Tuple
 
 
@@ -164,3 +165,97 @@ def champion_beats_challenger(champion_metrics: Dict, challenger_metrics: Dict,
         if not ok:
             failed.append(metric)
     return (not failed, failed)
+
+
+def _f1(metrics: Dict) -> Optional[float]:
+    p, r = metrics.get("precision"), metrics.get("recall")
+    if p is None or r is None:
+        return None
+    if (p + r) == 0:
+        return 0.0
+    return round(2.0 * p * r / (p + r), 4)
+
+
+def mcnemar(champion_scores: Dict[str, float], challenger_scores: Dict[str, float],
+            labels: Dict[str, str], threshold: float = 0.5) -> Dict:
+    """配对 McNemar(连续性校正):b=challenger 对且 champion 错,c 相反。
+    p = erfc(sqrt(chi2/2)), df=1。无分歧对时 p/chi2 为 None(不可用,不是 1.0)。
+    〔吸收 Ojuri〕晋升要的是"显著更好",不是"看起来分高一点"。"""
+    ymap = {}
+    for uid, lab in labels.items():
+        if isinstance(lab, dict):
+            lab = lab.get("label")
+        if lab == "fraud":
+            ymap[uid] = 1
+        elif lab == "normal":
+            ymap[uid] = 0
+    b = c = n = 0
+    for uid, y in ymap.items():
+        if uid not in champion_scores or uid not in challenger_scores:
+            continue
+        n += 1
+        c_ok = (1 if champion_scores[uid] >= threshold else 0) == y
+        g_ok = (1 if challenger_scores[uid] >= threshold else 0) == y
+        if (not c_ok) and g_ok:
+            b += 1
+        elif c_ok and (not g_ok):
+            c += 1
+    disc = b + c
+    if disc == 0:
+        return {"b": b, "c": c, "n": n, "n_discordant": 0, "chi2": None,
+                "p_value": None, "significant": False,
+                "challenger_better": False,
+                "note": "无分歧对,McNemar 不可用(小样本或预测完全相同)"}
+    chi2 = (abs(b - c) - 1) ** 2 / float(disc)
+    p = math.erfc(math.sqrt(chi2 / 2.0))
+    return {
+        "b": b, "c": c, "n": n, "n_discordant": disc,
+        "chi2": round(chi2, 4), "p_value": round(p, 6),
+        "significant": p < 0.05,
+        "challenger_better": b > c,
+        "note": "b=challenger对/champion错;c 相反;连续性校正;p<0.05 为显著",
+    }
+
+
+def promotion_significance(champion_metrics: Dict, challenger_metrics: Dict,
+                           champion_scores: Dict[str, float] = None,
+                           challenger_scores: Dict[str, float] = None,
+                           labels: Dict[str, str] = None,
+                           min_delta_f1: float = 0.01,
+                           max_p: float = 0.05) -> Dict:
+    """challenger→champion 的统计门禁。
+
+    小样本诚实:分歧对 <10 时 McNemar 没有效力,只拦"任一指标劣化";
+    分歧对 ≥10 时按 Ojuri 全门:显著更好 且 ΔF1≥min_delta_f1。
+    无 incumbent / 无分数:跳过 McNemar,只做指标不劣化。"""
+    not_worse, failed = champion_beats_challenger(
+        champion_metrics, challenger_metrics)
+    delta_f1 = None
+    f1_c, f1_g = _f1(champion_metrics), _f1(challenger_metrics)
+    if f1_c is not None and f1_g is not None:
+        delta_f1 = round(f1_g - f1_c, 4)
+    mc = None
+    if champion_scores and challenger_scores and labels:
+        mc = mcnemar(champion_scores, challenger_scores, labels)
+    reasons = []
+    if failed:
+        reasons.append("指标劣化: %s" % ",".join(failed))
+    if mc and mc["n_discordant"] >= 10:
+        _p = mc.get("p_value")
+        # 0.0 是「极度显著」,不能用 `p or 1`(0 在布尔里是假)
+        if not (mc["significant"] and mc["challenger_better"]
+                and _p is not None and _p < max_p):
+            reasons.append("McNemar 未显著优于 champion(p=%s)"
+                           % mc.get("p_value"))
+        if delta_f1 is not None and delta_f1 < min_delta_f1:
+            reasons.append("ΔF1=%s < %s" % (delta_f1, min_delta_f1))
+    return {
+        "ok": not reasons,
+        "failed_metrics": failed,
+        "delta_f1": delta_f1,
+        "mcnemar": mc,
+        "reasons": reasons,
+        "not_worse": not_worse,
+        "note": ("分歧对≥10 走 Ojuri 全门(显著+ΔF1);"
+                 "否则只拦劣化(手工 6 账号评估侧不够做 McNemar)"),
+    }

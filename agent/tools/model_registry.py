@@ -12,8 +12,10 @@
     (eval_fingerprint != train_fingerprint,账号零重叠且更晚)—— 同源评估
     是 train/eval leakage,指标不能冒充泛化表现;
   - shadow -> challenger 必须已过评估门禁(metrics 存在且指纹匹配);
-  - challenger -> champion 必须走 pending 审批(actions.decide 批准后才落盘),
-    审批 id 进记录(approval_id),rollback 同样走审批并写审计;
+  - challenger -> champion 必须走过显著性门禁(指标不劣化;分歧对≥10 时
+    再加 McNemar 显著 + ΔF1,见 metrics.promotion_significance)再进
+    pending 审批(actions.decide 批准后才落盘),审批 id 进记录(approval_id),
+    rollback 同样走审批并写审计;
   - 不允许重复 promote(已在目标状态或更远状态 = 拒绝);
   - 非法 rollback(非 champion 回滚)= 拒绝。
 
@@ -202,6 +204,7 @@ def model_eval(name: str, version: str, scores: Dict[str, float],
     metrics["split_disjoint"] = sp["disjoint"]
     entry["metrics"] = metrics
     entry["eval_fingerprint"] = eval_fingerprint
+    entry["eval_scores"] = {str(k): float(v) for k, v in scores.items()}
     entry["evaluated_at"] = _now_iso()
     _save(items)
     return {"status": "evaluated", "name": name, "version": version,
@@ -212,9 +215,9 @@ def model_eval(name: str, version: str, scores: Dict[str, float],
     name="model_promote",
     description=(
         "模型状态转移:candidate->shadow 自动;shadow->challenger 需已通过"
-        "评估门禁(先 model_eval,且指纹匹配);challenger->champion 必须走"
-        "审批(提交待审批,人批准后生效,champion 同时只有一个)。不允许重复"
-        "晋升。"
+        "评估门禁(先 model_eval,且指纹匹配);challenger->champion 先过"
+        "显著性门禁(不劣化;大样本再加 McNemar+ΔF1)再走审批(人批准后"
+        "生效,champion 同时只有一个)。不允许重复晋升。"
     ),
     parameters={
         "type": "object",
@@ -253,13 +256,38 @@ def model_promote(name: str, version: str, to: str, reason: str = ""):
         _save(items)
         return {"status": "promoted", "name": name, "version": version,
                 "to": "challenger", "note": "已过评估门禁"}
-    # challenger -> champion:必须人审批
+    # challenger -> champion:先统计门禁,再人审批
+    gate = _significance_gate(entry, items)
+    if not gate["ok"]:
+        return {"error": "显著性门禁:%s" % "; ".join(gate["reasons"]),
+                "gate": gate}
     aid = _submit_pending({
         "kind": "model_promote", "name": name, "version": version,
         "to": "champion", "reason": reason, "requested_at": _now_iso(),
+        "gate_delta_f1": gate.get("delta_f1"),
+        "gate_note": gate.get("note"),
     })
     return {"status": "pending_confirmation", "action_id": aid,
+            "gate": gate,
             "note": "已提交待审批,人批准后 champion 才生效(旧 champion 自动退役)"}
+
+
+def _significance_gate(entry: Dict, items: List[Dict]) -> Dict:
+    """incumbent champion vs 本 challenger。无 champion = 首个上线,跳过。"""
+    champs = [m for m in items if m.get("status") == "champion"]
+    if not champs:
+        return {"ok": True, "reasons": [], "delta_f1": None, "mcnemar": None,
+                "failed_metrics": [],
+                "note": "无 incumbent champion,首个上线跳过 McNemar"}
+    from ..metrics import promotion_significance
+    ch = champs[0]
+    return promotion_significance(
+        ch.get("metrics") or {},
+        entry.get("metrics") or {},
+        ch.get("eval_scores") or {},
+        entry.get("eval_scores") or {},
+        load_labels(),
+    )
 
 
 def apply_champion_promote(action: Dict, decided_by: str) -> Dict:

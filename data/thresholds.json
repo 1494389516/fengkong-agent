@@ -33,7 +33,17 @@
    "graylist_observe_days": 30,
    "graylist_promote_min_review": 3,
    "model_score_review_threshold": 0.9,
-   "model_score_reject_threshold": 0.98
+   "model_score_reject_threshold": 0.98,
+   "decision_combine": "worst",
+   "r001_weight": 1.0,
+   "r002_weight": 1.0,
+   "r003_weight": 1.0,
+   "r004_weight": 1.0,
+   "r005_weight": 1.0,
+   "r006_weight": 1.0,
+   "r007_weight": 1.0,
+   "combine_weight_review": 1.0,
+   "combine_weight_reject": 2.0
   }
  },
  {

@@ -15,7 +15,8 @@ from ..engine import engine_status as _engine_status
     name="engine_status",
     description=(
         "查询规则判定的来源通道:remote_engine(生产引擎 dry-run)/ "
-        "local_rules(本地备份)。rule_eval 返回的 source 字段与之对应。"
+        "local_rules(本地备份)。附 circuit(粘滞熔断状态)。"
+        "rule_eval 返回的 source 字段与之对应。"
     ),
     parameters={"type": "object", "properties": {}},
 )

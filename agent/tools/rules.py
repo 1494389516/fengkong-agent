@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """规则试跑工具:对单个事件跑一遍规则集,返回命中规则与处置动作。
 
-处置动作只有三档:pass < review < reject,多条规则命中时取最重的。
+处置动作只有三档:pass < review < reject。多条命中时的合成由
+policy.decision_combine 声明:默认 worst(取最重,现口径),也可 sequential /
+vote / weight。编排只改 action,hits 仍全算全留(证据链)。
 """
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import tool
 from .blacklist import active_records
@@ -14,6 +16,98 @@ from .policy import active_policy
 
 ACTION_ORDER = {"pass": 0, "review": 1, "reject": 2}
 RULE_COUNT = 6  # 当前规则集条数,便于 agent 感知覆盖范围
+# 顺序合成的规则序:与代码布局无关,R001 名单优先。先命中先定,规则仍跑完。
+RULE_COMBINE_ORDER = ("R001", "R002", "R003", "R004", "R005", "R006", "R007")
+COMBINE_MODES = ("worst", "sequential", "vote", "weight")
+
+
+def _weight_score(hits: List[Dict], policy: Dict) -> float:
+    """weight 模式的加权分:每条 hit 贡献 weight(rule) * ACTION_ORDER[action]。"""
+    score = 0.0
+    for h in hits:
+        rid = (h.get("rule_id") or "").lower()
+        raw_w = policy.get("%s_weight" % rid, 1.0)
+        try:
+            w = float(raw_w)
+        except (TypeError, ValueError):
+            w = 1.0
+        score += w * ACTION_ORDER.get(h.get("action"), 0)
+    return score
+
+
+def combine_hits(hits: List[Dict], policy: Dict) -> Tuple[str, Dict[str, Any]]:
+    """按 decision_combine 把 hits 合成最终 action。非法模式回退 worst,
+    并在 meta 里打 combine_fallback(不静默)。hits 本身不改。"""
+    raw = policy.get("decision_combine", "worst")
+    fallback = None
+    mode = raw
+    if mode not in COMBINE_MODES:
+        fallback = raw
+        mode = "worst"
+
+    if mode == "sequential":
+        action = "pass"
+        for rid in RULE_COMBINE_ORDER:
+            for h in hits:
+                if h.get("rule_id") == rid:
+                    action = h.get("action") or "pass"
+                    break
+            else:
+                continue
+            break
+    elif mode == "vote":
+        counts: Dict[str, int] = {}
+        for h in hits:
+            a = h.get("action")
+            if a in ACTION_ORDER:
+                counts[a] = counts.get(a, 0) + 1
+        action = "pass"
+        best_n = 0
+        for a in ("pass", "review", "reject"):
+            n = counts.get(a, 0)
+            if n > best_n or (n == best_n and n > 0
+                              and ACTION_ORDER[a] > ACTION_ORDER[action]):
+                action, best_n = a, n
+    elif mode == "weight":
+        score = _weight_score(hits, policy)
+        try:
+            reject_cut = float(policy.get("combine_weight_reject", 2))
+        except (TypeError, ValueError):
+            reject_cut = 2.0
+        try:
+            review_cut = float(policy.get("combine_weight_review", 1))
+        except (TypeError, ValueError):
+            review_cut = 1.0
+        if score >= reject_cut:
+            action = "reject"
+        elif score >= review_cut:
+            action = "review"
+        else:
+            action = "pass"
+    else:  # worst
+        action = "pass"
+        for h in hits:
+            if ACTION_ORDER.get(h.get("action"), 0) > ACTION_ORDER[action]:
+                action = h["action"]
+        score = None
+
+    meta: Dict[str, Any] = {"decision_combine": mode}
+    if fallback is not None:
+        meta["combine_fallback"] = fallback
+    if mode == "weight":
+        meta["combine_score"] = score
+    return action, meta
+
+
+def apply_combine(result: Dict[str, Any], policy: Dict) -> Dict[str, Any]:
+    """把 combine_hits 写进判定结果。R007 追加 hit 后必须整表重跑,
+    所以先清掉上一轮的 fallback/score,避免陈旧字段留在结果里。"""
+    action, meta = combine_hits(result.get("hits") or [], policy)
+    result["action"] = action
+    result.pop("combine_fallback", None)
+    result.pop("combine_score", None)
+    result.update(meta)
+    return result
 
 # 阈值不再是本文件常量:全部经 policy.active_policy() 解析(版本化 + what-if
 # 覆盖),定阈依据见 policy.DEFAULTS 的注释,数值回归见 eval 第 1 层。
@@ -102,7 +196,7 @@ def rule_eval(event: Dict[str, Any], use_current_policy: bool = False):
 
 
 def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False,
-                      threshold_overrides: Dict[str, float] = None):
+                      threshold_overrides: Dict[str, Any] = None):
     """本地 R001-R006 实现 —— 骨架替身/降级备份,不是独立引擎。
     公开判定入口是 agent.engine.evaluate_event(经上方的 rule_eval 工具)。
     threshold_overrides:active strategy 的阈值覆盖(引擎层解析后传入,
@@ -242,18 +336,14 @@ def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False,
 
     _apply_whitelist(hits, white, white_conflict)
 
-    action = "pass"
-    for h in hits:
-        if ACTION_ORDER.get(h["action"], 0) > ACTION_ORDER[action]:
-            action = h["action"]
     result = {
         "hits": hits,
-        "action": action,
         "rule_count_evaluated": RULE_COUNT,
         "policy_version": p["_version"],
         "policy_overridden": p["_overridden"],
         "features_snapshot": feats,
     }
+    apply_combine(result, p)
     if white:
         result["whitelist"] = {"records": white, "applied": not white_conflict}
         if white_conflict:

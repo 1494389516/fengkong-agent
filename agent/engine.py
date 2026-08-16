@@ -38,6 +38,7 @@ Decision Plane 接入(P0-2/P0-3,骨架的"治理 -> 判定"打通):
 """
 import json
 import os
+import time
 import urllib.request
 from typing import Any, Dict, List
 
@@ -47,6 +48,94 @@ DRYRUN_TOKEN_ENV = "FK_ENGINE_DRYRUN_TOKEN"
 # P0-2 模型服务端点(可选):POST {"uid","event"} -> {"score": 0~1}。
 # 未配置时走本地 data/model_scores.json(骨架模拟模型服务)。
 MODEL_URL_ENV = "FK_ENGINE_MODEL_URL"
+# 粘滞熔断(Ojuri 热路径纪律):远程连续失败 N 次后冷却期内不再打引擎,
+# 本地降级并打 circuit_open —— 避免引擎挂了还按事件打满超时。
+CIRCUIT_FAILURES_ENV = "FK_ENGINE_CIRCUIT_FAILURES"
+CIRCUIT_COOLDOWN_ENV = "FK_ENGINE_CIRCUIT_COOLDOWN"
+
+_RULE_CODES = {
+    "R001": "R001_LIST",
+    "R002": "R002_VELOCITY",
+    "R003": "R003_AMOUNT",
+    "R004": "R004_AGE_MISMATCH",
+    "R005": "R005_REG_SCORE",
+    "R006": "R006_DEVICE",
+    "R007": "R007_MODEL",
+    "ENGINE": "ENGINE_REMOTE",
+}
+
+# closed → 连续失败达阈值 → open → 冷却结束 half_open 探活 → 成功回 closed
+_circuit: Dict[str, Any] = {"failures": 0, "opened_at": 0.0, "state": "closed"}
+
+
+def reset_circuit() -> None:
+    """测试/显式恢复:清掉熔断计数。生产靠冷却自动 half-open,不靠这个。"""
+    _circuit.update(failures=0, opened_at=0.0, state="closed")
+
+
+def _circuit_threshold() -> int:
+    return max(1, int(os.environ.get(CIRCUIT_FAILURES_ENV, "3") or 3))
+
+
+def _circuit_cooldown() -> float:
+    return float(os.environ.get(CIRCUIT_COOLDOWN_ENV, "30") or 30)
+
+
+def _circuit_allow_remote() -> bool:
+    if _circuit["state"] == "closed":
+        return True
+    if _circuit["state"] == "open":
+        if time.monotonic() - _circuit["opened_at"] >= _circuit_cooldown():
+            _circuit["state"] = "half_open"
+            return True
+        return False
+    return True
+
+
+def _circuit_on_success() -> None:
+    reset_circuit()
+
+
+def _circuit_on_failure() -> None:
+    _circuit["failures"] = int(_circuit["failures"]) + 1
+    if _circuit["state"] == "half_open" or _circuit["failures"] >= _circuit_threshold():
+        _circuit["state"] = "open"
+        _circuit["opened_at"] = time.monotonic()
+
+
+def annotate_decision(result: Dict[str, Any]) -> Dict[str, Any]:
+    """判定出口统一打标(Flagr/Ojuri):结构化 reason_codes、escalate_to_human、
+    agent_cannot_override。decision_combine / combine_score / combine_fallback
+    由 combine_hits 写入,本函数原样露出,远程缺失时不伪造 worst。
+    Agent 只能读这些字段,不能改 action —— 字段本身是契约,dispatch
+    没有"改判定"工具。"""
+    codes: List[str] = []
+    seen = set()
+    for h in result.get("hits") or []:
+        rid = h.get("rule_id") or "UNKNOWN"
+        code = _RULE_CODES.get(rid, rid)
+        if code not in seen:
+            seen.add(code)
+            codes.append(code)
+        if h.get("whitelisted") and h.get("original_action") == "reject":
+            if "WHITELIST_DOWNGRADE" not in seen:
+                seen.add("WHITELIST_DOWNGRADE")
+                codes.append("WHITELIST_DOWNGRADE")
+    if result.get("degraded"):
+        if "DEGRADED_FALLBACK" not in seen:
+            codes.append("DEGRADED_FALLBACK")
+    if result.get("circuit_open"):
+        if "CIRCUIT_OPEN" not in seen:
+            codes.append("CIRCUIT_OPEN")
+    if result.get("gray_escalation_hint") and "GRAY_ESCALATION" not in seen:
+        codes.append("GRAY_ESCALATION")
+    result["reason_codes"] = codes
+    result["escalate_to_human"] = bool(
+        result.get("action") in ("review", "reject")
+        or result.get("degraded")
+        or "WHITELIST_DOWNGRADE" in codes)
+    result["agent_cannot_override"] = True
+    return result
 
 
 def _overridden() -> bool:
@@ -183,8 +272,10 @@ def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
       与规则阈值同级治理:默认 0.9/0.98 是"关着"的,生效要审批调低)。
     阈值口径与规则一致:use_current_policy=True 用当前,否则按事件 ts 回放
     当时版本 —— 否则回放历史事件时规则用历史阈值、模型用当前阈值,口径劈叉。
-    命中后按 action 权重与既有规则取最重。rule_count_evaluated 相应 +1
-    (R007 是引擎级规则,不属 R001-R006 的静态规则集)。"""
+    命中后整表按 decision_combine 重合成(不能再按最重抬 action,
+    否则 vote/sequential/weight 一碰到 champion 就被盖回 worst)。
+    rule_count_evaluated 相应 +1(R007 是引擎级规则,不属 R001-R006
+    的静态规则集)。"""
     ch = _champion()
     if not ch:
         return result
@@ -206,7 +297,7 @@ def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
             return result
     result["model_score"] = score
     from .tools.policy import active_policy
-    from .tools.rules import ACTION_ORDER, _hit
+    from .tools.rules import apply_combine, _hit
     p = active_policy(None if use_current_policy else event.get("ts"))
     # 策略覆盖同样作用于模型阈值(与规则阈值一套口径,不回放时覆盖为空)
     if use_current_policy and strategy_thresholds and not p.get("_overridden"):
@@ -223,8 +314,7 @@ def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
          % (result["model_version"], score, hit_action, p[
             "model_score_reject_threshold" if hit_action == "reject"
             else "model_score_review_threshold"]), hit_action)
-    if ACTION_ORDER[hit_action] > ACTION_ORDER[result.get("action", "pass")]:
-        result["action"] = hit_action
+    apply_combine(result, p)
     result["rule_count_evaluated"] = (result.get("rule_count_evaluated") or 0) + 1
     result["model_signal"] = "R007 命中(模型分 %.3f)" % score
     return result
@@ -268,12 +358,20 @@ def evaluate_event(event: Dict[str, Any],
         r["source"] = "local_rules"
         r["source_note"] = ("what-if 覆盖生效,强制本地模拟"
                             "(覆盖参数是本地模拟概念,生产 dry-run 不接收)")
-        return r
+        return annotate_decision(r)
     url = os.environ.get(DRYRUN_URL_ENV)
     if not url:
         r = _local_eval(event, use_current_policy, strategy)
         r["source"] = "local_rules"
-        return r
+        return annotate_decision(r)
+    if not _circuit_allow_remote():
+        r = _local_eval(event, use_current_policy, strategy)
+        r["source"] = "local_rules_fallback"
+        r["degraded"] = True
+        r["circuit_open"] = True
+        r["degraded_reason"] = "circuit_open"
+        r["engine_error"] = "circuit_open: 远程连续失败,冷却期内不打引擎"
+        return annotate_decision(r)
     try:
         payload = {
             "event": event,
@@ -290,14 +388,19 @@ def evaluate_event(event: Dict[str, Any],
         ch = _champion()
         if ch:
             r["model_version"] = "%s %s" % (ch["name"], ch["version"])
-        return r
+        _circuit_on_success()
+        return annotate_decision(r)
     except Exception as e:  # noqa: BLE001
         # 显式降级:结果必须带 degraded/engine_error,让结论可被审计到
+        _circuit_on_failure()
         r = _local_eval(event, use_current_policy, strategy)
         r["source"] = "local_rules_fallback"
         r["degraded"] = True
         r["engine_error"] = "%s: %s" % (type(e).__name__, e)
-        return r
+        if _circuit["state"] == "open":
+            r["circuit_open"] = True
+            r["degraded_reason"] = "circuit_open"
+        return annotate_decision(r)
 
 
 def evaluate_batch(events: List[Dict[str, Any]],
@@ -314,7 +417,16 @@ def evaluate_batch(events: List[Dict[str, Any]],
         for ev in events:
             r = _local_eval(ev, use_current_policy, strategy)
             r["source"] = "local_rules"
-            out.append(r)
+            out.append(annotate_decision(r))
+        return out
+    if not _circuit_allow_remote():
+        out = []
+        for ev in events:
+            r = _local_eval(ev, use_current_policy, strategy)
+            r.update({"source": "local_rules_fallback", "degraded": True,
+                      "circuit_open": True, "degraded_reason": "circuit_open",
+                      "engine_error": "circuit_open: 远程连续失败,冷却期内不打引擎"})
+            out.append(annotate_decision(r))
         return out
     try:
         payload = {
@@ -337,14 +449,21 @@ def evaluate_batch(events: List[Dict[str, Any]],
                 r["strategy_ambiguity"] = strategy["strategy_ambiguity"]
             if ch:
                 r["model_version"] = "%s %s" % (ch["name"], ch["version"])
+            annotate_decision(r)
+        _circuit_on_success()
         return out
     except Exception as e:  # noqa: BLE001
+        _circuit_on_failure()
         out = []
+        opened = _circuit["state"] == "open"
         for ev in events:
             r = _local_eval(ev, use_current_policy, strategy)
             r.update({"source": "local_rules_fallback", "degraded": True,
                       "engine_error": "%s: %s" % (type(e).__name__, e)})
-            out.append(r)
+            if opened:
+                r["circuit_open"] = True
+                r["degraded_reason"] = "circuit_open"
+            out.append(annotate_decision(r))
         return out
 
 
@@ -352,9 +471,16 @@ def engine_status() -> Dict[str, Any]:
     """当前判定通道:远程 dry-run 还是本地实现。agent 下结论前应先知道
     自己的判定来自哪里(唯一引擎纪律,见 system.md)。"""
     url = os.environ.get(DRYRUN_URL_ENV)
+    circuit = {
+        "state": _circuit["state"],
+        "failures": _circuit["failures"],
+        "threshold": _circuit_threshold(),
+        "cooldown_s": _circuit_cooldown(),
+    }
     if not url:
         return {
             "mode": "local_rules",
+            "circuit": circuit,
             "note": ("未配置 FK_ENGINE_DRYRUN_URL:判定来自本地 R001-R006 实现"
                      "(骨架替身/降级备份)。接真实系统后配置生产引擎 dry-run "
                      "端点,本地实现自动降级为备份。"),
@@ -362,6 +488,7 @@ def engine_status() -> Dict[str, Any]:
     return {
         "mode": "remote_engine",
         "url": url.split("?")[0],  # 不把 query 里的凭据带进结论
+        "circuit": circuit,
         "note": ("远程 dry-run 优先;调用失败自动降级本地并带 degraded/"
-                 "engine_error 标记,结论必须声明降级。"),
+                 "engine_error 标记,连续失败触发粘滞熔断(冷却期内不打引擎)。"),
     }

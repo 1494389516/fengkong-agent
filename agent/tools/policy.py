@@ -20,13 +20,14 @@
 """
 import json
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import tool
 from .datasource import _load_json, thresholds_path
 
 # 全部阈值的缺省值(隐式 v0)。注释保留原 rules/monitor 的定阈依据。
-DEFAULTS: Dict[str, float] = {
+# 值以数值为主;decision_combine 是枚举字面量(见 ENUM_KEYS),不当数字限速。
+DEFAULTS: Dict[str, Any] = {
     # R002:样本机器人 gap=3s/20 次,正常最快 300s/6 次,带宽很大取偏严一侧
     "r002_max_gap_seconds": 30,   # 人手连点很难稳定低于 30s
     "r002_min_events": 10,        # 次数下限,偶发快速操作不触发
@@ -72,6 +73,18 @@ DEFAULTS: Dict[str, float] = {
     # champion 就自动拦截:上线动作与生效力度是两件事,各自留痕。
     "model_score_review_threshold": 0.90,
     "model_score_reject_threshold": 0.98,
+    # 多规则合成(coolGuard 编排):hits 仍全算全留,变的是 action 怎么从 hits
+    # 长出来。默认 worst=现口径(多规则取最重),换模式与阈值同级治理。
+    "decision_combine": "worst",
+    "r001_weight": 1.0,
+    "r002_weight": 1.0,
+    "r003_weight": 1.0,
+    "r004_weight": 1.0,
+    "r005_weight": 1.0,
+    "r006_weight": 1.0,
+    "r007_weight": 1.0,
+    "combine_weight_review": 1.0,   # weight 模式:score >= 此值 → review
+    "combine_weight_reject": 2.0,   # weight 模式:score >= 此值 → reject
 }
 
 # rule_backtest / chart_threshold_sweep 允许覆盖的键(规则组)。
@@ -82,7 +95,10 @@ RULE_KEYS = ("r002_max_gap_seconds", "r002_min_events", "r002_reject_min_ips",
              "r004_max_account_age_seconds", "r004_min_amount",
              "r005_min_register_score", "r005_max_account_age_seconds",
              "r006_reject_emulator", "r006_reject_rooted", "r006_reject_hook",
-             "model_score_review_threshold", "model_score_reject_threshold")
+             "model_score_review_threshold", "model_score_reject_threshold",
+             "r001_weight", "r002_weight", "r003_weight", "r004_weight",
+             "r005_weight", "r006_weight", "r007_weight",
+             "combine_weight_review", "combine_weight_reject")
 
 # 开关型参数(取值只允许 0/1):强拒开/关。显式声明而非按值域猜"是不是开关"
 # —— 按 {现值,新值}⊆{0,1} 推断会把恰好取 0/1 的数值参数误判成开关而豁免限速,
@@ -90,9 +106,16 @@ RULE_KEYS = ("r002_max_gap_seconds", "r002_min_events", "r002_reject_min_ips",
 # 但要卡死取值域只能 0/1。
 SWITCH_KEYS = ("r006_reject_emulator", "r006_reject_rooted", "r006_reject_hook")
 
+# 枚举型参数:取值是字面量不是数。±50% 限速无意义(worst→vote 不是"变了 100%"),
+# 但要卡死取值域。与 SWITCH_KEYS 同级 —— 显式声明,不按类型猜。
+# decision_combine 不进 RULE_KEYS:阈值扫描扫字符串无意义。
+ENUM_KEYS = {
+    "decision_combine": ("worst", "sequential", "vote", "weight"),
+}
+
 MAX_CHANGE_RATIO = 0.5  # 提案限速:单参数变幅超 ±50% 拒绝,防一次校准被极端数据带飞
 
-_OVERRIDES: Dict[str, float] = {}
+_OVERRIDES: Dict[str, Any] = {}
 
 
 def _versions() -> List[Dict]:
