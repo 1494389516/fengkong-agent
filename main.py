@@ -3,6 +3,7 @@
 
 命令:
   /reset        开一个干净案例(清空对话上下文,session token 计数保留)—— ③ 案例隔离
+  /pack <name>  切换工具包并 reset(investigate/duty/graph/strategy/analyst/full)
   /pending      查看 agent 提交的待审批处置(名单写入申请)
   /approve <id> 批准一条申请,写入名单库并记审计日志
   /deny <id>    驳回一条申请(同样留审计记录)
@@ -15,7 +16,7 @@
 import sys
 
 from agent.core import Agent
-from agent.tools import actions
+from agent.tools import actions, schemas
 
 
 def _fmt_round_usage(u):
@@ -38,7 +39,10 @@ def main():
     ))
     if agent._run_log_enabled:
         print("运行日志已开启: out/agent_runs.jsonl(指标聚合:eval/agent_metrics.py)")
-    print("命令:/reset 开新案例 · /pending 待审批 · /approve|/deny <id> 审批 · exit 退出。")
+    print("工具包: %s(%d 个工具)。/pack 切换 investigate/duty/graph/strategy/analyst/full。" % (
+        agent.tool_pack, len(schemas(pack=agent.tool_pack)),
+    ))
+    print("命令:/reset 开新案例 · /pack <包> 切工具 · /pending 待审批 · /approve|/deny <id> 审批 · exit 退出。")
     print("工具调用与 token 用量会实时打印。")
     while True:
         try:
@@ -54,6 +58,19 @@ def main():
         if low == "/reset":  # ③ 案例隔离
             agent.reset()
             print("  [已重置] 开一个干净案例上下文;session token 计数保留。")
+            continue
+        if low == "/pack" or low.startswith("/pack "):
+            parts = user_input.split(None, 1)
+            if len(parts) != 2:
+                print("  用法:/pack investigate|duty|graph|strategy|analyst|full")
+                continue
+            try:
+                info = agent.set_pack(parts[1].strip())
+            except ValueError as e:
+                print("  [错误] %s" % e)
+                continue
+            print("  [工具包] %s · %d 个工具(已 reset 上下文,schema 前缀已变)" % (
+                info["pack"], info["tool_count"]))
             continue
         if low == "/pending":
             try:

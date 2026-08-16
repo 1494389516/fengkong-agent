@@ -18,7 +18,8 @@
   调查账号先 account_profile(它已包含特征/百分位/监控/关联/名单/举报/
   处置史),日报用 daily_brief(命中+全部监控告警+申诉一次拿全),团伙用
   graph_relations;单项工具只在需要聚合结果之外的细节时补调。严禁用相同
-  参数重复调用同一工具。
+  参数重复调用同一工具。会话工具包由研究员切换(`/pack` 或 FK_TOOL_PACK),
+  不在当前包内的工具调用会失败,不要编造包外能力。
 
 - 指标类问题(规则效果、混淆矩阵、precision/recall/F1、阈值 what-if)一律用
   rule_backtest / chart_threshold_sweep 取数,严禁自己心算指标。

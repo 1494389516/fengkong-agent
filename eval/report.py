@@ -120,9 +120,12 @@ def render_report(records: list, offline: bool = False,
         "|---|---|---|",
     ]
     if metrics:
+        from measure_costs import SCHEMA_BUDGET, SYSTEM_PROMPT_BUDGET
         lines += [
-            "| 工具 schema | %d chars | 18000 |" % metrics["schemas_chars"],
-            "| system prompt | %d chars | 3600 |" % metrics["system_chars"],
+            "| 工具 schema | %d chars | %d |" % (
+                metrics["schemas_chars"], SCHEMA_BUDGET),
+            "| system prompt | %d chars | %d |" % (
+                metrics["system_chars"], SYSTEM_PROMPT_BUDGET),
         ]
     else:
         lines.append("| (依赖未装,成本面不可用) | - | - |")
@@ -200,15 +203,25 @@ def refresh_agent_card(card_path=None, records=None) -> int:
         return 0
     metrics = _structural_metrics()
     from agent.tools import schemas  # 工具数取真实注册表
+    from measure_costs import SCHEMA_BUDGET, SYSTEM_PROMPT_BUDGET
     ch = _champion_model()
     n_tools = len(schemas())
     n_asserts = _assert_total(records)
+    n_cases = 0
+    try:
+        import json as _j
+        cases = _j.loads((ROOT / "eval" / "cases.json").read_text(encoding="utf-8"))
+        n_cases = len(cases.get("agent_cases", []))
+    except Exception:  # noqa: BLE001 案例数缺失不阻塞其余同步
+        pass
     values = {
         "git commit": "`%s`" % git_commit(),
         "数据指纹": "`%s`" % data_fingerprint(),
         "工具数": str(n_tools),
-        "工具 schema": "%s chars(预算 18000)" % metrics.get("schemas_chars", "-"),
-        "system prompt": "%s chars(预算 5700)" % metrics.get("system_chars", "-"),
+        "工具 schema": "%s chars(预算 %d)" % (
+            metrics.get("schemas_chars", "-"), SCHEMA_BUDGET),
+        "system prompt": "%s chars(预算 %d)" % (
+            metrics.get("system_chars", "-"), SYSTEM_PROMPT_BUDGET),
         "最近刷新(UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "MODEL_CHAMPION": ("无" if not ch else "%s %s" % (ch["name"], ch["version"])),
         "MODEL_AUC": "-" if not ch else ch.get("auc"),
@@ -242,6 +255,12 @@ def refresh_agent_card(card_path=None, records=None) -> int:
     text, n = re.subn(r"工具层 \d+ 个\(\`\d+\`\)",
                       "工具层 %d 个(\`%d\`)" % (n_tools, n_tools), text)
     refreshed += n
+    if n_cases:
+        text, n = re.subn(r"\(\d+ 个黄金案例", "(%d 个黄金案例" % n_cases, text)
+        refreshed += n
+        text, n = re.subn(r"agent 层 \d+ 案例尚未实弹",
+                          "agent 层 %d 案例尚未实弹" % n_cases, text)
+        refreshed += n
     p.write_text(text, encoding="utf-8")
     return refreshed
 
@@ -304,6 +323,19 @@ def refresh_readme(readme_path=None, records=None) -> int:
     if n_asserts:
         text, n = re.subn(r"170\+ 项", "%d 项" % n_asserts, text)
         refreshed += n
+        # 叙述里手写的离线断言数(历史 185/170 等)跟本次评估对齐,避免快照与正文劈叉
+        for pat, repl in (
+            (r"当前 \d+ 项,全离线零 token",
+             "当前 %d 项,全离线零 token" % n_asserts),
+            (r"不需要 key,\d+ 项断言",
+             "不需要 key,%d 项断言" % n_asserts),
+            (r"eval/ \d+ 项离线断言",
+             "eval/ %d 项离线断言" % n_asserts),
+            (r"离线\(\d+ 项,零 token",
+             "离线(%d 项,零 token" % n_asserts),
+        ):
+            text, n = re.subn(pat, repl, text)
+            refreshed += n
     if n_cases:
         text, n = re.subn(r"\d+ 个黄金案例", "%d 个黄金案例" % n_cases, text)
         refreshed += n

@@ -14,7 +14,7 @@
 
 项目的两根支柱,所有设计都围绕它们展开:
 
-1. **效果评估**:agent 的每个能力都有离线断言钉住(当前 185 项,全离线零 token),
+1. **效果评估**:agent 的每个能力都有离线断言钉住(当前 367 项,全离线零 token),
    agent 本体行为有四维黄金案例(结论 / 取证轨迹 / 轨迹效率 / token 预算);
 2. **token 成本**:上下文工程 ①~⑦ 七道防线 + 成本预算化(超限即评估变红)。
 
@@ -23,14 +23,14 @@
 
 | 项 | 值 |
 |---|---|
-| git commit | `81f09c2` |
+| git commit | `e2fe81b` |
 | 工具数 | 82 |
 | 工具 schema | 36397 chars |
-| system prompt | 5590 chars |
-| 数据指纹 | `4d4596c1cdde5d1a` |
-| 离线断言数 | 355 |
+| system prompt | 5653 chars |
+| 数据指纹 | `7be5e1485fcf2744` |
+| 离线断言数 | 367 |
 | agent 黄金案例 | 24 |
-| 最近刷新(UTC) | 2026-08-15T14:42:38Z |
+| 最近刷新(UTC) | 2026-08-16T02:33:52Z |
 
 <!-- AUTO-SYNC:FK-DOC-SNAPSHOT-END -->
 ## 快速开始
@@ -42,12 +42,15 @@ pip install -r requirements.txt
 export DEEPSEEK_API_KEY=sk-...
 python3 main.py
 
-# 离线评估(不需要 key,185 项断言)
+# 离线评估(不需要 key,367 项断言)
 python3 eval/run_eval.py
 
 # 生成大规模合成数据(约 250 账号、五类欺诈模式)并切换使用
 python3 data/gen_sample.py
 FK_DATASET=gen python3 main.py
+
+# 生成大规模合成数据并跑一日接数(健康/回测/对账/parity/门禁)
+python3 eval/day1.py
 
 # token 成本测量
 python3 eval/measure_costs.py --dataset gen
@@ -92,7 +95,7 @@ flowchart TB
     CORE --> PRIV --> T1 & T2 & T3 & T4 & T5 & T6
     T1 & T2 & T3 & T4 & T5 & T6 --> FL --> DS
     T2 --> POL --> DS
-    EVAL[eval/ 185 项离线断言 + agent 层四维案例 + 成本预算] -. 回归门禁 .-> 工具层 & AGENT
+    EVAL[eval/ 367 项离线断言 + agent 层四维案例 + 成本预算] -. 回归门禁 .-> 工具层 & AGENT
 ```
 
 ```
@@ -293,7 +296,7 @@ review(≥ graylist_promote_min_review)即建议**升黑**,期满零命中建议
 
 ### 10. 评估体系(效果与成本同一根尺子)
 
-**离线(185 项,零 token,CI 门禁)**:规则回归(含防泄漏/误伤守卫)、指标基线、
+**离线(367 项,零 token,CI 门禁)**:规则回归(含防泄漏/误伤守卫)、指标基线、
 监控信号、全量巡检、关联图谱、处置写流程、策略版本化、治理(限速/漂移)、影子+覆盖
 原子性、基线与百分位、IP/设备情报与举报、账号档案(含路径签名)、模拟一致性对账、
 数据生成+大样本指标下限(含 R006 误伤计量)、**统计核心已知答案**(PSI/IV/AUC/KS
@@ -476,6 +479,7 @@ reject/review/pass 率变化)、`agent_behavior_drift`(agent 运行日志的工�
 | `FK_ENGINE_DRYRUN_TIMEOUT` | dry-run 调用超时秒数,默认 10 |
 | `FK_ENGINE_MODEL_URL` | 模型服务端点(P0-2):POST {"uid","event"} -> {"score": 0~1};未配置时走本地 data/model_scores.json(骨架模拟模型服务) |
 | `FK_FEATURE_ONLINE_MODULE` | 在线特征实现注入点(P0-5):"module:function",签名同 account_features;未配置时 feature_parity_check 返回 warn(同源一致,未验证线上) |
+| `FK_TOOL_PACK` | 会话工具包:investigate/duty/graph/strategy/analyst(默认)/full。CLI `/pack` 可切换 |
 | `FK_TZ_OFFSET_HOURS` | 分桶业务时区偏移,默认 +8(UTC 切日会把凌晨攻击劈进两桶) |
 
 ## 已知边界(诚实声明)

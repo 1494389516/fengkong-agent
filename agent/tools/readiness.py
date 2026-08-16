@@ -84,9 +84,12 @@ def _readiness() -> Dict:
     schema_chars = len(_json.dumps(_schemas(), ensure_ascii=False))
     system_chars = len((ROOT / "agent" / "prompts" / "system.md")
                        .read_text(encoding="utf-8"))
-    budget_ok = schema_chars <= 37500 and system_chars <= 5250
+    # 与 eval/measure_costs.SCHEMA_BUDGET 对齐;agent 不反向依赖 eval
+    schema_budget, system_budget = 40500, 5700
+    budget_ok = schema_chars <= schema_budget and system_chars <= system_budget
     add("budget_status", "ok" if budget_ok else "fail",
-        "schema=%d/37500, system=%d/5250" % (schema_chars, system_chars))
+        "schema=%d/%d, system=%d/%d" % (
+            schema_chars, schema_budget, system_chars, system_budget))
 
     if "fail" in verdicts or "blocked" in verdicts:
         overall = "BLOCKED"

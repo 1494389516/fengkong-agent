@@ -79,10 +79,15 @@ def _apply_strict_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
     return schema
 
 
-def schemas(*, strict: bool = False) -> List[Dict[str, Any]]:
-    """生成 tools 参数。strict=True 时对齐 DeepSeek strict mode (beta endpoint)。"""
+def schemas(*, strict: bool = False, pack: str = None) -> List[Dict[str, Any]]:
+    """生成 tools 参数。strict=True 时对齐 DeepSeek strict mode (beta endpoint)。
+    pack: 按任务裁剪发送面(见 packs.py);默认用进程内当前包,eval 未切包时为 full。"""
+    from . import packs as _packs  # 惰性:packs 读 _REGISTRY,须在注册完成后调用
+    allowed = _packs.tool_names(pack if pack is not None else _packs.current())
     out: List[Dict[str, Any]] = []
     for name, t in _REGISTRY.items():
+        if name not in allowed:
+            continue
         params = dict(t["parameters"])
         if strict:
             params = _apply_strict_schema(params)
@@ -105,6 +110,10 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
     denied = capability.enforce(name, name in _REGISTRY)
     if denied:
         return {"error": denied}
+    from . import packs as _packs
+    if not _packs.allows(name):
+        return {"error": "tool pack denied: %s 不在当前工具包 %s 中(CLI /pack 切换)"
+                % (name, _packs.current())}
     try:
         return _cap(_REGISTRY[name]["fn"](**arguments))  # ② 结果回填前统一限幅
     except Exception as e:  # noqa: BLE001

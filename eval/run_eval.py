@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # 供导入 measure_co
 # 评估必须跑在确定性的手工样本上,清掉可能残留的数据集切换
 os.environ.pop("FK_DATA_DIR", None)
 os.environ.pop("FK_DATASET", None)
+os.environ.pop("FK_TOOL_PACK", None)
 
 from agent import tools as registry  # noqa: E402
 from agent.tools import actions  # noqa: E402
@@ -963,6 +964,58 @@ def run_capability_layer() -> int:
         finally:
             os.environ.pop("FK_DATA_DIR", None)
     return _report("Capability 注册表(离线,临时目录)", checks)
+
+
+def run_pack_layer() -> int:
+    """离线:按任务工具包 —— 黄金案例工具面被 analyst 覆盖、子包是真子集、
+    包外 dispatch 拒绝、切包后必须恢复 full(评估结构性预算按全量计)。"""
+    from agent.tools import packs, schemas
+    prev = packs.current()
+    checks = []
+    try:
+        cases = load_cases()["agent_cases"]
+        needed = set()
+        for c in cases:
+            needed.update(c.get("expect_tools_any") or [])
+            needed.update(c.get("expect_first_tool_any") or [])
+        analyst = packs.tool_names("analyst")
+        full_n = len(schemas(pack="full"))
+        inv_n = len(schemas(pack="investigate"))
+        duty_n = len(schemas(pack="duty"))
+        checks += [
+            ("未知包名拒绝", False),  # 占位,下面立刻覆盖
+            ("analyst 覆盖全部黄金案例期望工具", needed <= analyst),
+            ("investigate 是 full 的真子集且明显更小",
+             0 < inv_n < full_n and inv_n < 40),
+            ("duty/graph/strategy 均小于 full",
+             len(schemas(pack="duty")) < full_n
+             and len(schemas(pack="graph")) < full_n
+             and len(schemas(pack="strategy")) < full_n),
+            ("默认包 analyst 工具数 < full(%d vs %d)" % (len(analyst), full_n),
+             len(analyst) < full_n),
+        ]
+        try:
+            packs.normalize("not_a_pack")
+            unknown_ok = False
+        except ValueError:
+            unknown_ok = True
+        checks[0] = ("未知包名拒绝", unknown_ok)
+        packs.set_active_pack("investigate")
+        denied = registry.dispatch("rule_backtest", {})
+        allowed = registry.dispatch("account_profile", {"uid": "u_1001"})
+        checks += [
+            ("investigate 包拒绝 strategy 工具",
+             "tool pack denied" in denied.get("error", "")),
+            ("investigate 包允许 account_profile",
+             "error" not in allowed),
+        ]
+    finally:
+        packs.set_active_pack("full")
+        checks.append(("切包后恢复 full(评估预算按全量)",
+                       packs.current() == "full"
+                       and len(schemas()) == len(schemas(pack="full"))))
+    _ = prev
+    return _report("按任务工具包(离线)", checks)
 
 
 def run_job_layer() -> int:
@@ -3013,7 +3066,7 @@ def run_serve_layer() -> int:
 def run_cost_layer() -> int:
     """离线:结构性 token 成本预算 —— schema 与 system prompt 每请求随行,
     缓存命中可吸收,但决定了 miss 时的底价;失控即工具设计出了问题。"""
-    from measure_costs import structural_sizes
+    from measure_costs import SCHEMA_BUDGET, SYSTEM_PROMPT_BUDGET, structural_sizes
     s = structural_sizes()
     # 预算史:20 工具期 12000;策略生命周期五件套(feature_risk/adversary_watch/
     # rule_draft_test/appeal_review/appeal_resolve)加入后 26 工具,上调至 14500
@@ -3039,12 +3092,12 @@ def run_cost_layer() -> int:
     # 后 72 工具上调至 36000;在线漂移三件套后 75 工具上调至 37500;
     # 反馈/实验/门禁六件套后 81 工具上调至 40500(人均 500 纪律不放松)。
     return _report("结构性成本预算(离线)", [
-        ("工具 schema 总量 <= 40500 chars(现 %d,%d 个工具,人均 %.0f)"
-         % (s["schemas_chars"], s["tool_count"],
+        ("工具 schema 总量 <= %d chars(现 %d,%d 个工具,人均 %.0f)"
+         % (SCHEMA_BUDGET, s["schemas_chars"], s["tool_count"],
             s["schemas_chars"] / max(s["tool_count"], 1)),
-         s["schemas_chars"] <= 40500),
-        ("system prompt <= 5700 chars(现 %d)" % s["system_chars"],
-         s["system_chars"] <= 5700),
+         s["schemas_chars"] <= SCHEMA_BUDGET),
+        ("system prompt <= %d chars(现 %d)" % (SYSTEM_PROMPT_BUDGET, s["system_chars"]),
+         s["system_chars"] <= SYSTEM_PROMPT_BUDGET),
     ])
 
 
@@ -3117,6 +3170,7 @@ def run_agent_layers(cases) -> int:
     from agent.core import Agent  # 延迟导入:离线模式不需要 openai / API key
 
     agent = Agent()
+    agent.set_pack("full")  # 评估对照全量工具面;日常 CLI 默认 analyst
     print("\n== 第 2+3 层 轨迹/回答层(模型 %s,%d 个案例)==" % (agent.model, len(cases)))
     failures = 0
     for c in cases:
@@ -3169,6 +3223,8 @@ def run_all(offline: bool = False) -> tuple:
     """跑全部分层,返回 (失败数, 结构化记录)。main() 与 eval/report.py
     共用同一入口,保证报告与终端结果永远来自同一次运行。"""
     _RECORDS.clear()
+    from agent.tools.packs import set_active_pack
+    set_active_pack("full")  # 评估全程按全量 schema,不被 CLI 默认 analyst 污染
     cases = load_cases()
     failures = _layer(run_rule_layer, cases["rule_cases"])
     failures += _layer(run_backtest_layer, cases["backtest_checks"])
@@ -3185,6 +3241,7 @@ def run_all(offline: bool = False) -> tuple:
     failures += _layer(run_replay_engine_layer)
     failures += _layer(run_job_layer)
     failures += _layer(run_capability_layer)
+    failures += _layer(run_pack_layer)
     failures += _layer(run_feature_health_layer)
     failures += _layer(run_lineage_layer)
     failures += _layer(run_incident_layer)

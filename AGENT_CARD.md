@@ -80,21 +80,21 @@
 
 | 指标 | 值 |
 |---|---|
-| git commit | `81f09c2` |
-| 数据指纹 | `4d4596c1cdde5d1a` |
+| git commit | `e2fe81b` |
+| 数据指纹 | `7be5e1485fcf2744` |
 | 工具数 | 82 |
-| 离线断言 | 355 项 |
-| 工具 schema | 36397 chars(预算 18000) |
-| system prompt | 5590 chars(预算 5700) |
-| 最近刷新(UTC) | 2026-08-15T14:42:38Z |
+| 离线断言 | 367 项 |
+| 工具 schema | 36397 chars(预算 40500) |
+| system prompt | 5653 chars(预算 5700) |
+| 最近刷新(UTC) | 2026-08-16T02:33:52Z |
 
 > 完整评估报告:`python3 eval/run_eval.py --offline --report out/eval_report.md`
-> 案例库账本:`eval/cases_changelog.md`(21 个黄金案例,含红队与唯一引擎纪律)。
+> 案例库账本:`eval/cases_changelog.md`(24 个黄金案例,含红队与唯一引擎纪律)。
 
 ## 6. 已知边界(诚实声明)
 
 - 数据是合成的:指标绝对值无外推意义,分辨率与张力是设计出来的;
-- agent 层 21 案例尚未实弹运行(需 API key),四维基线待第一次真实运行建立;
+- agent 层 24 案例尚未实弹运行(需 API key),四维基线待第一次真实运行建立;
 - 全量类工具(scan/backtest)是同步实现,真实数据量下须改异步任务;
 - 接真实引擎后,backtest/scan 的逐事件 dry-run 会放大调用量,生产需批量接口;
 - ④ 工具裁剪与 DeepSeek 前缀缓存的净收益未实测,凭直觉调参是双向都危险。

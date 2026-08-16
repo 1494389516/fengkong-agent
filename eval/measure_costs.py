@@ -20,6 +20,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# 结构性成本硬预算(单一事实源):eval 门禁 / 评估报告 / AGENT_CARD 刷新共用。
+# 随工具数上调,但人均 schema 约 500 chars 的纪律不放松;历史见 run_cost_layer 注释。
+SCHEMA_BUDGET = 40500
+SYSTEM_PROMPT_BUDGET = 5700
+
 
 def structural_sizes():
     """schema / system prompt 的字符量(数据集无关)。"""

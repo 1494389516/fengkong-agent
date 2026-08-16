@@ -98,7 +98,11 @@ class Agent:
         self._run_log_enabled = os.environ.get("FK_AGENT_RUN_LOG") == "1"
         self._run_log_path = Path(__file__).resolve().parent.parent / "out" / "agent_runs.jsonl"
         # P1-8:版本指纹(prompt/工具集/agent 策略),随运行日志落盘
+        from .tools import packs as _packs
         from .versioning import snapshot as _ver_snapshot
+        # 默认 analyst:日常 Copilot 不把治理/Job/实验 schema 随行
+        self.tool_pack = _packs.env_default()
+        _packs.set_active_pack(self.tool_pack)
         self._versions = _ver_snapshot()
 
     # ③ 案例隔离:清空对话历史只留 system,让下一个案例在干净上下文里跑。
@@ -106,6 +110,16 @@ class Agent:
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": self._system}]
         self._asks_since_ckpt = 0
+
+    def set_pack(self, pack: str) -> dict:
+        """切换工具包并 reset:schema 前缀变了,不 reset 会把旧工具结果留在历史上。"""
+        from .tools import packs as _packs
+        from .versioning import snapshot as _ver_snapshot
+        info = _packs.set_active_pack(pack)
+        self.tool_pack = info["pack"]
+        self._versions = _ver_snapshot()
+        self.reset()
+        return info
 
     def cache_hit_rate(self) -> float:
         s = self.session_usage
@@ -262,7 +276,9 @@ class Agent:
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=self.messages,
-                tools=tools.schemas(strict=self.strict_mode),
+                tools=tools.schemas(
+                    strict=self.strict_mode,
+                    pack=getattr(self, "tool_pack", "full")),
             )
             latency["llm_ms"] += (time.monotonic() - _llm_t0) * 1000
             usage = _extract_usage(resp)  # ①
