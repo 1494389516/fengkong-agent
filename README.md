@@ -80,32 +80,97 @@ python3 serve.py --port 8080
 
 ## 架构
 
+系统按"唯一事实源 + 镜像"切开：Decision Plane 是判定的唯一事实源，Agent Plane 只是它的镜像，而镜像必须对账。下图按数据流自上而下排列——数据与特征在最上，Agent 取证分析居中，审批与策略资产夹在中间，在线判定在下，留痕与对账收尾。Agent 的提案必须穿过人工审批和策略资产才可能影响判定，这段纵深就是隔离本身。
+
 ```mermaid
-flowchart LR
-    U[研究员] --> CLI[CLI / HTTP]
+flowchart TB
+    RES["风控研究员"]
+    BIZ["业务流量<br/>前置网关负责鉴权与限流"]
+    SRC["datasource 业务数据源"]
+    FEAT["featurelib 统一特征层"]
 
-    subgraph AP[Agent Plane]
-        A[Agent] --> LLM[DeepSeek]
-        LLM --> T[调查与模拟工具]
-        T --> P[变更提案]
+    subgraph AP["Agent Plane · 取证与分析（镜像，无判定权）"]
+        direction TB
+        CLI["main.py 交互式 CLI"]
+        LOOP["core.Agent 主循环<br/>工具包裁剪 · 上下文预算"]
+        LLM["DeepSeek<br/>只做编排与解释"]
+        CAP["capability.py 权限闸<br/>read · simulate · propose · execute"]
+        T_READ["取证工具<br/>档案 · 关联图 · 设备与 IP 情报"]
+        T_SIM["分析工具<br/>回测 · 校准 · 漂移 · 影子策略"]
+        T_PROP["提案工具<br/>名单 · 阈值 · 模型与策略晋升"]
     end
 
-    subgraph DP[Decision Plane]
-        D[POST /decide] --> E[规则引擎]
-        E -. 降级 .-> L[local_rules]
+    QUEUE["actions 待审批队列"]
+    HUMAN["人工审批 /approve · /deny<br/>不注册为工具"]
+    ASSET["策略资产<br/>policy 阈值版本 · active 策略 · champion 模型"]
+
+    subgraph DP["Decision Plane · 在线判定（唯一事实源）"]
+        direction TB
+        SERVE["serve.py POST /decide"]
+        IDEMP["idemp_store 幂等表<br/>指纹去重，重放不写血缘"]
+        ENTRY["engine.evaluate_event<br/>判定唯一入口"]
+        REMOTE["生产引擎 dry-run<br/>FK_ENGINE_DRYRUN_URL"]
+        LOCAL["local_rules R001-R006<br/>骨架替身兼降级备份"]
+        R007["R007 champion 模型信号<br/>FK_ENGINE_MODEL_URL 或本地分数表"]
+        VERDICT["处置 pass · review · reject<br/>reason_codes · degraded"]
     end
 
-    CLI --> A
-    CLI --> D
-    P --> Q[待审批队列]
-    Q --> H[人工审批]
-    H --> S[名单 / 阈值]
-    T --> E
+    AUDIT["audit · lineage 审计与决策血缘"]
+    DLOG["生产决策日志<br/>serve_decisions.jsonl · decisions_log.json"]
+    RECON["reconcile 镜像对账<br/>本地模拟 vs 生产决策日志"]
+    DISTRUST["失信标记<br/>不一致超阈值则回测与校准结论<br/>不得作为变更依据"]
+
+    RES --> CLI
+    RES -->|人类专用通道| HUMAN
+    SRC --> FEAT
+    SRC --> T_READ
+    FEAT --> T_READ
+    FEAT --> T_SIM
+    FEAT --> LOCAL
+
+    CLI --> LOOP
+    LOOP -->|脱敏后出网| LLM
+    LLM -->|tool_calls| CAP
+    CAP --> T_READ
+    CAP --> T_SIM
+    CAP --> T_PROP
+    CAP -.->|越权调用审批类能力即拒绝并留痕| AUDIT
+
+    T_PROP --> QUEUE
+    QUEUE --> HUMAN
+    HUMAN -->|批准后才生效| ASSET
+    HUMAN --> AUDIT
+    ASSET --> ENTRY
+    T_SIM -->|同一判定入口| ENTRY
+
+    BIZ --> SERVE
+    SERVE --> IDEMP
+    IDEMP --> ENTRY
+    ENTRY -->|优先| REMOTE
+    REMOTE -.->|失败超时或熔断，显式打 degraded| LOCAL
+    ENTRY -.->|未配置远程或 what-if 覆盖生效| LOCAL
+    LOCAL --> R007
+    REMOTE --> VERDICT
+    LOCAL --> VERDICT
+    R007 --> VERDICT
+
+    VERDICT --> AUDIT
+    VERDICT --> DLOG
+    DLOG --> RECON
+    RECON -.->|机器强制，非提示词约束| DISTRUST
 ```
 
-在线判定不经过 LLM。Agent 可以读取数据和执行模拟，也可以生成待审批提案，但审批只能由人在 CLI 中完成。
+图上三条边界是代码约束，不只是文档约定：
 
-未配置 `FK_ENGINE_DRYRUN_URL` 时，判定使用本地 `local_rules`。生产接入方式见 [DEPLOY.md](DEPLOY.md)。
+- **LLM 不在判定路径上**：`serve.py` 到 `engine.evaluate_event` 的整条判定链不引用任何 LLM，`agent/engine.py` 里没有一处模型客户端；DeepSeek 只在 Agent Plane 负责编排工具与解释结论。
+- **Agent 的写操作只能生成提案**：`capability.py` 在 dispatch 单点按 `read`、`simulate`、`propose`、`execute` 查等级，`approve` 与 `admin` 不注册为工具，模型根本没有可调用的审批入口，越权尝试会被拒绝并写入安全审计。
+- **降级必须显式**：远程引擎失败或熔断时回退 `local_rules`，同时打 `degraded` 标记。静默降级会让对账退化成"本地对本地"，口径漂移就此隐身。
+
+判定路径每次调用重新解析，优先级依次是：what-if 覆盖生效时永远走本地，因为假想阈值不该拿去对账；配置了 `FK_ENGINE_DRYRUN_URL` 时远程 dry-run 优先，调用失败则降级并标记；两者都不成立时使用本地 `local_rules`。
+
+对账方向容易记反：`reconcile` 不是用生产日志校准 agent，而是拿 agent 的本地模拟去比生产日志。不一致率超过 `max_sim_mismatch_rate` 时，`rule_backtest`、`shadow_backtest` 和 `threshold_calibrate` 的返回会自动附上失信标记——模拟器失准时，用它算出的指标不能作为变更依据。
+
+生产接入方式见 [DEPLOY.md](DEPLOY.md)。
 
 ## 核心模块
 
