@@ -105,8 +105,8 @@ def _shared_device_accounts(uid: str) -> int:
     return max((len(dev_uids[d]) for d in used), default=0)
 
 
-def _feature_rows(uids: List[str]) -> tuple:
-    """对一组账号导出 point-in-time 特征行 + 跳过清单。"""
+def feature_rows(uids: List[str]) -> tuple:
+    """构造账号级 point-in-time 特征行 + 跳过清单,供导出与规则挖掘复用。"""
     events = load_events()
     last_ts: Dict[str, float] = {}
     for e in events:
@@ -187,8 +187,8 @@ def build_dataset(split_ratio: float = None):
         sp = split_datasets(split_ratio)
         if "error" in sp:
             return sp
-        rows_train, skip_train = _feature_rows(sp["train_accounts"])
-        rows_eval, skip_eval = _feature_rows(sp["eval_accounts"])
+        rows_train, skip_train = feature_rows(sp["train_accounts"])
+        rows_eval, skip_eval = feature_rows(sp["eval_accounts"])
         train = _export(rows_train, sp["train_fingerprint"], "train")
         eval_ = _export(rows_eval, sp["eval_fingerprint"], "eval")
         return {
@@ -203,7 +203,7 @@ def build_dataset(split_ratio: float = None):
             "note": sp["note"],
             "leakage_gate": "model_eval 只接受 eval 切分指纹(≠训练指纹)",
         }
-    rows, skipped = _feature_rows(sorted(labels.keys()))
+    rows, skipped = feature_rows(sorted(labels.keys()))
     fp = dataset_fingerprint()
     exp = _export(rows, fp, "train")
     exp["manifest"]["skipped_no_events"] = skipped

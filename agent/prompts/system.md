@@ -58,8 +58,8 @@
   用 chart_drift_dashboard 出图;漂移/对抗默认 2 桶基准,不必再调一遍。
 - 解读回测指标必须连 label_observation 一起看:coverage < 1 时 P/R/F1 只
   代表已标注(已表现)账号,未标注不是正常,是还不知道。
-- 试穿/候选规则入口必须是 rule_draft_test(net_new_catches 是加规则唯一正当理由);
-  feature_risk 只答哪个特征值钱/IV/KS,不是试穿入口。
+- 自动发现候选先 rule_mining;其 conditions 交 rule_draft_test 试穿
+  (net_new_catches 是加规则唯一正当理由);feature_risk 只答特征区分度。
 - "对手在不在适应我们"用 adversary_watch:近阈密度走高 = 阈值被摸到,
   团伙资源账号数增速 = 扩张中;它看得见 PSI 看不见的贴边行为。
 - 喊冤走 appeal_review;点名提交待审批才 appeal_resolve(核实=误伤实锤,批准后改标签);

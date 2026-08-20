@@ -171,6 +171,55 @@ def run_backtest_layer(checks) -> int:
     return _report("指标回测(离线)", items, extra={"effect": effect})
 
 
+def run_rule_mining_layer() -> int:
+    """离线:候选规则只在训练侧发现,更晚验证侧仅复验,输出可执行 AST。"""
+    from agent.tools.rule_mining import discover_candidates, mine_rules
+
+    train = [
+        {"uid": "t%02d" % i, "label": "fraud" if i >= 14 else "normal",
+         "coupon_claims": i, "event_count": i % 3}
+        for i in range(20)
+    ]
+    validation = [
+        {"uid": "v%02d" % i, "label": "fraud" if i >= 7 else "normal",
+         "coupon_claims": i + 7, "event_count": (i + 1) % 3}
+        for i in range(10)
+    ]
+    candidates = discover_candidates(
+        train, validation,
+        features=("coupon_claims", "event_count"),
+        quantiles=(0.5, 0.7, 0.8),
+        min_support=0.1,
+        min_lift=1.1,
+        max_candidates=5,
+    )
+    best = candidates[0] if candidates else {}
+    bad_split = mine_rules(split_ratio=0.2)
+    tiny_sample = mine_rules()
+    checks = [
+        ("确定性信号可发现", bool(candidates)),
+        ("候选输出 rule-ast/v1 结构",
+         best.get("ast", {}).get("version") == "rule-ast/v1"
+         and best.get("ast", {}).get("operator") in ("lte", "gte", "is_null")),
+        ("训练与验证指标分栏",
+         "train" in best and "validation" in best and "stability" in best),
+        ("高风险方向被识别",
+         any(c.get("ast", {}).get("feature") == "coupon_claims"
+             and c.get("ast", {}).get("operator") == "gte"
+             and c.get("validation", {}).get("lift", 0) > 1
+             for c in candidates)),
+        ("兼容特征输出 rule_draft_test conditions",
+         any(c.get("draft_compatible") is True
+             and c.get("conditions", [{}])[0].get("op") == ">="
+             for c in candidates)),
+        ("非法时间切分被拒绝",
+         "split_ratio" in bad_split.get("error", "")),
+        ("单类别 holdout 拒绝伪泛化指标",
+         "必须同时包含 fraud/normal" in tiny_sample.get("error", "")),
+    ]
+    return _report("候选规则挖掘(离线,train→validation)", checks)
+
+
 def run_monitor_layer(cases) -> int:
     """离线:监控信号断言,含误伤守卫(正常账号必须零信号)。"""
     items = []
@@ -1045,6 +1094,7 @@ def run_capability_layer() -> int:
                 ("注册表:核心工具等级正确",
                  "blacklist_add" in bl.get("propose", [])
                  and "rule_backtest" in bl.get("simulate", [])
+                 and "rule_mining" in bl.get("simulate", [])
                  and "model_promote" in bl.get("propose", [])
                  and "audit_query" in bl.get("read", [])
                  and "job_submit" in bl.get("execute", [])),
@@ -1155,6 +1205,7 @@ def run_pack_layer() -> int:
         full_n = len(schemas(pack="full"))
         inv_n = len(schemas(pack="investigate"))
         duty_n = len(schemas(pack="duty"))
+        strategy = packs.tool_names("strategy")
         checks += [
             ("未知包名拒绝", False),  # 占位,下面立刻覆盖
             ("analyst 覆盖全部黄金案例期望工具", needed <= analyst),
@@ -1166,6 +1217,11 @@ def run_pack_layer() -> int:
              and len(schemas(pack="strategy")) < full_n),
             ("默认包 analyst 工具数 < full(%d vs %d)" % (len(analyst), full_n),
              len(analyst) < full_n),
+            ("规则挖掘仅进入策略/分析师工具面",
+             "rule_mining" in strategy and "rule_mining" in analyst
+             and "rule_mining" not in packs.tool_names("investigate")
+             and "rule_mining" not in packs.tool_names("duty")
+             and "rule_mining" not in packs.tool_names("graph")),
         ]
         try:
             packs.normalize("not_a_pack")
@@ -2436,6 +2492,22 @@ def run_gen_layer() -> int:
             fr = registry.dispatch("feature_risk", {"include_bins": True})
             fr_top = (fr["features"].get(fr["ranking_by_iv"][0], {})
                       if fr.get("ranking_by_iv") else {})
+            mined = registry.dispatch("rule_mining", {
+                "split_ratio": 0.7,
+                "min_support": 0.03,
+                "min_lift": 1.05,
+                "max_candidates": 5,
+            })
+            draft_candidate = next(
+                (c for c in mined.get("candidates", [])
+                 if c.get("draft_compatible") and c.get("conditions")),
+                None,
+            )
+            mined_draft = (
+                registry.dispatch("rule_draft_test", {
+                    "conditions": draft_candidate["conditions"]})
+                if draft_candidate else {"error": "无兼容候选"}
+            )
             # token 成本预算:在同一份大样本上量每个工具的典型返回,超限即红。
             # 教训:rule_backtest 的 per_account 曾单次 18k+ chars,② 的 dict
             # 限幅与工具面瘦身都是这里钉住的。
@@ -2469,6 +2541,15 @@ def run_gen_layer() -> int:
                  bool(fr.get("ranking_by_iv")) and fr_top.get("iv", 0) > 0
                  and 0.5 <= fr_top.get("auc", 0) <= 1.0
                  and 0 <= fr_top.get("ks", -1) <= 1.0 and bool(fr_top.get("bins"))),
+                ("候选挖掘:时间切分、结构化 AST、独立验证均可用",
+                 "error" not in mined and mined.get("candidate_count", 0) > 0
+                 and mined.get("split", {}).get("disjoint") is True
+                 and all(c.get("ast", {}).get("version") == "rule-ast/v1"
+                         and "validation" in c
+                         for c in mined.get("candidates", []))),
+                ("候选挖掘:conditions 可直接进入规则试衣间",
+                 draft_candidate is not None and "error" not in mined_draft
+                 and mined_draft.get("conditions") == draft_candidate["conditions"]),
                 ("校准产出建议阈值", bool(cal.get("suggestions"))),
                 ("建议阈值实测误伤率 <= 5%", realized is not None and realized <= 0.05),
                 ("无参照快照时不误报漂移", cal.get("drift_alarm") is False),
@@ -3971,6 +4052,7 @@ def run_all(offline: bool = False) -> tuple:
     cases = load_cases()
     failures = _layer(run_rule_layer, cases["rule_cases"])
     failures += _layer(run_backtest_layer, cases["backtest_checks"])
+    failures += _layer(run_rule_mining_layer)
     failures += _layer(run_monitor_layer, cases["monitor_cases"])
     failures += _layer(run_scan_layer)
     failures += _layer(run_graph_layer)

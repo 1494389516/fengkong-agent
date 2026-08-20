@@ -140,6 +140,7 @@ CAPABILITY = {
     "shadow_backtest": "simulate",
     "threshold_calibrate": "simulate",
     "rule_draft_test": "simulate",
+    "rule_mining": "simulate",
     "feature_risk": "simulate",
     "strategy_replay": "simulate",
     "strategy_shadow": "simulate",

@@ -220,20 +220,18 @@ DEPLOY.md              部署与生产接入说明
 离线评估不调用 LLM，覆盖规则、特征、漂移监控、审批流程、版本管理、对账、安全边界和成本预算。需要 API Key 时，还可以运行 Agent 黄金案例，检查分析结论、取证路径、工具调用效率和 token 消耗。
 
 <!-- AUTO-SYNC:FK-DOC-SNAPSHOT-START -->
-### 当前评估快照
-
-以下内容由 `python3 eval/run_eval.py --report` 自动更新：
+## 系统快照(自动生成,勿手改;`python3 eval/run_eval.py --report` 刷新)
 
 | 项 | 值 |
 |---|---|
-| git commit | `a1d5a8e` |
-| 工具数 | 85 |
-| 工具 schema | 38479 chars |
-| system prompt | 5633 chars |
+| git commit | `574ef5b` |
+| 工具数 | 86 |
+| 工具 schema | 39143 chars |
+| system prompt | 5644 chars |
 | 数据指纹 | `028ccc9fef784b6b` |
-| 离线断言数 | 476 |
+| 离线断言数 | 486 |
 | agent 黄金案例 | 24 |
-| 最近刷新（UTC） | 2026-08-16T09:46:45Z |
+| 最近刷新(UTC) | 2026-08-20T09:56:01Z |
 
 <!-- AUTO-SYNC:FK-DOC-SNAPSHOT-END -->
 

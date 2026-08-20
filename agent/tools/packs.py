@@ -56,7 +56,7 @@ _GRAPH = frozenset({
 
 _STRATEGY = frozenset({
     "rule_backtest", "slice_eval", "shadow_backtest", "threshold_calibrate",
-    "threshold_propose", "chart_threshold_sweep", "chart_cohort_features",
+    "rule_mining", "threshold_propose", "chart_threshold_sweep", "chart_cohort_features",
     "feature_risk", "rule_draft_test", "feature_catalog",
     "policy_history", "feature_drift", "rule_drift",
     "feature_validate", "feature_health_check", "consistency_check",
