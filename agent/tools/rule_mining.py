@@ -5,15 +5,23 @@
 不修改阈值、更不进入在线判定。候选排序只使用训练侧指标;评估侧只报告
 泛化表现,避免把 holdout 再次用作搜索集。
 """
+import hashlib
+import itertools
+import json
 import math
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import tool
+from .datasource import atomic_write_json
 from .dataset import MODELING_COLUMNS, feature_rows, split_datasets
 from .draft import DRAFT_FEATURES
 
 DEFAULT_QUANTILES = (0.05, 0.10, 0.20, 0.50, 0.80, 0.90, 0.95)
 AST_VERSION = "rule-ast/v1"
+COMBO_AST_VERSION = "rule-combo/v1"
+SEARCH_POOL_SIZE = 12
 
 
 def _number(value) -> Optional[float]:
@@ -62,12 +70,12 @@ def _draft_condition(ast: Dict) -> Optional[Dict]:
     return {"feature": ast["feature"], "op": op, "value": ast["value"]}
 
 
-def evaluate_rule(rows: Sequence[Dict], ast: Dict) -> Dict:
-    """在给定样本上计算二分类规则指标;fraud 为正类。"""
+def _evaluate(rows: Sequence[Dict], matcher) -> Dict:
+    """按 matcher 计算账号级二分类指标;fraud 为正类。"""
     tp = fp = fn = tn = 0
     for row in rows:
         positive = row.get("label") == "fraud"
-        hit = _matches(row, ast)
+        hit = matcher(row)
         if hit and positive:
             tp += 1
         elif hit:
@@ -83,6 +91,7 @@ def evaluate_rule(rows: Sequence[Dict], ast: Dict) -> Dict:
     recall = tp / positives if positives else 0.0
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     base_rate = positives / n if n else 0.0
+    negatives = fp + tn
     return {
         "rows": n,
         "hits": hits,
@@ -94,8 +103,31 @@ def evaluate_rule(rows: Sequence[Dict], ast: Dict) -> Dict:
         "precision": round(precision, 4),
         "recall": round(recall, 4),
         "f1": round(f1, 4),
+        "fpr": round(fp / negatives, 4) if negatives else 0.0,
+        "fnr": round(fn / positives, 4) if positives else 0.0,
         "lift": round(precision / base_rate, 4) if base_rate else 0.0,
         "base_rate": round(base_rate, 4),
+    }
+
+
+def evaluate_rule(rows: Sequence[Dict], ast: Dict) -> Dict:
+    return _evaluate(rows, lambda row: _matches(row, ast))
+
+
+def evaluate_or(rows: Sequence[Dict], asts: Sequence[Dict]) -> Dict:
+    """OR 组合:命中任一候选即命中组合。"""
+    return _evaluate(rows, lambda row: any(_matches(row, ast) for ast in asts))
+
+
+def _cost(metrics: Dict, fp_cost: float, fn_cost: float) -> Dict:
+    total = metrics["fp"] * fp_cost + metrics["fn"] * fn_cost
+    baseline = (metrics["tp"] + metrics["fn"]) * fn_cost
+    return {
+        "fp_cost": fp_cost,
+        "fn_cost": fn_cost,
+        "expected_loss": round(total, 4),
+        "loss_per_row": round(total / metrics["rows"], 6) if metrics["rows"] else 0.0,
+        "savings_vs_no_rule": round(baseline - total, 4),
     }
 
 
@@ -178,16 +210,194 @@ def discover_candidates(train_rows: Sequence[Dict], eval_rows: Sequence[Dict],
     return out
 
 
+def _structurally_redundant(items: Sequence[Dict]) -> bool:
+    """同特征同方向的 OR 只保留一个阈值,组合它们没有新增表达能力。"""
+    seen = set()
+    for item in items:
+        ast = item["ast"]
+        key = (ast["feature"], ast["operator"])
+        if key in seen:
+            return True
+        seen.add(key)
+    return False
+
+
+def search_or_combinations(train_rows: Sequence[Dict], eval_rows: Sequence[Dict],
+                           candidates: Sequence[Dict], *, max_rules: int = 3,
+                           fp_cost: float = 1.0, fn_cost: float = 5.0,
+                           max_fpr: float = 0.10) -> Dict:
+    """训练侧按成本搜索 OR 组合,验证侧只复验。
+
+    搜索空间很小(默认 12 个候选、最多 3 条),直接穷举比启发式分支更透明。
+    相同训练命中掩码只保留成本相同下规则更少的组合。
+    """
+    evaluated: List[Dict] = []
+    seen_masks = set()
+    attempted = skipped_structural = skipped_duplicate = rejected_fpr = 0
+    for size in range(1, min(max_rules, len(candidates)) + 1):
+        for group in itertools.combinations(candidates, size):
+            attempted += 1
+            if _structurally_redundant(group):
+                skipped_structural += 1
+                continue
+            asts = [item["ast"] for item in group]
+            mask = tuple(any(_matches(row, ast) for ast in asts) for row in train_rows)
+            if mask in seen_masks:
+                skipped_duplicate += 1
+                continue
+            seen_masks.add(mask)
+            train = evaluate_or(train_rows, asts)
+            train_cost = _cost(train, fp_cost, fn_cost)
+            if train["fpr"] > max_fpr:
+                rejected_fpr += 1
+                continue
+            validation = evaluate_or(eval_rows, asts)
+            validation_cost = _cost(validation, fp_cost, fn_cost)
+            combo = {
+                "combo_id": "",
+                "ast": {
+                    "version": COMBO_AST_VERSION,
+                    "logic": "or",
+                    "rules": asts,
+                },
+                "candidate_ids": [item["candidate_id"] for item in group],
+                "expressions": [item["expression"] for item in group],
+                "train": train,
+                "train_cost": train_cost,
+                "validation": validation,
+                "validation_cost": validation_cost,
+                "validation_gate": {
+                    "fpr_within_limit": validation["fpr"] <= max_fpr,
+                    "positive_savings": validation_cost["savings_vs_no_rule"] > 0,
+                    "lift_above_random": validation["lift"] >= 1.0,
+                },
+            }
+            evaluated.append(combo)
+    evaluated.sort(key=lambda item: (
+        item["train_cost"]["expected_loss"],
+        -item["train"]["f1"],
+        len(item["candidate_ids"]),
+        item["candidate_ids"],
+    ))
+    for index, item in enumerate(evaluated, 1):
+        item["combo_id"] = "OR%03d" % index
+    best = evaluated[0] if evaluated else None
+    return {
+        "objective": "minimize(fp*fp_cost + fn*fn_cost) on train",
+        "constraints": {"max_fpr": max_fpr, "max_rules": max_rules},
+        "search_diagnostics": {
+            "attempted_subsets": attempted,
+            "skipped_structural_redundancy": skipped_structural,
+            "skipped_duplicate_train_mask": skipped_duplicate,
+            "rejected_train_fpr": rejected_fpr,
+        },
+        "evaluated_count": len(evaluated),
+        "best": best,
+        "all": evaluated,
+    }
+
+
+def _lineage() -> Dict:
+    from .dataset import dataset_fingerprint
+    from .featurelib import FEATURE_CATALOG_VERSION
+    from .label_lifecycle import label_fingerprint
+    from .readiness import _git_commit
+    from ..engine import _active_strategy
+
+    strategy = _active_strategy()
+    return {
+        "dataset_fingerprint": dataset_fingerprint(),
+        "label_fingerprint": label_fingerprint(),
+        "feature_catalog_version": FEATURE_CATALOG_VERSION,
+        "strategy_version": strategy.get("strategy_version") or "none",
+        "git_commit": _git_commit() or "unknown",
+    }
+
+
+def _write_snapshot(body: Dict) -> Dict:
+    """完整搜索旁路落盘;返回可审计引用,不把全量组合塞进 LLM 上下文。"""
+    from .shadow_store import artifacts_dir
+
+    lineage = _lineage()
+    payload = {
+        "kind": "rule_mining",
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        **lineage,
+        **body,
+    }
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    artifact_id = digest[:16]
+    payload["sha256"] = digest
+    path = artifacts_dir() / ("rule_mining_%s.json" % artifact_id)
+    atomic_write_json(path, payload)
+    return {
+        "artifact_id": artifact_id,
+        "path": str(path),
+        "sha256": digest,
+        "single_candidates": len(body.get("candidates") or []),
+        "or_combinations": len((body.get("or_search") or {}).get("all") or []),
+        **lineage,
+    }
+
+
+def verify_snapshot(ref: Dict) -> Dict:
+    """校验研究产物内容哈希;失败显式报错,不接受被改写的搜索证据。"""
+    path = ref.get("path")
+    expect = ref.get("sha256")
+    if not path or not expect:
+        return {"error": "快照引用缺 path/sha256"}
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"error": "快照不可读: %s" % exc}
+    stored = payload.pop("sha256", None)
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    actual = hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    if stored != expect or actual != expect:
+        return {"error": "快照哈希不匹配(产物已被改写)"}
+    return {"valid": True, "artifact_id": ref.get("artifact_id"),
+            "sha256": actual, "body": payload}
+
+
 def mine_rules(split_ratio: float = 0.7, min_support: float = 0.03,
-               min_lift: float = 1.05, max_candidates: int = 5) -> Dict:
+               min_lift: float = 1.05, max_candidates: int = 2,
+               max_rules: int = 3, fp_cost: float = 1.0,
+               fn_cost: float = 5.0, max_fpr: float = 0.10,
+               save_snapshot: bool = True) -> Dict:
+    numeric = {
+        "split_ratio": split_ratio,
+        "min_support": min_support,
+        "min_lift": min_lift,
+        "fp_cost": fp_cost,
+        "fn_cost": fn_cost,
+        "max_fpr": max_fpr,
+    }
+    bad_numeric = [name for name, value in numeric.items()
+                   if (not isinstance(value, (int, float))
+                       or isinstance(value, bool)
+                       or not math.isfinite(float(value)))]
+    if bad_numeric:
+        return {"error": "参数必须为有限数值: %s" % ", ".join(bad_numeric)}
+    if (not isinstance(max_candidates, int) or isinstance(max_candidates, bool)
+            or not isinstance(max_rules, int) or isinstance(max_rules, bool)):
+        return {"error": "max_candidates/max_rules 必须为整数"}
     if not 0.5 <= split_ratio <= 0.9:
         return {"error": "split_ratio 必须在 0.5~0.9,保证训练/评估两侧都有意义"}
     if not 0.0 < min_support < 0.5:
         return {"error": "min_support 必须在 0~0.5"}
     if not 1.0 <= min_lift <= 20.0:
         return {"error": "min_lift 必须在 1~20"}
-    if not 1 <= max_candidates <= 5:
-        return {"error": "max_candidates 必须在 1~5,防止候选明细突破单工具上下文预算"}
+    if not 1 <= max_candidates <= 2:
+        return {"error": "max_candidates 必须在 1~2;全量候选进入快照,上下文只回 top"}
+    if not 1 <= max_rules <= 3:
+        return {"error": "max_rules 必须在 1~3,限制 OR 搜索复杂度与规则可解释性"}
+    if fp_cost < 0 or fn_cost <= 0 or (fp_cost == 0 and fn_cost == 0):
+        return {"error": "fp_cost 必须 >=0 且 fn_cost 必须 >0"}
+    if not 0 <= max_fpr <= 1:
+        return {"error": "max_fpr 必须在 0~1"}
+    if not isinstance(save_snapshot, bool):
+        return {"error": "save_snapshot 必须为布尔值"}
 
     split = split_datasets(split_ratio)
     if "error" in split:
@@ -215,41 +425,76 @@ def mine_rules(split_ratio: float = 0.7, min_support: float = 0.03,
             "validation_label_counts": eval_counts,
         }
 
-    candidates = discover_candidates(
+    all_candidates = discover_candidates(
         train_rows,
         eval_rows,
         min_support=min_support,
         min_lift=min_lift,
-        max_candidates=max_candidates,
+        max_candidates=SEARCH_POOL_SIZE,
     )
+    or_search = search_or_combinations(
+        train_rows,
+        eval_rows,
+        all_candidates,
+        max_rules=max_rules,
+        fp_cost=fp_cost,
+        fn_cost=fn_cost,
+        max_fpr=max_fpr,
+    )
+    split_meta = {
+        "ratio": split_ratio,
+        "cutoff_ts": split["cutoff_ts"],
+        "train_rows": len(train_rows),
+        "validation_rows": len(eval_rows),
+        "train_label_counts": train_counts,
+        "validation_label_counts": eval_counts,
+        "train_fingerprint": split["train_fingerprint"],
+        "validation_fingerprint": split["eval_fingerprint"],
+        "disjoint": split["disjoint"],
+        "skipped": {"train": train_skipped, "validation": eval_skipped},
+    }
+    search_meta = {
+        "features": list(MODELING_COLUMNS),
+        "quantiles": list(DEFAULT_QUANTILES),
+        "operators": ["lte", "gte", "is_null"],
+        "combination": "or",
+        "min_support": min_support,
+        "min_lift": min_lift,
+        "max_candidates": max_candidates,
+        "search_pool_size": len(all_candidates),
+        "max_rules": max_rules,
+        "fp_cost": fp_cost,
+        "fn_cost": fn_cost,
+        "max_fpr": max_fpr,
+    }
+    snapshot = None
+    if save_snapshot:
+        snapshot = _write_snapshot({
+            "split": split_meta,
+            "search": search_meta,
+            "candidates": all_candidates,
+            "or_search": or_search,
+        })
     return {
-        "mode": "candidate_discovery_only",
-        "selection_policy": "候选生成、过滤、排序仅使用 train;validation 只复验不参与选优",
-        "split": {
-            "ratio": split_ratio,
-            "cutoff_ts": split["cutoff_ts"],
-            "train_rows": len(train_rows),
-            "validation_rows": len(eval_rows),
-            "train_label_counts": train_counts,
-            "validation_label_counts": eval_counts,
-            "train_fingerprint": split["train_fingerprint"],
-            "validation_fingerprint": split["eval_fingerprint"],
-            "disjoint": split["disjoint"],
-            "skipped": {"train": train_skipped, "validation": eval_skipped},
+        "mode": "candidate_and_or_search",
+        "selection_policy": (
+            "单规则与 OR 组合均只在 train 生成/过滤/排序;"
+            "validation 只复验,不参与选优"
+        ),
+        "split": split_meta,
+        "search": search_meta,
+        "candidate_count": len(all_candidates),
+        "candidates": all_candidates[:max_candidates],
+        "or_search": {
+            "objective": or_search["objective"],
+            "constraints": or_search["constraints"],
+            "search_diagnostics": or_search["search_diagnostics"],
+            "evaluated_count": or_search["evaluated_count"],
+            "best": or_search["best"],
         },
-        "search": {
-            "features": list(MODELING_COLUMNS),
-            "quantiles": list(DEFAULT_QUANTILES),
-            "operators": ["lte", "gte", "is_null"],
-            "combination": "none",
-            "min_support": min_support,
-            "min_lift": min_lift,
-            "max_candidates": max_candidates,
-        },
-        "candidate_count": len(candidates),
-        "candidates": candidates,
+        **({"artifact": snapshot} if snapshot else {}),
         "next_gate": (
-            "候选尚未注册或生效;先检查 validation 稳定性与业务误伤成本,"
+            "候选与组合尚未注册或生效;先检查 validation_gate 与业务成本,"
             "draft_compatible=true 时可把 conditions 原样传给 rule_draft_test,"
             "再经 strategy_shadow 复验并进入人工审批"
         ),
@@ -259,11 +504,9 @@ def mine_rules(split_ratio: float = 0.7, min_support: float = 0.03,
 @tool(
     name="rule_mining",
     description=(
-        "从现有标签与 point-in-time 特征中自动发现候选规则。强制按账号最后事件时间"
-        "切分 train/validation:阈值生成、过滤和排序只看 train,更晚 validation 只做"
-        "独立复验。返回 rule-ast/v1 结构化候选、两侧指纹与 P/R/F1/Lift,不写策略、"
-        "不改阈值、不进入在线判定。draft_compatible 候选的 conditions 可直接传给"
-        "rule_draft_test;候选上线前仍须业务成本评估、影子回放和人工审批。"
+        "时间切分后发现单规则并穷举最多 3 条 OR 组合;只在 train 按"
+        "FP×误伤成本+FN×漏放成本选优,validation 仅复验。返回 top 候选、最佳组合"
+        "和带数据/标签/特征/策略指纹的完整快照引用,不改策略、不进入在线判定。"
     ),
     parameters={
         "type": "object",
@@ -282,11 +525,35 @@ def mine_rules(split_ratio: float = 0.7, min_support: float = 0.03,
             },
             "max_candidates": {
                 "type": "integer",
-                "description": "最多返回候选数,1~5,默认 5",
+                "description": "上下文最多返回单候选数,1~2,默认 2;全量进快照",
+            },
+            "max_rules": {
+                "type": "integer",
+                "description": "OR 组合最大规则数,1~3,默认 3",
+            },
+            "fp_cost": {
+                "type": "number",
+                "description": "每个误伤的相对成本,默认 1",
+            },
+            "fn_cost": {
+                "type": "number",
+                "description": "每个漏放的相对成本,默认 5",
+            },
+            "max_fpr": {
+                "type": "number",
+                "description": "训练侧允许的最大误伤率,0~1,默认 0.1",
+            },
+            "save_snapshot": {
+                "type": "boolean",
+                "description": "是否把完整搜索写入研究产物,默认 true",
             },
         },
     },
 )
 def rule_mining(split_ratio: float = 0.7, min_support: float = 0.03,
-                min_lift: float = 1.05, max_candidates: int = 5):
-    return mine_rules(split_ratio, min_support, min_lift, max_candidates)
+                min_lift: float = 1.05, max_candidates: int = 2,
+                max_rules: int = 3, fp_cost: float = 1.0,
+                fn_cost: float = 5.0, max_fpr: float = 0.10,
+                save_snapshot: bool = True):
+    return mine_rules(split_ratio, min_support, min_lift, max_candidates,
+                      max_rules, fp_cost, fn_cost, max_fpr, save_snapshot)

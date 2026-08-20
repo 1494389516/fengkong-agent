@@ -33,6 +33,8 @@
   监控(drift/adversary/risk)、生命周期(申诉/灰名单治理)、审计治理
   (audit_query/差异工单/数据体检/engine_status)
 - **规则集 R001-R006 + 引擎级 R007 模型信号**(阈值全部版本化,point-in-time 回放 + what-if 覆盖;champion 模型分过 model_score_*_threshold 即命中,默认阈值=关闭)
+- **候选规则发现**:train-only 生成/成本选优,更晚 validation 复验;最多 3 条 OR,
+  完整搜索快照绑定数据/标签/特征/策略版本与内容哈希,只在 Agent Plane
 - **名单三色**:black 硬拦 / gray 观察(生命周期裁决)/ white 误伤抑制(降档不留免检)
 - **两阶段处置**:agent 只提交,人在 CLI 审批,全程审计
 - **模型生命周期**:candidate→shadow→challenger→champion 状态机(评估门禁
@@ -80,13 +82,13 @@
 
 | 指标 | 值 |
 |---|---|
-| git commit | `574ef5b` |
+| git commit | `dfc2dde` |
 | 数据指纹 | `028ccc9fef784b6b` |
 | 工具数 | 86 |
-| 离线断言 | 486 项 |
-| 工具 schema | 39143 chars(预算 40500) |
-| system prompt | 5644 chars(预算 5700) |
-| 最近刷新(UTC) | 2026-08-20T09:56:01Z |
+| 离线断言 | 490 项 |
+| 工具 schema | 39384 chars(预算 40500) |
+| system prompt | 5636 chars(预算 5700) |
+| 最近刷新(UTC) | 2026-08-20T10:10:27Z |
 
 > 完整评估报告:`python3 eval/run_eval.py --offline --report out/eval_report.md`
 > 案例库账本:`eval/cases_changelog.md`(24 个黄金案例,含红队与唯一引擎纪律)。

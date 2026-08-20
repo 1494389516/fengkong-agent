@@ -173,7 +173,8 @@ def run_backtest_layer(checks) -> int:
 
 def run_rule_mining_layer() -> int:
     """离线:候选规则只在训练侧发现,更晚验证侧仅复验,输出可执行 AST。"""
-    from agent.tools.rule_mining import discover_candidates, mine_rules
+    from agent.tools.rule_mining import (
+        discover_candidates, mine_rules, search_or_combinations)
 
     train = [
         {"uid": "t%02d" % i, "label": "fraud" if i >= 14 else "normal",
@@ -194,7 +195,30 @@ def run_rule_mining_layer() -> int:
         max_candidates=5,
     )
     best = candidates[0] if candidates else {}
+    combo_train = [
+        {"label": "normal", "coupon_claims": 1, "distinct_ip": 1}
+        for _ in range(20)
+    ] + [
+        {"label": "fraud", "coupon_claims": 10, "distinct_ip": 1}
+        for _ in range(5)
+    ] + [
+        {"label": "fraud", "coupon_claims": 1, "distinct_ip": 10}
+        for _ in range(5)
+    ]
+    combo_eval = list(combo_train)
+    combo_candidates = [
+        {"candidate_id": "C001", "expression": "coupon_claims >= 10",
+         "ast": {"version": "rule-ast/v1", "feature": "coupon_claims",
+                 "operator": "gte", "value": 10}},
+        {"candidate_id": "C002", "expression": "distinct_ip >= 10",
+         "ast": {"version": "rule-ast/v1", "feature": "distinct_ip",
+                 "operator": "gte", "value": 10}},
+    ]
+    combo = search_or_combinations(
+        combo_train, combo_eval, combo_candidates,
+        max_rules=2, fp_cost=1, fn_cost=5, max_fpr=0)
     bad_split = mine_rules(split_ratio=0.2)
+    bad_type = mine_rules(fp_cost="1")
     tiny_sample = mine_rules()
     checks = [
         ("确定性信号可发现", bool(candidates)),
@@ -212,8 +236,15 @@ def run_rule_mining_layer() -> int:
          any(c.get("draft_compatible") is True
              and c.get("conditions", [{}])[0].get("op") == ">="
              for c in candidates)),
+        ("OR 组合覆盖互补欺诈且成本优于单规则",
+         combo.get("best", {}).get("candidate_ids") == ["C001", "C002"]
+         and combo["best"]["train"]["recall"] == 1.0
+         and combo["best"]["train"]["fpr"] == 0.0
+         and combo["best"]["train_cost"]["expected_loss"] == 0.0),
         ("非法时间切分被拒绝",
          "split_ratio" in bad_split.get("error", "")),
+        ("非数值成本参数被业务校验拒绝",
+         "有限数值" in bad_type.get("error", "")),
         ("单类别 holdout 拒绝伪泛化指标",
          "必须同时包含 fraud/normal" in tiny_sample.get("error", "")),
     ]
@@ -2496,8 +2527,15 @@ def run_gen_layer() -> int:
                 "split_ratio": 0.7,
                 "min_support": 0.03,
                 "min_lift": 1.05,
-                "max_candidates": 5,
+                "max_candidates": 2,
+                "max_rules": 3,
+                "fp_cost": 1,
+                "fn_cost": 5,
+                "max_fpr": 0.1,
+                "save_snapshot": True,
             })
+            from agent.tools.rule_mining import verify_snapshot
+            mined_verified = verify_snapshot(mined.get("artifact") or {})
             draft_candidate = next(
                 (c for c in mined.get("candidates", [])
                  if c.get("draft_compatible") and c.get("conditions")),
@@ -2550,6 +2588,23 @@ def run_gen_layer() -> int:
                 ("候选挖掘:conditions 可直接进入规则试衣间",
                  draft_candidate is not None and "error" not in mined_draft
                  and mined_draft.get("conditions") == draft_candidate["conditions"]),
+                ("候选挖掘:OR 成本搜索与完整快照可审计",
+                 mined.get("or_search", {}).get("evaluated_count", 0) > 0
+                 and mined.get("or_search", {}).get("best") is not None
+                 and Path(mined.get("artifact", {}).get("path", "")).exists()
+                 and mined.get("artifact", {}).get("or_combinations", 0)
+                 == mined.get("or_search", {}).get("evaluated_count", 0)
+                 and all(mined.get("artifact", {}).get(k)
+                         for k in ("sha256", "dataset_fingerprint",
+                                   "label_fingerprint", "feature_catalog_version",
+                                   "strategy_version", "git_commit"))),
+                ("候选挖掘:快照哈希可验证且保存全量搜索",
+                 mined_verified.get("valid") is True
+                 and len(mined_verified.get("body", {}).get("candidates", []))
+                 == mined.get("artifact", {}).get("single_candidates")
+                 and len(mined_verified.get("body", {}).get(
+                     "or_search", {}).get("all", []))
+                 == mined.get("artifact", {}).get("or_combinations")),
                 ("校准产出建议阈值", bool(cal.get("suggestions"))),
                 ("建议阈值实测误伤率 <= 5%", realized is not None and realized <= 0.05),
                 ("无参照快照时不误报漂移", cal.get("drift_alarm") is False),

@@ -12,7 +12,7 @@
 ## 主要功能
 
 - 账号、设备、IP 和关联团伙调查；
-- 规则回测、阈值校准和候选规则试跑；
+- 时间切分候选规则挖掘、成本约束 OR 搜索、规则试穿与阈值校准；
 - 特征 IV、KS、AUC、Lift 和 PSI 评估；
 - 特征漂移、规则漂移和对抗行为监控；
 - 黑、灰、白名单及申诉处理；
@@ -224,14 +224,14 @@ DEPLOY.md              部署与生产接入说明
 
 | 项 | 值 |
 |---|---|
-| git commit | `574ef5b` |
+| git commit | `dfc2dde` |
 | 工具数 | 86 |
-| 工具 schema | 39143 chars |
-| system prompt | 5644 chars |
+| 工具 schema | 39384 chars |
+| system prompt | 5636 chars |
 | 数据指纹 | `028ccc9fef784b6b` |
-| 离线断言数 | 486 |
+| 离线断言数 | 490 |
 | agent 黄金案例 | 24 |
-| 最近刷新(UTC) | 2026-08-20T09:56:01Z |
+| 最近刷新(UTC) | 2026-08-20T10:10:27Z |
 
 <!-- AUTO-SYNC:FK-DOC-SNAPSHOT-END -->
 

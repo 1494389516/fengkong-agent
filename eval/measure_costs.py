@@ -95,7 +95,9 @@ def tool_result_sizes():
         ("rule_drift", {}),
         ("feature_risk", {}),
         ("rule_mining", {"split_ratio": 0.7, "min_support": 0.03,
-                         "min_lift": 1.05, "max_candidates": 5}),
+                         "min_lift": 1.05, "max_candidates": 2,
+                         "max_rules": 3, "fp_cost": 1, "fn_cost": 5,
+                         "max_fpr": 0.1, "save_snapshot": True}),
         ("adversary_watch", {}),
         ("rule_draft_test", {"conditions": [
             {"feature": "coupon_claims", "op": ">=", "value": 3}]}),
