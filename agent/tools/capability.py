@@ -6,8 +6,8 @@
   + Runtime capability restriction(本模块:dispatch 单点代码级强制)。
 
 等级:
-  read      只读取证(默认)
-  simulate  模拟/回放(不产生任何写)
+  read      只读取证(必须显式登记,无默认权限)
+  simulate  模拟/回放(不修改生产状态;可写可复现实验产物)
   propose   提交待审批(写通道的申请端,agent 可调用)
   execute   运行时状态写(登记/销单/任务,不经审批但全程审计)
   approve   人类专用(不注册为工具;经 dispatch 调用 = 越权,拒绝+审计)
@@ -109,9 +109,28 @@ def _positive_hit(text: str, kw: str) -> bool:
 
 LEVELS = ("read", "simulate", "propose", "execute", "approve", "admin")
 
-# 显式登记敏感工具;未登记的工具默认 read。
-# propose = 走两阶段审批的申请端;execute = 不经审批但留痕的运行时写。
+# 所有已注册工具都必须出现在下列清单。新工具漏登记时启动失败,
+# 不再 fail-open 成 read。生产状态与敏感导出属 execute;可复现仿真属
+# simulate(允许写非生产实验产物);propose 只能写 pending。
+READ_TOOLS = frozenset({
+    "account_monitor", "account_profile", "adversary_watch",
+    "agent_behavior_drift", "appeal_review", "audit_query",
+    "blacklist_query", "capability_registry", "consistency_check",
+    "daily_brief", "data_health_check", "decision_drift",
+    "decision_explain", "decision_trace", "device_intel", "engine_status",
+    "experiment_report", "feature_catalog", "feature_diff", "feature_drift",
+    "feature_health_check", "feature_parity_check", "feature_stats",
+    "feature_validate", "feedback_pipeline", "graph_relations",
+    "graylist_metrics", "graylist_review", "incident_list",
+    "integration_status", "ip_intel", "job_result", "job_status",
+    "label_diff", "mismatch_queue", "model_compare", "model_drift",
+    "model_list", "model_status", "policy_history",
+    "production_readiness_check", "report_query", "rule_drift", "rule_eval",
+    "scan_all", "strategy_diff", "strategy_list", "strategy_validate",
+})
+
 CAPABILITY = {
+    **{name: "read" for name in READ_TOOLS},
     # 审批/管理员通道:永远不注册为工具,这里登记只是让检查可识别
     "approve": "approve",
     "deny": "approve",
@@ -134,6 +153,18 @@ CAPABILITY = {
     "incident_open": "execute",
     "incident_update": "execute",
     "incident_resolve": "execute",
+    "build_dataset": "execute",
+    "duty_ops": "execute",
+    "experiment_register": "execute",
+    "experiment_start": "execute",
+    "experiment_stop": "execute",
+    "feature_version": "execute",
+    "label_version": "execute",
+    "label_refresh": "execute",
+    "chart_account_timeline": "execute",
+    "chart_threshold_sweep": "execute",
+    "chart_cohort_features": "execute",
+    "chart_drift_dashboard": "execute",
     # 模拟/回放(零写)
     "rule_backtest": "simulate",
     "slice_eval": "simulate",
@@ -151,7 +182,17 @@ _ADMIN_HINT = ("approve", "deny", "admin")
 
 
 def level_of(name: str) -> str:
-    return CAPABILITY.get(name, "read")
+    return CAPABILITY.get(name, "unclassified")
+
+
+def validate_registry(registry: Dict[str, Any]) -> None:
+    """启动门禁:任何注册工具没有显式 capability 都立即失败。"""
+    missing = sorted(set(registry) - set(CAPABILITY))
+    if missing:
+        raise RuntimeError("tool capability 未登记: %s" % ", ".join(missing))
+    invalid = sorted(name for name in registry if CAPABILITY[name] not in LEVELS)
+    if invalid:
+        raise RuntimeError("tool capability 等级无效: %s" % ", ".join(invalid))
 
 
 def audit(kind: str, tool_name: str, level: str, reason: str) -> None:
@@ -184,6 +225,9 @@ def enforce(tool_name: str, is_registered: bool) -> str:
     if not is_registered:
         audit("unknown", tool_name, level, "未知工具调用(疑似枚举)")
         return "unknown tool: %s" % tool_name
+    if level == "unclassified":
+        audit("unclassified", tool_name, level, "工具未显式登记 capability")
+        return "capability denied: %s 未登记权限等级" % tool_name
     if level == "propose":
         uttered = _current_user_text.get()
         if uttered and user_requests_immediate_land(uttered):
@@ -197,8 +241,24 @@ def enforce(tool_name: str, is_registered: bool) -> str:
             return ("propose blocked: 用户未明确要求写入,只给文字建议,"
                     "不要调用 %s" % tool_name)
     if level == "execute":
+        uttered = _current_user_text.get()
+        if (tool_name == "build_dataset" and uttered
+                and not user_requests_export(uttered)):
+            audit("execute_blocked", tool_name, level, "用户未明确要求导出数据集")
+            return ("execute blocked: 用户未明确要求导出建模数据集,"
+                    "不要调用 build_dataset")
         audit("executed", tool_name, level, "执行级工具调用已留痕")
     return ""
+
+
+def user_requests_export(text: str) -> bool:
+    if not text:
+        return False
+    t = text.lower()
+    return any(kw in t for kw in (
+        "导出数据集", "导出建模样本", "构建数据集", "生成训练集",
+        "build_dataset", "export dataset",
+    ))
 
 
 def _audit_records() -> list:
@@ -232,7 +292,7 @@ def capability_registry():
     # 按等级分组返回(而非全量 name->level 表):对 agent 更可读,
     # 也避免大字典被 ② 限幅截断后关键信息(propose/execute)丢失。
     by_level: Dict[str, list] = {"read": [], "simulate": [], "propose": [],
-                                 "execute": []}
+                                 "execute": [], "unclassified": []}
     for name in sorted(registry.keys()):
         lv = level_of(name)
         if lv in by_level:

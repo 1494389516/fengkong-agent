@@ -2,11 +2,11 @@
 """脱敏层(⑦):敏感标识符不出程序边界。
 
 部署红线:uid/IP/设备号发给公有云 LLM = 敏感数据出公司。本层在 LLM 边界
-做双向替换 —— 出去的一律换成不可逆推的 token(UID_xxxxxxxx / IP_xxxxxxxx /
-DEV_xxxxxxxx),回来的 token 再反解成真值执行/展示。LLM 全程只见 token,
+做双向替换 —— 出去的一律换成 HMAC token(UID_xxx / IP_xxx /
+DEV_xxx),回来的 token 再反解成真值执行/展示。LLM 全程只见 token,
 但 token 是确定性的(同值同 token),跨轮推理与关联不受影响。
 
-四个替换点(core.Agent.ask,FK_PRIVACY=1 时启用):
+四个替换点(core.Agent.ask,默认启用,FK_PRIVACY=0 才关闭):
   用户输入 -> tokenize -> LLM;LLM 的工具参数 -> detokenize -> dispatch;
   工具结果 -> tokenize -> 对话历史;最终回答 -> detokenize -> 展示。
 
@@ -21,9 +21,10 @@ IP 尾断言只排除数字、不排除点号:排除点号时句尾 IP("...203.0
 会整段失配泄漏。宁可多脱敏(把版本号误当 IP)也不能漏。
 """
 import hashlib
+import hmac
 import os
 import re
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _PATTERNS: List[Tuple[str, "re.Pattern"]] = [
     ("DEV", re.compile(r"(?<![A-Za-z0-9])(?:g_)?dev_[A-Za-z0-9_]+")),
@@ -32,9 +33,22 @@ _PATTERNS: List[Tuple[str, "re.Pattern"]] = [
     # 敏感网段,只匹配 4 段会让 24 位地址信息绕过脱敏出边界。贪婪量词保证
     # 完整 IP 优先整体成 token,不会被拆成"前三段 + 尾段"。
     ("IP", re.compile(r"(?<![\d.])(?:\d{1,3}\.){2,3}\d{1,3}(?!\d)")),
+    ("EMAIL", re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9.-])")),
+    ("UUID", re.compile(r"(?<![A-Fa-f0-9])[A-Fa-f0-9]{8}-(?:[A-Fa-f0-9]{4}-){3}[A-Fa-f0-9]{12}(?![A-Fa-f0-9])")),
+    ("PHONE", re.compile(r"(?<!\d)(?:\+\d{1,3}[- ]?)?\d{3}[- ]?\d{4}[- ]?\d{4}(?!\d)")),
 ]
 
-_TOKEN_RE = re.compile(r"(?:UID|IP|DEV)_[0-9a-f]{8}")
+_TOKEN_RE = re.compile(r"(?:UID|IP|DEV|EMAIL|PHONE|UUID)_[0-9a-f]{8,16}")
+
+# 结构化工具结果优先按字段名脱敏。正则只能覆盖自由文本,不能把公司的
+# 所有账号格式猜全;字段级处理保证 UUID/邮箱/手机号等未知形态也不出边界。
+_SENSITIVE_KEY_PREFIX = {
+    "uid": "UID", "uids": "UID", "user_id": "UID", "account_id": "UID",
+    "reported_uid": "UID", "reporter": "UID", "member_uids": "UID",
+    "ip": "IP", "ip_address": "IP", "ip_addresses": "IP",
+    "device": "DEV", "device_id": "DEV", "device_ids": "DEV",
+    "email": "EMAIL", "phone": "PHONE", "phone_number": "PHONE",
+}
 
 
 class Tokenizer:
@@ -48,8 +62,19 @@ class Tokenizer:
 
     def _token(self, prefix: str, value: str) -> str:
         if value not in self._fwd:
-            digest = hashlib.sha1((self._salt + value).encode("utf-8")).hexdigest()[:8]
-            token = "%s_%s" % (prefix, digest)
+            # HMAC 防止 token 被离线字典反推;64-bit 输出比旧 32-bit token
+            # 显著降低大规模账号下的碰撞概率。若仍碰撞则带计数器重算,
+            # 绝不能静默覆盖 _rev 后把工具调用还原到另一个账号。
+            counter = 0
+            while True:
+                msg = value if counter == 0 else "%s#%d" % (value, counter)
+                digest = hmac.new(self._salt.encode("utf-8"), msg.encode("utf-8"),
+                                  hashlib.sha256).hexdigest()[:16]
+                token = "%s_%s" % (prefix, digest)
+                previous = self._rev.get(token)
+                if previous is None or previous == value:
+                    break
+                counter += 1
             self._fwd[value] = token
             self._rev[token] = value
         return self._fwd[value]
@@ -62,6 +87,30 @@ class Tokenizer:
     def detokenize(self, text: str) -> str:
         return _TOKEN_RE.sub(lambda m: self._rev.get(m.group(0), m.group(0)), text)
 
+    def tokenize_data(self, obj: Any, key: Optional[str] = None) -> Any:
+        """递归脱敏结构化数据;不修改调用方对象。"""
+        normalized = (key or "").lower()
+        prefix = _SENSITIVE_KEY_PREFIX.get(normalized)
+        if prefix is None and normalized.endswith(("_uid", "_user_id", "_account_id")):
+            prefix = "UID"
+        elif prefix is None and normalized.endswith(("_device_id", "_device_ids")):
+            prefix = "DEV"
+        elif prefix is None and normalized.endswith(("_ip", "_ip_address")):
+            prefix = "IP"
+        if prefix and isinstance(obj, (str, int, float)) and not isinstance(obj, bool):
+            return self._token(prefix, str(obj))
+        if isinstance(obj, dict):
+            return {k: self.tokenize_data(v, str(k)) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self.tokenize_data(v, key) for v in obj]
+        if isinstance(obj, tuple):
+            return [self.tokenize_data(v, key) for v in obj]
+        return obj
+
 
 def privacy_enabled() -> bool:
-    return os.environ.get("FK_PRIVACY", "") == "1"
+    """默认开启；仅显式 FK_PRIVACY=0/false/off/no 才关闭。"""
+    raw = os.environ.get("FK_PRIVACY")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "off", "no")

@@ -69,14 +69,20 @@ python3 eval/day1.py
 启动决策服务：
 
 ```bash
+export FK_SERVE_TOKEN='replace-with-at-least-16-characters'
 python3 serve.py --port 8080
 ```
 
 服务提供以下接口：
 
-- `POST /decide`：执行风险判定；
+- `POST /decide`：执行风险判定，事件必须含唯一 `event_id`；
 - `GET /health`：查看服务及生产就绪状态；
 - `GET /brief`：获取值班摘要。
+
+`/brief` 与 `/decide` 须带 `Authorization: Bearer $FK_SERVE_TOKEN`；
+`/health` 用于存活探针，保持匿名。网关注入 `X-Operator` 时须同时
+按 `timestamp\noperator\nmethod\npath` 用 `FK_OPERATOR_HMAC_SECRET` 生成
+SHA-256 HMAC 签名。
 
 ## 架构
 
@@ -242,8 +248,13 @@ DEPLOY.md              部署与生产接入说明
 | `DEEPSEEK_API_KEY` | 调用 DeepSeek；离线评估不需要 |
 | `FK_DATASET=gen` | 使用生成数据集 |
 | `FK_DATA_DIR=/path` | 指定数据目录，优先级高于 `FK_DATASET` |
-| `FK_PRIVACY=1` | 启用敏感标识符脱敏 |
+| `FK_PRIVACY=0` | 显式关闭敏感标识符脱敏（默认开启） |
+| `FK_ALLOW_INSECURE_LLM=1` | 测试环境二次确认：允许公网 LLM 在脱敏关闭时启动 |
 | `FK_OPERATOR` | 设置审批人标识 |
+| `FK_SERVE_TOKEN` | `/brief` 和 `/decide` 的 Bearer 令牌（至少 16 字符） |
+| `FK_OPERATOR_HMAC_SECRET` | 网关签名 `X-Operator` 身份的密钥 |
+| `FK_IDEMP_TTL_SECONDS` | 在线决策幂等记录保留时间，默认 7 天 |
+| `FK_IDEMP_MAX_RECORDS` | 幂等表最大记录数，默认 10000 |
 | `FK_AGENT_RUN_LOG=1` | 记录 Agent 运行指标 |
 | `FK_ENGINE_DRYRUN_URL` | 配置外部决策引擎试算接口 |
 | `FK_ENGINE_DRYRUN_TIMEOUT` | 设置决策引擎调用超时 |
@@ -252,10 +263,10 @@ DEPLOY.md              部署与生产接入说明
 | `FK_TOOL_PACK` | 选择工具包，默认 `analyst` |
 | `FK_TZ_OFFSET_HOURS` | 设置业务时区偏移，默认 `+8` |
 
-公有云环境建议启用脱敏：
+脱敏默认开启。只有私有化模型或受控测试才应显式关闭：
 
 ```bash
-FK_PRIVACY=1 python3 main.py
+FK_PRIVACY=0 python3 main.py
 ```
 
 ## 安全边界
@@ -265,7 +276,7 @@ FK_PRIVACY=1 python3 main.py
 - 写操作必须进入待审批队列；
 - 工具按 `read`、`simulate`、`propose` 和 `execute` 分级；
 - 审批和管理能力不注册为 Agent 工具；
-- 敏感标识符可在 LLM 边界进行确定性脱敏；
+- 敏感标识符默认在 LLM 边界进行确定性脱敏；
 - 决策、变更和执行操作保留审计记录。
 
 白名单用于降低处置等级，不会跳过全部检查。回测、影子策略和反事实重放不会修改生产状态。
