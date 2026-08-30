@@ -44,6 +44,8 @@ MAX_UID_LEN = 128
 MAX_EVENT_ID_LEN = 256
 MAX_STRING_LEN = 2048
 REQUEST_TIMEOUT = 5.0
+EVENT_MAX_AGE_SECONDS = 300.0
+EVENT_MAX_FUTURE_SECONDS = 30.0
 EVENT_TYPES = {"login", "coupon_claim", "order"}
 _mu = threading.Lock()
 _idemp: OrderedDict = OrderedDict()
@@ -71,10 +73,17 @@ def _compute(event: dict, operator: str) -> dict:
     from agent.tools.lineage import write_lineage
     from agent.tools.rules import rule_eval
     t0 = time.time()
-    r = rule_eval(event, use_current_policy=True)
+    # 在线判定只用服务端接收时间计算时序特征；客户端上报时间仅作审计字段，
+    # 不能让调用方通过回拨 ts 把近期行为从速度窗口里抹掉。
+    source_ts = event.get("_source_ts")
+    evaluation_event = {k: v for k, v in event.items() if k != "_source_ts"}
+    r = rule_eval(evaluation_event, use_current_policy=True)
+    logged_event = dict(evaluation_event)
+    if source_ts is not None:
+        logged_event["source_ts"] = source_ts
     decision = {
         "ts": time.time(),
-        "event": event,
+        "event": logged_event,
         "action": r["action"],
         "rules": sorted({h["rule_id"] for h in r["hits"]}),
         "hits": list(r.get("hits") or []),
@@ -91,12 +100,12 @@ def _compute(event: dict, operator: str) -> dict:
         "combine_score": r.get("combine_score"),
         "latency_ms": round(1000 * (time.time() - t0), 1),
     }
-    write_lineage(event, decision, approver=operator or "serve")
+    write_lineage(logged_event, decision, approver=operator or "serve")
     append_jsonl(_log_path(), decision)
     return _public_view(decision, False)
 
 
-def _decide(event: dict, operator: str = "serve") -> dict:
+def _decide(event: dict, operator: str = "serve", received_at: float = None) -> dict:
     from agent.tools.idemp_store import claim, complete, event_key, lookup, ttl_seconds
     from agent.tools.lineage import event_fingerprint
     key = event_key(event["event_id"])
@@ -120,7 +129,11 @@ def _decide(event: dict, operator: str = "serve") -> dict:
         if public is not None:
             _remember(key, input_fp, public)
             return _replay(public)
-        public = _compute(event, operator)
+        evaluation_event = dict(event)
+        if received_at is not None:
+            evaluation_event["_source_ts"] = event["ts"]
+            evaluation_event["ts"] = received_at
+        public = _compute(evaluation_event, operator)
         complete(key, public, input_fp)
         _remember(key, input_fp, public)
         return public
@@ -176,6 +189,14 @@ def _finite_number(value) -> bool:
             and math.isfinite(float(value)))
 
 
+def _nonnegative_env_float(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) and value >= 0 else default
+
+
 def _validate_json_value(value, depth=0):
     if depth > 8:
         return "JSON 嵌套层数超过 8"
@@ -200,7 +221,7 @@ def _validate_json_value(value, depth=0):
     return ""
 
 
-def _validate_event(event):
+def _validate_event(event, now: float = None):
     if not isinstance(event, dict):
         return "body 必须是 JSON object"
     shape_error = _validate_json_value(event)
@@ -215,6 +236,15 @@ def _validate_event(event):
         return "type 必须是 %s" % "/".join(sorted(EVENT_TYPES))
     if not _finite_number(event.get("ts")) or event["ts"] <= 0:
         return "ts 必须是正的有限数值"
+    now = time.time() if now is None else now
+    max_age = _nonnegative_env_float("FK_EVENT_MAX_AGE_SECONDS",
+                                     EVENT_MAX_AGE_SECONDS)
+    max_future = _nonnegative_env_float("FK_EVENT_MAX_FUTURE_SECONDS",
+                                        EVENT_MAX_FUTURE_SECONDS)
+    if event["ts"] < now - max_age:
+        return "ts 过旧(最多允许 %.0f 秒延迟)" % max_age
+    if event["ts"] > now + max_future:
+        return "ts 超前(最多允许 %.0f 秒时钟偏差)" % max_future
     amount = event.get("amount")
     if amount is not None and (not _finite_number(amount) or amount < 0):
         return "amount 必须是非负有限数值"
@@ -318,7 +348,8 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             self._json(400, {"error": "body 必须是 JSON 事件"})
             return
-        invalid = _validate_event(event)
+        received_at = time.time()
+        invalid = _validate_event(event, now=received_at)
         if invalid:
             self._json(400, {"error": invalid})
             return
@@ -327,7 +358,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(401, {"error": operator_error})
             return
         try:
-            self._json(200, _decide(event, operator=operator))
+            self._json(200, _decide(event, operator=operator,
+                                    received_at=received_at))
         except Exception as exc:
             from agent.tools.idemp_store import IdempotencyConflict
             if isinstance(exc, IdempotencyConflict):
