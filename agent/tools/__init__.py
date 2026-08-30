@@ -138,3 +138,6 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
 # —— 三者放最后,顺序无关)
 from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, drift, calibrate, risk, adversary, draft, reports, feedback, ops, brief, profile, reconcile, graylist, audit, health, engine_status, dataset, rule_mining, model_registry, strategy_registry, jobs, capability, feature_health, lineage, incidents, label_lifecycle, agent_drift, feedback_pipeline, experiments, readiness, feature_parity  # noqa: E402,F401
 # intel 由 monitor/profile 传递导入即完成注册,无需在上一行重复列出
+
+# fail-closed:工具增删时 capability 清单必须同步,否则导入阶段失败。
+capability.validate_registry(_REGISTRY)

@@ -45,10 +45,13 @@
   ② 工单系统插件(案件页一键出调查档案);③ 定时任务(scan_all 日报)。
 - `main.py` 对话循环包 FastAPI;`/reset` 语义 = 会话 TTL;审批命令换成
   带 SSO 身份的卡片按钮。
-- **红线一(数据出境)**:公有云 LLM 前必须启用脱敏层 —— `FK_PRIVACY=1`,
-  uid/IP/设备号在 LLM 边界双向替换为确定性 token(agent/privacy.py),
-  敏感标识符不出程序;接真实数据时把 `_PATTERNS` 换成公司 ID 规范。
+- **红线一(数据出境)**:脱敏层默认开启，公网 LLM 在显式
+  `FK_PRIVACY=0` 时会拒绝启动。uid/IP/设备号等字段先结构化脱敏，
+  自由文本再用模式匹配兜底；接真实数据时仍需补全公司 ID 规范。
   或改用私有化模型 / 云厂商合规专区。
+- **红线一点五(服务身份)**:`/brief` 与 `/decide` 必须配置
+  `FK_SERVE_TOKEN`；网关注入操作人须用 `FK_OPERATOR_HMAC_SECRET`
+  签名，不接受客户端自报的 `X-Operator`。
 - **红线二(权限最小化)**:agent 服务用只读库账号;写操作只能进 pending,
   审批走人;审计进正式审计库。
 - **红线三(注入防线)**:举报文本等用户可控字段经 dispatch 单点包
@@ -71,4 +74,4 @@
 1. 脱敏导出一天真实事件灌入 `data/`,跑 `python3 eval/run_eval.py`;
 2. 配 `DEEPSEEK_API_KEY`(或私有化端点)跑 agent 层 8 案例,拿四维基线;
 3. CLI 包成飞书机器人只读版,进风控值班群试用;
-4. 生产侧开启 `FK_PRIVACY=1` 并按公司 ID 规范扩充 `privacy._PATTERNS`。
+4. 确认默认脱敏的结构化字段和 `privacy._PATTERNS` 覆盖公司 ID 规范。

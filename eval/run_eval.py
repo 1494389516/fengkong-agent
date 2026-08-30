@@ -3726,6 +3726,8 @@ def run_strategy_layer() -> int:
 def run_serve_layer() -> int:
     """离线:在线决策服务冒烟 —— 服务起得来、决策与离线 rule_eval 完全一致
     (线上线下同一引擎是对账的前提)、坏请求不 500、决策留痕。"""
+    import hashlib
+    import hmac
     import socket
     import urllib.request
 
@@ -3737,12 +3739,19 @@ def run_serve_layer() -> int:
         idemp_p.unlink()
     except OSError:
         pass
+    serve_token = "eval-serve-token-at-least-16"
+    operator_secret = "eval-operator-hmac-secret"
+    serve_env = dict(os.environ)
+    serve_env.update({"FK_SERVE_TOKEN": serve_token,
+                      "FK_OPERATOR_HMAC_SECRET": operator_secret})
     proc = subprocess.Popen([sys.executable, str(ROOT / "serve.py"), "--port", str(port)],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            env=serve_env)
     base = "http://127.0.0.1:%d" % port
 
     def _req(path, payload=None, timeout=5, extra_headers=None):
-        hdrs = {"Content-Type": "application/json"}
+        hdrs = {"Content-Type": "application/json",
+                "Authorization": "Bearer " + serve_token}
         if extra_headers:
             hdrs.update(extra_headers)
         req = urllib.request.Request(
@@ -3770,7 +3779,8 @@ def run_serve_layer() -> int:
             return _report("在线决策服务冒烟(离线)", [
                 ("服务在 5s 内就绪", False),
             ])
-        event = {"uid": "u_1002", "type": "coupon_claim", "ts": 1784109633}
+        event = {"event_id": "eval-coupon-1", "uid": "u_1002",
+                 "type": "coupon_claim", "ts": 1784109633}
         offline = rule_eval(dict(event), use_current_policy=True)
         logp = ROOT / "out" / "serve_decisions.jsonl"
         n0 = len(logp.read_text(encoding="utf-8").splitlines()) if logp.exists() else 0
@@ -3778,17 +3788,26 @@ def run_serve_layer() -> int:
         n1 = len(logp.read_text(encoding="utf-8").splitlines()) if logp.exists() else 0
         code2, online2 = _req("/decide", event)
         n2 = len(logp.read_text(encoding="utf-8").splitlines()) if logp.exists() else 0
-        bad_code, _ = _req("/decide", {"type": "order"})  # 缺 uid
+        bad_code, _ = _req("/decide", {"event_id": "eval-bad-1", "type": "order",
+                                        "ts": 1784109633})  # 缺 uid
         huge = urllib.request.Request(
             base + "/decide", data=b"x" * (70 * 1024),
-            headers={"Content-Type": "application/json"})
+            headers={"Content-Type": "application/json",
+                     "Authorization": "Bearer " + serve_token})
         try:
             with urllib.request.urlopen(huge, timeout=5) as resp:
                 huge_code = resp.status
         except urllib.error.HTTPError as e:
             huge_code = e.code
-        sso_ev = {"uid": "u_1001", "type": "login", "ts": 1784099100}
-        _req("/decide", sso_ev, extra_headers={"X-Operator": "eval_sso"})
+        sso_ev = {"event_id": "eval-login-sso-1", "uid": "u_1001",
+                  "type": "login", "ts": 1784099100}
+        op_ts = str(int(time.time()))
+        op_msg = "%s\n%s\nPOST\n/decide" % (op_ts, "eval_sso")
+        op_sig = hmac.new(operator_secret.encode(), op_msg.encode(),
+                          hashlib.sha256).hexdigest()
+        _req("/decide", sso_ev, extra_headers={
+            "X-Operator": "eval_sso", "X-Operator-Timestamp": op_ts,
+            "X-Operator-Signature": op_sig})
         from agent.tools.lineage import _load_lineage
         lin = [r for r in _load_lineage() if r.get("approver") == "serve"]
         last = lin[-1] if lin else {}
@@ -3812,7 +3831,7 @@ def run_serve_layer() -> int:
             ("生产血缘含 hits 明细",
              bool(last.get("hits"))
              and any(h.get("rule_id") for h in last.get("hits") or [])),
-            ("SSO 接缝:X-Operator 写入血缘 approver",
+            ("SSO 接缝:签名 X-Operator 写入血缘 approver",
              bool(sso_lin) and sso_lin[-1].get("uid") == "u_1001"),
             ("决策留痕(serve_decisions.jsonl)", logp.exists()),
         ])

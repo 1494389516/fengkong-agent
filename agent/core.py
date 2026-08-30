@@ -10,7 +10,8 @@ MAX_TOOL_ROUNDS 防止模型陷入无限调工具的循环。
   ④ 工具裁剪    —— TOOL_KEEP_TURNS 之前的 tool 结果替换成占位符(结论已被 assistant 吸收)。
   ⑤ checkpoint  —— CHECKPOINT_EVERY 轮把旧历史压成一条摘要(代价最高,默认关)。
   ⑥ 硬预算兜底  —— 发送前粗估上下文,超 CONTEXT_EST_TOKEN_BUDGET 强制压缩(保险丝)。
-  ⑦ 脱敏层      —— FK_PRIVACY=1 时,uid/IP/设备号在 LLM 边界双向替换(privacy.py),
+  ⑦ 脱敏层      —— 默认开启(FK_PRIVACY=0 才显式关闭),uid/IP/设备号在
+                    LLM 边界双向替换(privacy.py),
                     敏感标识符不出程序,公有云 API 部署的合规前提。
 (② 工具限幅在 tools/dispatch 单点做;③ 案例隔离用 reset(),由 CLI /reset 触发。)
 """
@@ -335,8 +336,11 @@ class Agent:
                 latency["tool_ms"] += tool_ms
                 tool_times.append((name, tool_ms))
                 tools_used.append(name)
-                content = json.dumps(result, ensure_ascii=False, default=str)
-                if self._privacy:  # ⑦ 工具结果回填历史前替换成 token
+                # ⑦ 工具结果先按 JSON 字段结构化脱敏,再用正则扫自由文本。
+                # 只做后一层会漏掉邮箱/UUID/公司自定义 uid 等未知格式。
+                safe_result = self._tok.tokenize_data(result) if self._privacy else result
+                content = json.dumps(safe_result, ensure_ascii=False, default=str)
+                if self._privacy:
                     content = self._tok.tokenize(content)
                 self.messages.append({
                     "role": "tool",
