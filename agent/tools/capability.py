@@ -177,6 +177,32 @@ CAPABILITY = {
     "strategy_shadow": "simulate",
 }
 
+# execute 不等于“模型可自行决定写入”。下面按工具登记用户必须明确表达的
+# 动作意图；工具名本身也可作为高级用户的显式指令。空 user_text 仅代表
+# 评估脚本/内部调度等可信直接调用，不经过 Agent 对话边界。
+EXECUTE_INTENT = {
+    "model_register": ("登记模型", "注册模型"),
+    "strategy_register": ("登记策略", "注册策略"),
+    "model_eval": ("评估模型", "模型评估", "跑模型评估"),
+    "mismatch_resolve": ("处理对账差异", "解决对账差异", "关闭对账工单"),
+    "job_submit": ("提交任务", "启动任务", "创建任务", "跑异步任务"),
+    "job_cancel": ("取消任务", "停止任务"),
+    "incident_open": ("开事故单", "创建事故", "登记事故"),
+    "incident_update": ("更新事故", "追加事故", "记录事故进展"),
+    "incident_resolve": ("事故结案", "关闭事故", "解决事故"),
+    "duty_ops": ("值班操作", "加入观察", "添加观察", "确认告警", "解除观察"),
+    "experiment_register": ("登记实验", "注册实验", "创建实验"),
+    "experiment_start": ("启动实验", "开始实验"),
+    "experiment_stop": ("停止实验", "结束实验"),
+    "feature_version": ("特征快照", "特征版本"),
+    "label_version": ("标签快照", "标签版本"),
+    "label_refresh": ("刷新标签快照", "刷新标签版本"),
+    "chart_account_timeline": ("账号时间线图", "绘制账号时间线", "生成账号时间线"),
+    "chart_threshold_sweep": ("阈值扫描图", "绘制阈值扫描", "生成阈值扫描"),
+    "chart_cohort_features": ("群体特征图", "绘制群体特征", "生成群体特征"),
+    "chart_drift_dashboard": ("漂移看板", "漂移图", "生成漂移看板"),
+}
+
 # 越权词根:工具名像审批/管理通道的一律按越权处理(防绕过)
 _ADMIN_HINT = ("approve", "deny", "admin")
 
@@ -193,6 +219,14 @@ def validate_registry(registry: Dict[str, Any]) -> None:
     invalid = sorted(name for name in registry if CAPABILITY[name] not in LEVELS)
     if invalid:
         raise RuntimeError("tool capability 等级无效: %s" % ", ".join(invalid))
+    missing_intent = sorted(
+        name for name in registry
+        if CAPABILITY[name] == "execute"
+        and name != "build_dataset"
+        and name not in EXECUTE_INTENT)
+    if missing_intent:
+        raise RuntimeError("execute 工具未登记显式意图: %s"
+                           % ", ".join(missing_intent))
 
 
 def audit(kind: str, tool_name: str, level: str, reason: str) -> None:
@@ -247,6 +281,12 @@ def enforce(tool_name: str, is_registered: bool) -> str:
             audit("execute_blocked", tool_name, level, "用户未明确要求导出数据集")
             return ("execute blocked: 用户未明确要求导出建模数据集,"
                     "不要调用 build_dataset")
+        if (tool_name != "build_dataset" and uttered
+                and not user_requests_execute(uttered, tool_name)):
+            audit("execute_blocked", tool_name, level,
+                  "用户未明确要求执行该写操作")
+            return ("execute blocked: 用户未明确要求执行 %s,"
+                    "只给文字建议或先询问确认" % tool_name)
         audit("executed", tool_name, level, "执行级工具调用已留痕")
     return ""
 
@@ -259,6 +299,17 @@ def user_requests_export(text: str) -> bool:
         "导出数据集", "导出建模样本", "构建数据集", "生成训练集",
         "build_dataset", "export dataset",
     ))
+
+
+def user_requests_execute(text: str, tool_name: str) -> bool:
+    """用户是否明确点名当前 execute 动作；默认拒绝未登记的 execute 工具。"""
+    if not text:
+        return False
+    t = text.lower()
+    phrases = (tool_name.lower(),) + tuple(
+        kw.lower() for kw in EXECUTE_INTENT.get(tool_name, ()))
+    return bool(EXECUTE_INTENT.get(tool_name)) and any(
+        _positive_hit(t, phrase) for phrase in phrases)
 
 
 def _audit_records() -> list:

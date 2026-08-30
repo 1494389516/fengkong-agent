@@ -83,6 +83,8 @@ python3 serve.py --port 8080
 `/health` 用于存活探针，保持匿名。网关注入 `X-Operator` 时须同时
 按 `timestamp\noperator\nmethod\npath` 用 `FK_OPERATOR_HMAC_SECRET` 生成
 SHA-256 HMAC 签名。
+在线事件的 `ts` 默认只允许最多延迟 300 秒、超前 30 秒；判定时序特征
+使用服务端接收时间，客户端时间只作审计，避免回拨时间绕过速度规则。
 
 ## 架构
 
@@ -253,6 +255,8 @@ DEPLOY.md              部署与生产接入说明
 | `FK_OPERATOR` | 设置审批人标识 |
 | `FK_SERVE_TOKEN` | `/brief` 和 `/decide` 的 Bearer 令牌（至少 16 字符） |
 | `FK_OPERATOR_HMAC_SECRET` | 网关签名 `X-Operator` 身份的密钥 |
+| `FK_EVENT_MAX_AGE_SECONDS` | 在线事件允许的最大延迟，默认 300 秒 |
+| `FK_EVENT_MAX_FUTURE_SECONDS` | 在线事件允许的最大时钟超前，默认 30 秒 |
 | `FK_IDEMP_TTL_SECONDS` | 在线决策幂等记录保留时间，默认 7 天 |
 | `FK_IDEMP_MAX_RECORDS` | 幂等表最大记录数，默认 10000 |
 | `FK_AGENT_RUN_LOG=1` | 记录 Agent 运行指标 |
@@ -274,10 +278,13 @@ FK_PRIVACY=0 python3 main.py
 - LLM 不参与在线判定；
 - Agent 无权执行审批；
 - 写操作必须进入待审批队列；
-- 工具按 `read`、`simulate`、`propose` 和 `execute` 分级；
+- 工具按 `read`、`simulate`、`propose` 和 `execute` 分级；所有 `execute`
+  工具还必须匹配用户对该具体动作的明确指令；
 - 审批和管理能力不注册为 Agent 工具；
 - 敏感标识符默认在 LLM 边界进行确定性脱敏；
 - 决策、变更和执行操作保留审计记录。
+- 写工具和人工审批共用跨进程写锁；审批使用恢复日志，审计落盘失败会
+  回滚业务状态并保留待审批项。
 
 白名单用于降低处置等级，不会跳过全部检查。回测、影子策略和反事实重放不会修改生产状态。
 

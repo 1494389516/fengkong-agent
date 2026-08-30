@@ -87,6 +87,29 @@ def atomic_write_json(path: Path, obj: Any, *, mkdir: bool = True) -> None:
                 pass
 
 
+def atomic_write_text(path: Path, text: str, *, mkdir: bool = True) -> None:
+    """原子写 UTF-8 文本；事务恢复 JSONL/原始快照时使用。"""
+    path = Path(path)
+    if mkdir:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp",
+                               dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        tmp = None
+        invalidate_cache(path)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
 @contextmanager
 def file_lock(path: Path, *, mkdir: bool = True) -> Iterator[None]:
     """同进程 RLock + 跨进程 flock。锁文件是 path + '.lock'。
@@ -105,6 +128,17 @@ def file_lock(path: Path, *, mkdir: bool = True) -> Iterator[None]:
                 fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
             finally:
                 lf.close()
+
+
+@contextmanager
+def state_write_lock() -> Iterator[None]:
+    """序列化 Agent 写工具与人工审批的跨文件读改写事务。
+
+    单文件仍使用各自的 file_lock；本锁负责避免两个写工作流同时读取旧快照
+    后互相覆盖，也为审批恢复日志提供稳定的一致性边界。
+    """
+    with file_lock(data_dir() / ".state_write"):
+        yield
 
 
 def append_jsonl(path: Path, rec: Any) -> None:

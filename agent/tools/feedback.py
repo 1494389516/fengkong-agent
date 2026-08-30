@@ -130,28 +130,31 @@ def appeal_resolve(appeal_id: int, decision: str, reason: str):
         return {"error": "查无申诉 appeal_id=%d" % appeal_id}
     if matched[0].get("status") != "pending":
         return {"status": "already_resolved", "appeal": matched[0]}
-    from .actions import _load_pending, _now_iso, _save_pending
-    pending = _load_pending()
-    dup = [p for p in pending if p.get("kind") == "appeal_resolve"
-           and p.get("appeal_id") == appeal_id]
-    if dup:
-        return {"status": "already_pending", "action_id": dup[0]["action_id"]}
-    action_id = max((p["action_id"] for p in pending), default=0) + 1
+    from .actions import _now_iso, mutate_pending
     uid = matched[0]["uid"]
     rules_now = account_verdicts([uid], load_events())[uid]["rules"]
-    pending.append({
-        "action_id": action_id,
-        "kind": "appeal_resolve",
-        "appeal_id": appeal_id,
-        "uid": uid,
-        "decision": decision,
-        "rules_at_resolution": rules_now,
-        "reason": reason,
-        "requested_at": _now_iso(),
-    })
-    _save_pending(pending)
-    return {"status": "pending_confirmation", "action_id": action_id,
-            "note": "已提交待审批,需研究员在 CLI 执行 /approve %d 后生效" % action_id}
+
+    def _submit(pending):
+        dup = [p for p in pending if p.get("kind") == "appeal_resolve"
+               and p.get("appeal_id") == appeal_id]
+        if dup:
+            return {"status": "already_pending", "action_id": dup[0]["action_id"]}
+        action_id = max((p["action_id"] for p in pending), default=0) + 1
+        pending.append({
+            "action_id": action_id,
+            "kind": "appeal_resolve",
+            "appeal_id": appeal_id,
+            "uid": uid,
+            "decision": decision,
+            "rules_at_resolution": rules_now,
+            "reason": reason,
+            "requested_at": _now_iso(),
+        })
+        return {"status": "pending_confirmation", "action_id": action_id,
+                "note": "已提交待审批,需研究员在 CLI 执行 /approve %d 后生效"
+                        % action_id}
+
+    return mutate_pending(_submit)
 
 
 def apply_appeal_decision(action: Dict) -> Dict:

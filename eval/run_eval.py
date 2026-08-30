@@ -364,8 +364,8 @@ def run_actions_layer() -> int:
                  all(k in q_all["records"][0]
                      for k in ("ts", "decision", "kind", "action"))),
                 ("时间倒序(最新在前)", q_all["records"][0]["decision"] == "deny"),
-                ("批准记录 decided_by=cli(默认身份)",
-                 q_approve["records"][0].get("decided_by") == "cli"),
+                ("批准记录使用可追溯 OS 账号(不再是通用 cli)",
+                 q_approve["records"][0].get("decided_by", "").startswith("os:")),
                 ("驳回记录 decided_by=tester1(FK_OPERATOR 注入)",
                  q_deny["records"][0].get("decided_by") == "tester1"),
                 ("decided_by 过滤精确命中", q_by.get("count") == 1
@@ -3779,8 +3779,9 @@ def run_serve_layer() -> int:
             return _report("在线决策服务冒烟(离线)", [
                 ("服务在 5s 内就绪", False),
             ])
+        eval_now = time.time()
         event = {"event_id": "eval-coupon-1", "uid": "u_1002",
-                 "type": "coupon_claim", "ts": 1784109633}
+                 "type": "coupon_claim", "ts": eval_now}
         offline = rule_eval(dict(event), use_current_policy=True)
         logp = ROOT / "out" / "serve_decisions.jsonl"
         n0 = len(logp.read_text(encoding="utf-8").splitlines()) if logp.exists() else 0
@@ -3789,7 +3790,7 @@ def run_serve_layer() -> int:
         code2, online2 = _req("/decide", event)
         n2 = len(logp.read_text(encoding="utf-8").splitlines()) if logp.exists() else 0
         bad_code, _ = _req("/decide", {"event_id": "eval-bad-1", "type": "order",
-                                        "ts": 1784109633})  # 缺 uid
+                                        "ts": eval_now})  # 缺 uid
         huge = urllib.request.Request(
             base + "/decide", data=b"x" * (70 * 1024),
             headers={"Content-Type": "application/json",
@@ -3800,7 +3801,7 @@ def run_serve_layer() -> int:
         except urllib.error.HTTPError as e:
             huge_code = e.code
         sso_ev = {"event_id": "eval-login-sso-1", "uid": "u_1001",
-                  "type": "login", "ts": 1784099100}
+                  "type": "login", "ts": time.time()}
         op_ts = str(int(time.time()))
         op_msg = "%s\n%s\nPOST\n/decide" % (op_ts, "eval_sso")
         op_sig = hmac.new(operator_secret.encode(), op_msg.encode(),

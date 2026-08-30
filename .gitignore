@@ -6,6 +6,8 @@ out/
 data/gen/
 data/pending_actions.json
 data/audit.jsonl
+data/audit_pending.jsonl
+data/approval_transaction.json
 data/mismatch_queue.json
 data/model_registry.json
 data/security_audit.jsonl

@@ -33,6 +33,8 @@ def _fmt_session_usage(agent):
 
 
 def main():
+    if actions.recover_approval_transaction():
+        print("[恢复] 检测到未完成审批事务,已回滚到审批前状态。")
     agent = Agent()
     print("风控分析 agent(模型: %s%s)。" % (
         agent.model, ", strict mode" if agent.strict_mode else "",

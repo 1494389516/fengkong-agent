@@ -15,6 +15,7 @@
 """
 import json
 import os
+import getpass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -22,8 +23,10 @@ from . import tool
 from . import policy
 from .blacklist import VALID_LISTS, active_records
 from .datasource import (
-    append_jsonl, atomic_write_json, audit_log_path, blacklist_path,
-    data_dir, file_lock, load_blacklist, pending_actions_path,
+    appeals_path, append_jsonl, atomic_write_json, atomic_write_text,
+    audit_log_path, blacklist_path, data_dir, file_lock, invalidate_cache,
+    labels_path, load_blacklist, pending_actions_path, postmortems_path,
+    state_write_lock, thresholds_path,
 )
 
 VALID_DIMENSIONS = ("uid", "ip", "device_id")
@@ -282,12 +285,76 @@ def _write_blacklist(records: List[Dict]) -> None:
         atomic_write_json(path, records, mkdir=False)
 
 
+def _approval_journal_path():
+    return data_dir() / "approval_transaction.json"
+
+
+def _approval_paths(action: Dict) -> List:
+    """审批可能触及的文件；事务日志保存原文快照用于异常/崩溃恢复。"""
+    paths = [pending_actions_path(), audit_log_path(),
+             data_dir() / "audit_pending.jsonl"]
+    kind = action.get("kind", "blacklist_add")
+    if kind in ("blacklist_add", "blacklist_remove"):
+        paths.append(blacklist_path())
+    elif kind == "threshold_change":
+        paths.append(thresholds_path())
+    elif kind == "appeal_resolve":
+        paths.extend([appeals_path(), blacklist_path(), labels_path(),
+                      data_dir() / "label_lineage.jsonl", postmortems_path()])
+    elif kind in ("model_promote", "model_rollback"):
+        paths.append(data_dir() / "model_registry.json")
+    elif kind in ("strategy_promote", "strategy_rollback"):
+        paths.append(data_dir() / "strategy_registry.json")
+    # 保持顺序且去重。
+    return list(dict.fromkeys(paths))
+
+
+def _snapshot_files(paths: List) -> Dict[str, Dict]:
+    out = {}
+    for path in paths:
+        p = path
+        out[str(p)] = {
+            "exists": p.exists(),
+            "content": p.read_text(encoding="utf-8") if p.exists() else "",
+        }
+    return out
+
+
+def _restore_files(snapshots: Dict[str, Dict]) -> None:
+    for raw_path, snap in snapshots.items():
+        from pathlib import Path
+        path = Path(raw_path)
+        if snap.get("exists"):
+            atomic_write_text(path, snap.get("content", ""))
+        elif path.exists():
+            path.unlink()
+            invalidate_cache(path)
+
+
+def _recover_approval_transaction_locked() -> bool:
+    journal = _approval_journal_path()
+    if not journal.exists():
+        return False
+    obj = json.loads(journal.read_text(encoding="utf-8"))
+    if obj.get("status") != "committed":
+        _restore_files(obj.get("snapshots") or {})
+    journal.unlink(missing_ok=True)
+    return True
+
+
+def recover_approval_transaction() -> bool:
+    """启动/下一次审批时恢复未提交事务；committed 残留只做清理。"""
+    with state_write_lock():
+        return _recover_approval_transaction_locked()
+
+
 def decide(action_id: int, approve: bool, operator: Optional[str] = None) -> Optional[Dict]:
     """审批一条申请:按 kind 分派落盘(名单库 / 策略版本表),统一记审计。
     返回该申请,查无返回 None。
-    审计身份:operator 参数 > FK_OPERATOR 环境变量 > "cli"。接 SSO/飞书后
-    由网关把审批人身份注入 FK_OPERATOR —— 审批必须有可追溯的人。"""
-    decided_by = operator or os.environ.get("FK_OPERATOR") or "cli"
+    审计身份:operator 参数 > FK_OPERATOR 环境变量 > 当前 OS 账号。
+    不再用无法追溯主体的通用 "cli"；生产仍应由 SSO 注入 FK_OPERATOR。"""
+    decided_by = (operator or os.environ.get("FK_OPERATOR")
+                  or "os:%s" % getpass.getuser())
     path = pending_actions_path()
 
     def _apply(pending):
@@ -355,29 +422,44 @@ def decide(action_id: int, approve: bool, operator: Optional[str] = None) -> Opt
             "applied_detail": applied_detail,
         }
 
-    with file_lock(path):
-        pending = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
-        result = _apply(pending)
-        if result is None:
-            return None
-        atomic_write_json(path, pending)
-    audit_rec = {
-        "ts": _now_iso(),
-        "decided_by": decided_by,
-        "decision": "approve" if approve else "deny",
-        "kind": result["kind"],
-        "applied_policy_version": result["applied_version"],
-        **({"applied_detail": result["applied_detail"]} if result["applied_detail"] else {}),
-        "action": result["action"],
-    }
-    try:
-        append_jsonl(audit_log_path(), audit_rec)
-    except Exception:  # noqa: BLE001 变更已生效,审计失败转补偿队列
-        try:
-            append_jsonl(data_dir() / "audit_pending.jsonl", {
-                "error": "audit_write_failed", "record": audit_rec})
-        except Exception:  # noqa: BLE001
-            pass
+    with state_write_lock():
+        _recover_approval_transaction_locked()
+        with file_lock(path):
+            pending = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+            matched = [a for a in pending if a["action_id"] == action_id]
+            if not matched:
+                return None
+            journal = {
+                "status": "prepared",
+                "action_id": action_id,
+                "approve": bool(approve),
+                "operator": decided_by,
+                "prepared_at": _now_iso(),
+                "snapshots": _snapshot_files(_approval_paths(matched[0])),
+            }
+            atomic_write_json(_approval_journal_path(), journal)
+            try:
+                result = _apply(pending)
+                atomic_write_json(path, pending)
+                audit_rec = {
+                    "ts": _now_iso(),
+                    "decided_by": decided_by,
+                    "decision": "approve" if approve else "deny",
+                    "kind": result["kind"],
+                    "applied_policy_version": result["applied_version"],
+                    **({"applied_detail": result["applied_detail"]}
+                       if result["applied_detail"] else {}),
+                    "action": result["action"],
+                }
+                # 审计是提交条件，不再允许状态已生效而审计静默丢失。
+                append_jsonl(audit_log_path(), audit_rec)
+                journal["status"] = "committed"
+                atomic_write_json(_approval_journal_path(), journal)
+            except Exception:
+                _restore_files(journal["snapshots"])
+                _approval_journal_path().unlink(missing_ok=True)
+                raise
+            _approval_journal_path().unlink(missing_ok=True)
     if not approve:
         from .feedback_pipeline import record_override  # 惰性:否决回灌训练信号
         record_override({
