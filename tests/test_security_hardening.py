@@ -199,7 +199,15 @@ class HttpServiceTests(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         data_dir = Path(cls.tmp.name) / "data"
-        shutil.copytree(ROOT / "data", data_dir)
+        data_dir.mkdir()
+        # Static JSON seeds tracked at baseline 1548785eccd5500545e5850d7399ba4b64158c4c.
+        # Runtime journals/idempotency stores must not enter a fresh deployment:
+        # existing legacy state correctly activates the explicit migration guard.
+        for filename in (
+                "accounts.json", "appeals.json", "blacklist.json", "decisions_log.json",
+                "device_intel.json", "events_sample.json", "ip_intel.json", "labels.json",
+                "reports.json", "thresholds.json"):
+            shutil.copy2(ROOT / "data" / filename, data_dir / filename)
         cls.log_path = Path(cls.tmp.name) / "serve.jsonl"
         cls.token = "test-bearer-token-at-least-16"
         cls.operator_secret = "test-operator-secret"

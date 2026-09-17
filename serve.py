@@ -221,6 +221,11 @@ def _validate_json_value(value, depth=0):
 def _validate_event(event, now: float = None, *, source_kind="legacy_client"):
     if not isinstance(event, dict):
         return "body 必须是 JSON object"
+    # Contract discriminator matches contracts/business-risk-event.schema.json.
+    # Absence retains legacy business-event compatibility; an explicit other
+    # envelope kind must never be laundered through an authenticated source.
+    if "kind" in event and event["kind"] != "business_risk_event":
+        return "kind 必须是 business_risk_event（不能提交 SDK 或决策请求封装）"
     reserved = {"tenant_id", "app_id", "source_kind", "server_aggregates", "server_verified_attestation",
                 "received_at", "decision_id", "_source_ts"}
     if reserved.intersection(event):
