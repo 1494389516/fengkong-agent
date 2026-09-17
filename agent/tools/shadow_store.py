@@ -30,11 +30,25 @@ def _evidence() -> Dict[str, str]:
     from .featurelib import FEATURE_CATALOG_VERSION
     from .label_lifecycle import label_fingerprint
     from .readiness import _git_commit
+    from .policy import baseline_digest
+    code = hashlib.sha256()
+    root = Path(__file__).resolve().parents[1]
+    for source in sorted(root.rglob("*.py")):
+        code.update(str(source.relative_to(root)).encode())
+        code.update(source.read_bytes())
+    registry = hashlib.sha256()
+    for name in ("model_registry.json", "strategy_registry.json"):
+        source = data_dir() / name
+        registry.update(name.encode())
+        registry.update(source.read_bytes() if source.exists() else b"absent")
     return {
         "dataset_fingerprint": dataset_fingerprint(),
         "label_fingerprint": label_fingerprint(),
         "feature_catalog_version": FEATURE_CATALOG_VERSION,
         "git_commit": _git_commit() or "unknown",
+        "code_digest": code.hexdigest(),
+        "baseline_digest": baseline_digest(),
+        "registry_digest": registry.hexdigest(),
     }
 
 
@@ -91,12 +105,11 @@ def verify_threshold_artifact(bind: Dict) -> Dict[str, Any]:
     if stored != expect or digest != expect:
         raise ValueError("影子产物哈希不匹配(已被改写),请重新提案")
     exp = body.get("expires_at") or bind.get("expires_at")
-    if exp and exp < _iso(_now()):
+    if exp and exp <= _iso(_now()):
         raise ValueError("影子证据已过期(%s),请重新提案" % exp)
     live = _evidence()
-    for key in ("dataset_fingerprint", "label_fingerprint",
-                "feature_catalog_version"):
-        if body.get(key) and body[key] != live[key]:
+    for key in live:
+        if body.get(key) != live[key]:
             raise ValueError("影子产物%s已漂(产物=%s, 当前=%s),请重新提案"
-                             % (key, body[key], live[key]))
+                             % (key, body.get(key), live[key]))
     return body

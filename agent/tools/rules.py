@@ -271,9 +271,9 @@ def _local_rule_eval(event: Dict[str, Any], use_current_policy: bool = False,
     for dim, val in (("uid", uid), ("ip", ip), ("device_id", device_id)):
         if not val:
             continue
-        for rec in active_records(dim, val, as_of, lists=("white",)):
+        for rec in active_records(dim, val, as_of, lists=("white",), scope=event_type):
             white.append({"dimension": dim, "value": val, "reason": rec["reason"],
-                          "expires_at": rec.get("expires_at")})
+                          "expires_at": rec.get("expires_at"), "scope": rec.get("scope")})
             if active_records(dim, val, as_of, lists=("black",)):
                 white_conflict = True
 

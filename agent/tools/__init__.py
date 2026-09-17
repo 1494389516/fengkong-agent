@@ -102,7 +102,7 @@ def schemas(*, strict: bool = False, pack: str = None) -> List[Dict[str, Any]]:
     return out
 
 
-def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
+def dispatch(name: str, arguments: Dict[str, Any], *, projection: bool = True) -> Any:
     """执行工具。异常不上抛,包成 error 返回给模型,让它自行调整。
     权限纪律(P0-7):capability 检查在代码层先于一切 —— approve/admin
     通道与未知工具拒绝并写 security audit,execute 级调用留痕。"""
@@ -120,8 +120,8 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
             if name == "account_profile":
                 sc = ask_state.profile_short_circuit(arguments.get("uid") or "")
                 if sc:
-                    return _cap(sc)
-            return _cap(_REGISTRY[name]["fn"](**arguments))
+                    return sc
+            return _REGISTRY[name]["fn"](**arguments)
 
         # JSON 登记簿普遍采用读-改-原子覆盖。单有 atomic_write 只能防半截文件，
         # 不能防两个进程同时从旧版本出发后互相覆盖；所有写工具在整个调用周期
@@ -136,6 +136,9 @@ def dispatch(name: str, arguments: Dict[str, Any]) -> Any:
                 result = _invoke()
         else:
             result = _invoke()
+        if not projection:
+            return result
+        result = _cap(result)
         ask_state.note_tool_result(name, result)
         return ask_state.attach_speak(result)
     except Exception as e:  # noqa: BLE001
