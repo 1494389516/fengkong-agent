@@ -38,3 +38,7 @@ SQLite and local durable workers target one host/shared local disk, not a distri
 - `python eval/run_eval.py --offline`: **510 PASS**, exit 0. Existing assertions retained; fixture versions and output paths updated to the enforced contract.
 - SDK `python -m unittest discover -s contracts/tests -q`: **14 passed**.
 - Full local logs are in `evidence/`; macOS CI is tracked on SDK PR #84 and recorded separately after its actual outcome.
+
+## Actual macOS CI
+
+SDK code commit `5178552738b4bfa0ec8b7be8a17de3a7278f421b`: [run 35195407412](https://github.com/1494389516/cloudphone-risk-detector/actions/runs/35195407412), job 105117339133 **SUCCESS**. macOS 14 runner built the real package (65.19s); selected FusionTransportTests/FusionGraphTests/GraphModuleTests **25 tests, 0 failures**; Python **14 tests PASS**. Earlier CI runs 35194773165 and 35195077191 failed on a compiler expression limit and a non-exhaustive new error switch, respectively; both were fixed and the same gate rerun. This is host/selected-suite evidence, not a full native or real-device safety claim.

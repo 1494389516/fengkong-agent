@@ -20,7 +20,7 @@
       "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Proto/risk_report.proto"
     ],
     "implementation": {
-      "status": "implemented_native_ci_pending",
+      "status": "implemented_automated_acceptance_pass_device_pending",
       "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
       "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
       "closed": false,
@@ -28,7 +28,8 @@
       "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
       "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
       "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
-      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md",
+      "native_ci": "https://github.com/1494389516/cloudphone-risk-detector/actions/runs/35195407412 (25 selected Swift tests PASS)"
     }
   },
   {
@@ -54,7 +55,7 @@
       "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/serve.py"
     ],
     "implementation": {
-      "status": "implemented_native_ci_pending",
+      "status": "implemented_automated_acceptance_pass_device_pending",
       "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
       "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
       "closed": false,
@@ -62,7 +63,8 @@
       "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
       "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
       "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
-      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md",
+      "native_ci": "https://github.com/1494389516/cloudphone-risk-detector/actions/runs/35195407412 (25 selected Swift tests PASS)"
     }
   },
   {
@@ -84,7 +86,7 @@
       "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Risk/GrpcReportPayload.swift"
     ],
     "implementation": {
-      "status": "implemented_native_ci_pending",
+      "status": "implemented_automated_acceptance_pass_device_pending",
       "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
       "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
       "closed": false,
@@ -92,7 +94,8 @@
       "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
       "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
       "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
-      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md",
+      "native_ci": "https://github.com/1494389516/cloudphone-risk-detector/actions/runs/35195407412 (25 selected Swift tests PASS)"
     }
   },
   {
