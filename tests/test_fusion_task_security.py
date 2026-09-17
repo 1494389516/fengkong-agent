@@ -117,3 +117,41 @@ class FusionSecurityTests(unittest.TestCase):
                 agent.ask('hello')
         finally:
             agent._ask_lock.release()
+
+    def fake_agent(self):
+        import threading
+        from agent.core import Agent
+        agent = Agent.__new__(Agent)
+        agent._ask_lock = threading.Lock()
+        agent._system = 'system'
+        agent._privacy = False
+        agent.messages = [{'role': 'system', 'content': 'system'}]
+        agent._ask_loop = lambda *args: list(agent.messages)
+        return agent
+
+    def test_c16_expired_scope_rejected_before_llm_history(self):
+        agent = self.fake_agent()
+        expired = capability.RequestScope('p', 't', 'd', (), time.time() - 1)
+        agent._scope_identity = ('p', 't', 'd')
+        agent.messages.append({'role': 'tool', 'content': 'confidential'})
+        with self.assertRaises(PermissionError):
+            agent.ask('summarize history', scope=expired)
+
+    def test_c17_scope_narrowing_and_missing_scope_clear_history(self):
+        from agent.tools.datasource import data_dir
+        agent = self.fake_agent()
+        with patch.dict('os.environ', {'FK_SCOPE_TENANT': 'test'}):
+            path = str(data_dir())
+            broad = capability.RequestScope('p', 'test', path, ('scan_all', 'job_submit'), time.time()+60)
+            narrow = capability.RequestScope('p', 'test', path, ('scan_all',), broad.expires_at)
+            agent.ask('start', scope=broad)
+            agent.messages.append({'role': 'tool', 'content': 'confidential'})
+            self.assertNotIn('confidential', str(agent.ask('read', scope=narrow)))
+            agent.messages.append({'role': 'tool', 'content': 'private'})
+            self.assertNotIn('private', str(agent.ask('read')))
+
+    def test_c16_invalid_scope_binding_rejected_before_llm(self):
+        agent = self.fake_agent()
+        scope = capability.RequestScope('p', 'wrong-tenant', '/wrong-dataset', (), time.time()+60)
+        with self.assertRaises(PermissionError):
+            agent.ask('hello', scope=scope)

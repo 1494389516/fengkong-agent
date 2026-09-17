@@ -22,6 +22,16 @@ class StateTests(unittest.TestCase):
         return dict(event_id=str(n), uid="u", type="coupon_claim", ts=100+n,
                     ip="1.2.3.4", device_id="d")
 
+    def test_g02_explicit_payload_kind_must_be_business_event(self):
+        for source in ("legacy_client", "business"):
+            for kind in ("sdk_report", "decision_request", "unknown", None, [], {}):
+                with self.subTest(source=source, kind=kind):
+                    self.assertTrue(serve._validate_event(
+                        {**self.event(), "kind": kind}, now=101, source_kind=source))
+            self.assertEqual(serve._validate_event(self.event(), now=101, source_kind=source), "")
+            self.assertEqual(serve._validate_event(
+                {**self.event(), "kind": "business_risk_event"}, now=101, source_kind=source), "")
+
     def test_c15_malformed_type_and_huge_number_are_validation_errors(self):
         for update in ({"type": []}, {"ts": 10**1000}, {"amount": 10**1000}):
             self.assertTrue(serve._validate_event({**self.event(), **update}, now=101))
@@ -139,6 +149,11 @@ class StateTests(unittest.TestCase):
                 self.assertEqual(public["tenant_id"], "t")
                 self.assertEqual(seen[0]["ts"], 101)
                 self.assertGreater(seen[0]["received_at"], seen[0]["ts"])
+                request.data = json.dumps({**self.event(2), "kind": "sdk_report"}).encode()
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(request, timeout=3)
+                self.assertEqual(error.exception.code, 400)
+                self.assertEqual(len(seen), 1)
                 request.data = json.dumps({**self.event(), "tenant_id": "forged"}).encode()
                 with self.assertRaises(urllib.error.HTTPError) as error:
                     urllib.request.urlopen(request, timeout=3)
