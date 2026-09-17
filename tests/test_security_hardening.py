@@ -43,6 +43,17 @@ class PrivacyTests(unittest.TestCase):
 
 
 class CapabilityTests(unittest.TestCase):
+    def setUp(self):
+        from agent.tools import capability
+        from agent.tools.datasource import data_dir
+        self.binding = mock.patch.dict(os.environ, {"FK_SCOPE_TENANT": "test"})
+        self.binding.start()
+        self.addCleanup(self.binding.stop)
+        self.scope = capability.request_scope(capability.RequestScope(
+            "test-reviewer", "test", str(data_dir()), tuple(capability.CAPABILITY), time.time()+60))
+        self.scope.__enter__()
+        self.addCleanup(self.scope.__exit__, None, None, None)
+
     def test_registry_is_fully_classified_and_unknown_registration_fails(self):
         from agent.tools import _REGISTRY
         from agent.tools.capability import validate_registry
@@ -326,11 +337,15 @@ class ApprovalTransactionTests(unittest.TestCase):
         script = ("import os, sys\n"
                   "sys.path.insert(0, os.environ['PROJECT_ROOT'])\n"
                   "from agent.tools import dispatch\n"
-                  "dispatch('experiment_register', "
-                  "{'name': os.environ['EXP_NAME']})\n")
+                  "import time\n"
+                  "from agent.tools.capability import RequestScope, request_scope\n"
+                  "scope = RequestScope('test-worker', 'test', os.environ['FK_DATA_DIR'], ('experiment_register',), time.time()+60)\n"
+                  "with request_scope(scope, user_text='experiment_register'):\n"
+                  "    result = dispatch('experiment_register', {'name': os.environ['EXP_NAME']})\n"
+                  "    assert 'error' not in result, result\n")
         env = dict(os.environ)
         env.update({"FK_DATA_DIR": str(self.data_dir),
-                    "PROJECT_ROOT": str(ROOT), "PYTHONPATH": str(ROOT)})
+                    "PROJECT_ROOT": str(ROOT), "PYTHONPATH": str(ROOT), "FK_SCOPE_TENANT": "test"})
         procs = []
         for i in range(3):
             child_env = dict(env, EXP_NAME="concurrent-%d" % i)

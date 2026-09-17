@@ -22,6 +22,9 @@
 import json
 import os
 from contextvars import ContextVar
+from contextlib import contextmanager
+from dataclasses import dataclass, asdict
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -29,9 +32,44 @@ from typing import Any, Dict
 from . import tool
 from .datasource import data_dir
 
-# Agent.ask 写入当前用户原话;直接 dispatch(评估/脚本)保持空 = 不拦 propose。
+# Agent.ask 写入当前用户原话；空上下文不得授予写权限。
 # 调查题主动 blacklist_add 曾把待审批队列按团伙数灌满,审批只挡生效不挡提案。
 _current_user_text: ContextVar[str] = ContextVar("fk_user_text", default="")
+
+@dataclass(frozen=True)
+class RequestScope:
+    """Server-issued authorization, never populated from model tool arguments."""
+    principal: str
+    tenant: str
+    dataset: str
+    capabilities: tuple
+    expires_at: float
+
+    def permits(self, name):
+        return (bool(self.principal and self.tenant and self.dataset)
+                and self.expires_at > time.time() and name in self.capabilities)
+
+    def snapshot(self):
+        return asdict(self)
+
+_current_scope = ContextVar("fk_request_scope", default=None)
+
+
+def get_scope():
+    return _current_scope.get()
+
+
+@contextmanager
+def request_scope(scope, user_text=None):
+    token = _current_scope.set(scope)
+    text_token = _current_user_text.set(user_text) if user_text is not None else None
+    try:
+        yield
+    finally:
+        if text_token is not None:
+            _current_user_text.reset(text_token)
+        _current_scope.reset(token)
+
 
 # 点名写入:强动词单独成立;弱动词必须附近有请/帮我/提交,避免"哪些该升黑"误放行。
 _WRITE_STRONG = (
@@ -178,8 +216,8 @@ CAPABILITY = {
 }
 
 # execute 不等于“模型可自行决定写入”。下面按工具登记用户必须明确表达的
-# 动作意图；工具名本身也可作为高级用户的显式指令。空 user_text 仅代表
-# 评估脚本/内部调度等可信直接调用，不经过 Agent 对话边界。
+# 动作意图；工具名本身也可作为高级用户的显式指令。
+# 用户意图不能替代服务端签发的请求权限。
 EXECUTE_INTENT = {
     "model_register": ("登记模型", "注册模型"),
     "strategy_register": ("登记策略", "注册策略"),
@@ -262,6 +300,10 @@ def enforce(tool_name: str, is_registered: bool) -> str:
     if level == "unclassified":
         audit("unclassified", tool_name, level, "工具未显式登记 capability")
         return "capability denied: %s 未登记权限等级" % tool_name
+    scope = get_scope()
+    if (scope is not None and not scope.permits(tool_name)) or (
+            scope is None and level in ("propose", "execute")):
+        return "%s blocked: missing, expired or insufficient request scope" % level
     if level == "propose":
         uttered = _current_user_text.get()
         if uttered and user_requests_immediate_land(uttered):
@@ -269,19 +311,19 @@ def enforce(tool_name: str, is_registered: bool) -> str:
                   "用户要求立即生效/绕过审批,拒绝 propose")
             return ("propose blocked: 用户要求立即生效或绕过审批,"
                     "只能复核并说明须待审批 /approve,不要调用 %s" % tool_name)
-        if uttered and not user_requests_write(uttered):
+        if not user_requests_write(uttered):
             audit("propose_blocked", tool_name, level,
                   "用户未点名写入,拒绝 propose")
             return ("propose blocked: 用户未明确要求写入,只给文字建议,"
                     "不要调用 %s" % tool_name)
     if level == "execute":
         uttered = _current_user_text.get()
-        if (tool_name == "build_dataset" and uttered
+        if (tool_name == "build_dataset"
                 and not user_requests_export(uttered)):
             audit("execute_blocked", tool_name, level, "用户未明确要求导出数据集")
             return ("execute blocked: 用户未明确要求导出建模数据集,"
                     "不要调用 build_dataset")
-        if (tool_name != "build_dataset" and uttered
+        if (tool_name != "build_dataset"
                 and not user_requests_execute(uttered, tool_name)):
             audit("execute_blocked", tool_name, level,
                   "用户未明确要求执行该写操作")

@@ -19,6 +19,8 @@ eval 结构性预算继续按全量计;dispatch 在包激活时拒绝包外调�
 因为 schema 前缀变了,缓存必 miss)。
 """
 import os
+from contextvars import ContextVar
+from contextlib import contextmanager
 from typing import Dict, FrozenSet, Optional, Set
 
 PACK_ENV = "FK_TOOL_PACK"
@@ -73,9 +75,9 @@ PACKS: Dict[str, Optional[FrozenSet[str]]] = {
     "full": None,
 }
 
-# 进程内当前包。None 未设置时 schemas/dispatch 视为 full(eval 默认)。
+# 请求上下文工具包；未设置时视为 full（仅发送面，非授权凭据）。
 # Agent / CLI 会显式 set_active_pack。
-_active_pack = "full"
+_active_pack = ContextVar("fk_tool_pack", default="full")
 
 
 def normalize(pack: Optional[str]) -> str:
@@ -86,22 +88,22 @@ def normalize(pack: Optional[str]) -> str:
 
 
 def current() -> str:
-    return _active_pack
+    return _active_pack.get()
 
 
 def set_active_pack(pack: str) -> Dict:
-    """切换进程内发送面。返回包名与工具数,供 CLI 展示。"""
-    global _active_pack
-    _active_pack = normalize(pack)
-    names = tool_names(_active_pack)
-    return {"pack": _active_pack, "tool_count": len(names)}
+    """切换当前上下文发送面，返回包名与工具数。"""
+    name = normalize(pack)
+    _active_pack.set(name)
+    names = tool_names(name)
+    return {"pack": name, "tool_count": len(names)}
 
 
 def tool_names(pack: Optional[str] = None) -> Set[str]:
     """该包实际会发给模型的工具名。full / None = 注册表全集。
     包里写了但未注册的名字会被丢掉(防拼写把包撑破,eval 会抓缺失)。"""
     from . import _REGISTRY
-    key = normalize(pack if pack is not None else _active_pack)
+    key = normalize(pack if pack is not None else _active_pack.get())
     spec = PACKS[key]
     registered = set(_REGISTRY)
     if spec is None:
@@ -110,7 +112,7 @@ def tool_names(pack: Optional[str] = None) -> Set[str]:
 
 
 def allows(name: str, pack: Optional[str] = None) -> bool:
-    key = normalize(pack if pack is not None else _active_pack)
+    key = normalize(pack if pack is not None else _active_pack.get())
     if PACKS[key] is None:
         return True
     return name in tool_names(key)
@@ -122,3 +124,12 @@ def env_default() -> str:
     if raw:
         return normalize(raw)
     return DEFAULT_PACK
+
+
+@contextmanager
+def request_pack(pack):
+    token = _active_pack.set(normalize(pack))
+    try:
+        yield
+    finally:
+        _active_pack.reset(token)
