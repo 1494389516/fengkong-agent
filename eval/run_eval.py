@@ -37,6 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # 供导入 measure_co
 os.environ.pop("FK_DATA_DIR", None)
 os.environ.pop("FK_DATASET", None)
 os.environ.pop("FK_TOOL_PACK", None)
+# Test deployment identity; request capabilities remain local and per-call.
+os.environ.setdefault("FK_SCOPE_TENANT", "eval_tenant")
 
 from agent import tools as registry  # noqa: E402
 from agent.tools import actions  # noqa: E402
@@ -106,6 +108,28 @@ def load_cases():
 SCENARIO_CLASSES = ("正常", "越权", "Prompt Injection", "身份施压", "工具失败",
                     "数据损坏", "引擎不可用", "策略漂移", "模型漂移", "低预算",
                     "高工具调用量", "缓存异常", "白名单/名单纪律")
+
+
+def _fixture_dispatch(name, arguments, *, user_text=None, projection=True):
+    """Authenticated positive-path fixture: one call, explicit tool scope, reset on exit.
+
+    Missing-scope tests call registry.dispatch directly; intent-denial cases pass
+    hostile/empty user_text explicitly. Jobs additionally receive exactly their
+    declared underlying tool; owner identity remains stable.
+    """
+    from agent.tools.capability import RequestScope, request_scope
+    from agent.tools.datasource import data_dir
+    capabilities = [name]
+    if name == "job_submit":
+        from agent.tools.jobs import _CHILD
+        underlying = _CHILD.get(arguments.get("type"))
+        if underlying:
+            capabilities.append(underlying)
+    scope = RequestScope("eval_authenticated_user", os.environ["FK_SCOPE_TENANT"], str(data_dir()),
+                         tuple(capabilities), time.time() + 60)
+    text = user_text if user_text is not None else "请提交待审批并执行 " + " ".join(capabilities)
+    with request_scope(scope, text):
+        return registry.dispatch(name, arguments, projection=projection)
 
 
 def run_rule_layer(cases) -> int:
@@ -285,27 +309,63 @@ def run_scan_layer() -> int:
 
 
 def run_graph_layer() -> int:
-    """离线:关联图谱应恰好找出样本里的一个设备共用团伙。"""
-    r = graph_relations()
+    """离线:固定 fixture 时点回放关联证据，并检查无未来泄漏与弱 IP 边。
+
+    时间契约迁移:旧实现使用全历史/全历史 verdicts；现在显式 snapshot
+    与有界窗口。保留成员、设备、名单、当前设备情报和 PNG 覆盖；历史
+    情报/处置必须明确 unavailable，不能用今天的事实解释过去。
+    """
+    from unittest.mock import patch
+    from agent.tools import graph as G
+    from agent.tools.datasource import load_events
+
+    events = load_events()
+    anchor = max(e["ts"] for e in events) + 1
+    r = graph_relations(as_of_ts=anchor)
     comp = r["components"][0] if r["components"] else {}
-    by_dev = graph_relations(device_id="dev_emu_9f3a")
+    by_dev = graph_relations(device_id="dev_emu_9f3a", as_of_ts=anchor)
     dcomp = by_dev["components"][0] if by_dev.get("components") else {}
-    mv = dcomp.get("member_verdicts") or {}
-    return _report("关联图谱(离线)", [
-        ("样本恰有 1 个多账号分量", r["component_count"] == 1),
-        ("分量成员为套现团伙三账号", comp.get("accounts") == ["u_1003", "u_1004", "u_1005"]),
-        ("共用设备为灰名单模拟器", "dev_emu_9f3a" in comp.get("devices", [])
+    # Retain the former current-device-intelligence regression under a fixed clock.
+    with patch.object(G.time, "time", return_value=anchor):
+        current = G.component_summary("u_1003") or {}
+    future = dict(uid="future_account", device_id="dev_emu_9f3a",
+                  ip="future_ip", ts=anchor, type="login")
+    with patch.object(G, "load_events", return_value=events + [future]):
+        replay = G.component_summary("u_1003", as_of_ts=anchor) or {}
+    weak_checks = []
+    for ip_type in ("residential", "mobile"):
+        shared_exit = [dict(uid="nat_a", device_id="device_a", ip="shared_exit", ts=anchor - 1),
+                       dict(uid="nat_b", device_id="device_b", ip="shared_exit", ts=anchor - 1)]
+        with patch.object(G, "load_events", return_value=shared_exit), \
+                patch.object(G, "ip_info", return_value={"type": ip_type}):
+            weak = G.component_summary("nat_a", as_of_ts=anchor) or {}
+        weak_checks.append(("%s 公共出口不合并独立设备账号" % ip_type,
+                            weak.get("accounts") == ["nat_a"]
+                            and weak.get("weak_ips") == ["shared_exit"]))
+    return _report("关联图谱(离线，固定时点)", [
+        ("样本恰有 1 个多账号关联分量", r["component_count"] == 1),
+        ("关联分量保留原样本三账号", comp.get("accounts") == ["u_1003", "u_1004", "u_1005"]),
+        ("共用设备保留当时有效灰名单证据", "dev_emu_9f3a" in comp.get("devices", [])
          and any("gray" in h for h in comp.get("blacklist_hits", []))),
-        ("分量自带设备风险标记(免逐台 device_intel)",
-         any("模拟器" in f for f in comp.get("device_flags", {}).get("dev_emu_9f3a", []))),
-        ("传 device_id 按设备取同一分量",
+        ("当前视图保留设备风险标记",
+         any("模拟器" in f for f in current.get("device_flags", {}).get("dev_emu_9f3a", []))),
+        ("传 device_id 按设备取同一关联分量",
          by_dev.get("found") is True
          and dcomp.get("accounts") == ["u_1003", "u_1004", "u_1005"]),
-        ("分量出口带 member_verdicts(免逐个档案)",
-         set(mv) == {"u_1003", "u_1004", "u_1005"}
-         and all(mv[u].get("action") in ("pass", "review", "reject") for u in mv)),
+        ("历史成员判定显式不可用，不偷用全历史处置",
+         dcomp.get("member_verdicts") == {}
+         and dcomp.get("member_verdicts_status") == "unavailable_in_graph_time_domain"),
         ("图谱 PNG 落盘", bool(r["chart_path"]) and (ROOT / r["chart_path"]).exists()),
-    ])
+        ("历史设备情报和标签不泄漏当前事实",
+         comp.get("device_flags") == {} and comp.get("known_labels") == {}
+         and comp.get("device_summary", {}).get("status") == "historical_snapshot_unavailable"),
+        ("时点与有界窗口显式输出，连接性不是恶意标签",
+         comp.get("as_of_ts") == anchor and comp.get("window_seconds") == G.DEFAULT_WINDOW_SECONDS
+         and comp.get("interpretation") == "association_only"),
+        ("同设备未来账号不进入历史回放",
+         replay.get("accounts") == comp.get("accounts")
+         and "future_account" not in replay.get("accounts", [])),
+    ] + weak_checks)
 
 
 def run_actions_layer() -> int:
@@ -316,29 +376,29 @@ def run_actions_layer() -> int:
         try:
             req = {"dimension": "uid", "value": "u_evil", "list": "black",
                    "reason": "eval:测试流程"}
-            r1 = registry.dispatch("blacklist_add", dict(req))
+            r1 = _fixture_dispatch("blacklist_add", dict(req))
             aid = r1.get("action_id", -1)
-            r_dup = registry.dispatch("blacklist_add", dict(req))
+            r_dup = _fixture_dispatch("blacklist_add", dict(req))
             before = blacklist_query("uid", "u_evil")["hit"]
             actions.decide(aid, approve=True)
             after = blacklist_query("uid", "u_evil")["hit"]
-            r_again = registry.dispatch("blacklist_add", dict(req))
+            r_again = _fixture_dispatch("blacklist_add", dict(req))
             # audit_query 读侧:再走一次驳回,然后对审计日志做过滤与容错断言
             req2 = {"dimension": "ip", "value": "203.0.113.99", "list": "gray",
                     "reason": "eval:测试驳回"}
-            aid2 = registry.dispatch("blacklist_add", dict(req2)).get("action_id", -1)
+            aid2 = _fixture_dispatch("blacklist_add", dict(req2)).get("action_id", -1)
             os.environ["FK_OPERATOR"] = "tester1"  # 模拟 SSO 注入审批人身份
             actions.decide(aid2, approve=False)
             with open(Path(td) / "audit.jsonl", "a", encoding="utf-8") as f:
                 f.write("{损坏行,非 JSON}\n")
-            q_all = registry.dispatch("audit_query", {})
-            q_approve = registry.dispatch("audit_query", {"decision": "approve"})
-            q_deny = registry.dispatch("audit_query", {"decision": "deny"})
-            q_uid = registry.dispatch("audit_query",
+            q_all = _fixture_dispatch("audit_query", {})
+            q_approve = _fixture_dispatch("audit_query", {"decision": "approve"})
+            q_deny = _fixture_dispatch("audit_query", {"decision": "deny"})
+            q_uid = _fixture_dispatch("audit_query",
                                       {"dimension": "uid", "value": "u_evil"})
-            q_ip = registry.dispatch("audit_query", {"dimension": "ip"})
-            q_kind = registry.dispatch("audit_query", {"kind": "blacklist_add"})
-            q_by = registry.dispatch("audit_query", {"decided_by": "tester1"})
+            q_ip = _fixture_dispatch("audit_query", {"dimension": "ip"})
+            q_kind = _fixture_dispatch("audit_query", {"kind": "blacklist_add"})
+            q_by = _fixture_dispatch("audit_query", {"decided_by": "tester1"})
             return _report("处置写流程与审计查询(离线,临时目录)", [
                 ("提交进入待审批", r1.get("status") == "pending_confirmation"),
                 ("重复提交防重", r_dup.get("status") == "already_pending"),
@@ -379,7 +439,7 @@ def run_actions_layer() -> int:
 def run_health_layer() -> int:
     """离线:数据体检 —— 手工样本必须全绿;埋 9 类脏数据后必须精确检出、
     且不误报(可选文件缺失不算 issue)。"""
-    ok = registry.dispatch("data_health_check", {})
+    ok = _fixture_dispatch("data_health_check", {})
     checks = [
         ("原始样本体检全绿(0 issue)",
          ok.get("summary") == "ok" and ok.get("issues_total") == 0),
@@ -412,7 +472,7 @@ def run_health_layer() -> int:
                 json.dumps(accts, ensure_ascii=False), encoding="utf-8")
             (Path(td) / "audit.jsonl").write_text(
                 '{"ts":"x"}\n{损坏行}\n', encoding="utf-8")  # jsonl 损坏行
-            r = registry.dispatch("data_health_check", {})
+            r = _fixture_dispatch("data_health_check", {})
             kinds = {}
             for rep in r.get("files", {}).values():
                 for k, v in (rep.get("issues") or {}).items():
@@ -497,7 +557,7 @@ def run_feedback_pipeline_layer() -> int:
              "notes": []}], ensure_ascii=False))
         os.environ["FK_DATA_DIR"] = td
         try:
-            fp = registry.dispatch("feedback_pipeline", {})
+            fp = _fixture_dispatch("feedback_pipeline", {})
             checks += [
                 ("聚合:四源计数正确",
                  fp["summary"]["open_mismatches"] == 1
@@ -514,7 +574,7 @@ def run_feedback_pipeline_layer() -> int:
                             "action_id": 1, "decided_by": "eval",
                             "reason": "误伤", "ts": "2026-08-01T00:00:00Z"},
                            ensure_ascii=False) + "\n", encoding="utf-8")
-            fp2 = registry.dispatch("feedback_pipeline", {})
+            fp2 = _fixture_dispatch("feedback_pipeline", {})
             checks += [
                 ("分析师否决回灌进入候选且不改标签",
                  fp2["summary"]["analyst_overrides"] == 1
@@ -532,7 +592,7 @@ def run_experiment_layer() -> int:
     with tempfile.TemporaryDirectory() as td:
         os.environ["FK_DATA_DIR"] = td
         try:
-            r1 = registry.dispatch("experiment_register", {
+            r1 = _fixture_dispatch("experiment_register", {
                 "name": "tool_pruning_ab_1", "kind": "tool_pruning_ab"})
             eid = r1["experiment_id"]
             checks += [
@@ -540,28 +600,28 @@ def run_experiment_layer() -> int:
                  r1.get("status") == "registered"
                  and r1.get("experiment_id", 0) >= 1),
                 ("同名不重复登记",
-                 "已存在" in registry.dispatch("experiment_register", {
+                 "已存在" in _fixture_dispatch("experiment_register", {
                      "name": "tool_pruning_ab_1"}).get("error", "")),
             ]
-            rep = registry.dispatch("experiment_report", {"experiment_id": eid})
+            rep = _fixture_dispatch("experiment_report", {"experiment_id": eid})
             checks.append(("预设:报告含 TOOL_KEEP_TURNS 对照与决策标准",
                            "TOOL_KEEP_TURNS=2" in rep.get("control", "")
                            and "TOOL_KEEP_TURNS=0" in rep.get("treatment", "")
                            and bool(rep.get("decision_criteria"))))
-            st1 = registry.dispatch("experiment_start", {"experiment_id": eid})
-            st_dup = registry.dispatch("experiment_start", {"experiment_id": eid})
+            st1 = _fixture_dispatch("experiment_start", {"experiment_id": eid})
+            st_dup = _fixture_dispatch("experiment_start", {"experiment_id": eid})
             checks += [
                 ("draft->running", st1.get("status") == "running"),
                 ("重复启动拒绝", "状态机拒绝" in st_dup.get("error", "")),
             ]
-            bad_stop = registry.dispatch("experiment_stop", {
+            bad_stop = _fixture_dispatch("experiment_stop", {
                 "experiment_id": 999, "result": {}})
             checks.append(("不存在实验拒绝", "不存在" in bad_stop.get("error", "")))
-            st2 = registry.dispatch("experiment_stop", {
+            st2 = _fixture_dispatch("experiment_stop", {
                 "experiment_id": eid,
                 "result": {"control_tokens": 5000, "treatment_tokens": 3000,
                            "sample_count": 20}})
-            rep2 = registry.dispatch("experiment_report", {"experiment_id": eid})
+            rep2 = _fixture_dispatch("experiment_report", {"experiment_id": eid})
             checks += [
                 ("running->finished 且结果带数据集指纹",
                  st2.get("status") == "finished"
@@ -583,7 +643,7 @@ def run_readiness_layer() -> int:
             shutil.copy(ROOT / "data" / f, base / f)
         os.environ["FK_DATA_DIR"] = td
         try:
-            r = registry.dispatch("production_readiness_check", {})
+            r = _fixture_dispatch("production_readiness_check", {})
             checks += [
                 ("门禁:12 项检查齐全",
                  set(r["checks"]) == {"data_health", "feature_health",
@@ -605,7 +665,7 @@ def run_readiness_layer() -> int:
             evs[0]["type"] = "lottery"
             (base / "events_sample.json").write_text(
                 json.dumps(evs, ensure_ascii=False), encoding="utf-8")
-            r2 = registry.dispatch("production_readiness_check", {})
+            r2 = _fixture_dispatch("production_readiness_check", {})
             checks.append(("数据硬伤:BLOCKED 且 data_health=fail",
                            r2.get("overall") == "BLOCKED"
                            and r2["checks"]["data_health"]["level"] == "fail"))
@@ -669,7 +729,7 @@ def run_online_drift_layer() -> int:
                                  for i in range(10)]}
             (base / "decisions_log.json").write_text(
                 json.dumps(dec, ensure_ascii=False), encoding="utf-8")
-            d = registry.dispatch("decision_drift", {})
+            d = _fixture_dispatch("decision_drift", {})
             checks += [
                 ("决策漂移:窗口切分与率对比正确",
                  d["baseline_window"] == 5 and d["current_window"] == 5
@@ -696,7 +756,7 @@ def run_online_drift_layer() -> int:
             prev = log.read_text(encoding="utf-8") if log.exists() else None
             log.write_text("\n".join(lines) + "\n", encoding="utf-8")
             try:
-                ab = registry.dispatch("agent_behavior_drift", {})
+                ab = _fixture_dispatch("agent_behavior_drift", {})
                 checks += [
                     ("agent 行为漂移:工具分布 PSI 告警(两半完全不同)",
                      ab["level"] == "warn"
@@ -727,13 +787,13 @@ def run_label_lifecycle_layer() -> int:
         os.environ["FK_DATA_DIR"] = td
         try:
             fp0 = label_fingerprint()
-            r1 = registry.dispatch("label_version", {"note": "基线"})
+            r1 = _fixture_dispatch("label_version", {"note": "基线"})
             checks += [
                 ("快照:指纹=内容哈希且落库",
                  r1.get("status") == "snapshotted"
                  and r1.get("fingerprint") == fp0),
                 ("同指纹不重复打",
-                 registry.dispatch("label_version", {}).get("status")
+                 _fixture_dispatch("label_version", {}).get("status")
                  == "already_snapshotted"),
             ]
             raw = json.loads((base / "labels.json").read_text(encoding="utf-8"))
@@ -741,13 +801,13 @@ def run_label_lifecycle_layer() -> int:
             raw["u_1002"]["note"] = "eval:误伤修正"
             (base / "labels.json").write_text(json.dumps(raw, ensure_ascii=False),
                                               encoding="utf-8")
-            d = registry.dispatch("label_diff", {"version_a": fp0})
+            d = _fixture_dispatch("label_diff", {"version_a": fp0})
             checks += [
                 ("修正后 diff:检出变更与旧新标签",
                  d["changed"] == [{"uid": "u_1002", "old": "fraud",
                                    "new": "normal"}]),
             ]
-            r2 = registry.dispatch("label_refresh", {"note": "申诉 #9 修正"})
+            r2 = _fixture_dispatch("label_refresh", {"note": "申诉 #9 修正"})
             checks.append(("label_refresh 产生新指纹快照",
                            r2.get("status") == "snapshotted"
                            and r2["fingerprint"] == label_fingerprint()
@@ -763,7 +823,7 @@ def run_label_lifecycle_layer() -> int:
                  and rec["old_label"] == "fraud" and rec["new_label"] == "normal"
                  and rec["decided_by"] == "eval_op"),
             ]
-            bt = registry.dispatch("rule_backtest", {})
+            bt = _fixture_dispatch("rule_backtest", {})
             checks.append(("回测结果携带 label_fingerprint",
                            bt.get("label_fingerprint") == label_fingerprint()))
         finally:
@@ -781,19 +841,19 @@ def run_feature_version_layer() -> int:
         (base / "events_sample.json").write_text("[]", encoding="utf-8")
         os.environ["FK_DATA_DIR"] = td
         try:
-            v0 = registry.dispatch("feature_validate", {})
+            v0 = _fixture_dispatch("feature_validate", {})
             checks.append(("无快照:提示先建基线且不误报漂移",
                            v0.get("valid") is True and "首次" in v0["note"]))
-            r1 = registry.dispatch("feature_version", {})
+            r1 = _fixture_dispatch("feature_version", {})
             checks += [
                 ("快照:版本=当前目录指纹",
                  r1.get("status") == "snapshotted"
                  and r1.get("version") == FEATURE_CATALOG_VERSION),
                 ("快照:同版本重复打被拒",
-                 registry.dispatch("feature_version", {})
+                 _fixture_dispatch("feature_version", {})
                  .get("status") == "already_snapshotted"),
             ]
-            v1 = registry.dispatch("feature_validate", {})
+            v1 = _fixture_dispatch("feature_validate", {})
             checks.append(("未漂移:valid=true 且四类漂移全空",
                            v1.get("valid") is True
                            and all(not x for x in v1["drift"].values())))
@@ -803,7 +863,7 @@ def run_feature_version_layer() -> int:
             versions[0]["entries"]["coupon_claims"]["consumers"] = "被篡改"
             versions[0]["entries"]["coupon_claims"]["definition_hash"] = "tampered"
             vp.write_text(json.dumps(versions, ensure_ascii=False), encoding="utf-8")
-            v2 = registry.dispatch("feature_validate", {})
+            v2 = _fixture_dispatch("feature_validate", {})
             checks += [
                 ("篡改快照:definition+consumers 漂移被抓出",
                  v2.get("valid") is False
@@ -817,11 +877,11 @@ def run_feature_version_layer() -> int:
                                            fromlist=["FEATURE_CATALOG"])
                      .FEATURE_CATALOG if c["key"] == "coupon_claims"][0])
             vp.write_text(json.dumps(versions, ensure_ascii=False), encoding="utf-8")
-            v3 = registry.dispatch("feature_validate", {})
+            v3 = _fixture_dispatch("feature_validate", {})
             checks.append(("修复定义后:仅 consumers 漂移",
                            "coupon_claims" in v3["drift"]["consumers"]
                            and "coupon_claims" not in v3["drift"]["definition"]))
-            d = registry.dispatch("feature_diff", {"version_a": FEATURE_CATALOG_VERSION})
+            d = _fixture_dispatch("feature_diff", {"version_a": FEATURE_CATALOG_VERSION})
             checks.append(("feature_diff 检出与当前目录的差异",
                            "coupon_claims" in d["drift"]["consumers"]))
         finally:
@@ -958,12 +1018,12 @@ def run_incident_layer() -> int:
             (base / "mismatch_queue.json").write_text(json.dumps([
                 {"key": "u_1009:1784106480", "status": "open",
                  "opened_at": "2026-08-01T00:00:00Z"}], ensure_ascii=False))
-            r_bad = registry.dispatch("incident_open", {
+            r_bad = _fixture_dispatch("incident_open", {
                 "incident_type": "engine_mismatch", "summary": "x",
                 "mismatch_ids": ["ghost:1"]})
             checks.append(("证据绑定:不存在的 mismatch 键拒绝开单",
                            "不在对账工单" in r_bad.get("error", "")))
-            r1 = registry.dispatch("incident_open", {
+            r1 = _fixture_dispatch("incident_open", {
                 "incident_type": "engine_mismatch", "summary": "对账差异 3 条",
                 "mismatch_ids": ["u_1009:1784106480"],
                 "decision_ids": ["dec_1"], "owner": "ops"})
@@ -971,36 +1031,36 @@ def run_incident_layer() -> int:
                 ("开单:返回 id 且绑定证据",
                  r1.get("status") == "open" and r1.get("incident_id") == 1),
                 ("非法类型拒绝",
-                 "未知事故类型" in registry.dispatch("incident_open", {
+                 "未知事故类型" in _fixture_dispatch("incident_open", {
                      "incident_type": "nope", "summary": "x"}).get("error", "")),
             ]
             iid = r1["incident_id"]
-            r2 = registry.dispatch("incident_update", {
+            r2 = _fixture_dispatch("incident_update", {
                 "incident_id": iid, "note": "定位到阈值同步滞后"})
-            lst = registry.dispatch("incident_list", {})
+            lst = _fixture_dispatch("incident_list", {})
             checks += [
                 ("进展追加", r2.get("status") == "updated"
                  and lst["incidents"][0]["notes"][0]["note"] == "定位到阈值同步滞后"),
                 ("列表:状态/类型过滤",
-                 registry.dispatch("incident_list", {"status": "open"})["count"] == 1
-                 and registry.dispatch("incident_list", {
+                 _fixture_dispatch("incident_list", {"status": "open"})["count"] == 1
+                 and _fixture_dispatch("incident_list", {
                      "incident_type": "latency"})["count"] == 0),
             ]
-            r3 = registry.dispatch("incident_resolve", {
+            r3 = _fixture_dispatch("incident_resolve", {
                 "incident_id": iid, "root_cause": "policy_sync_lag",
                 "resolution": "已同步阈值", "owner": "ops"})
-            lst2 = registry.dispatch("incident_list", {"status": "resolved"})
+            lst2 = _fixture_dispatch("incident_list", {"status": "resolved"})
             checks += [
                 ("结案:记录根因/处置/时间",
                  r3.get("status") == "resolved"
                  and lst2["incidents"][0]["root_cause"] == "policy_sync_lag"
                  and bool(lst2["incidents"][0]["resolved_at"])),
                 ("重复结案拒绝",
-                 "不可重复结案" in registry.dispatch("incident_resolve", {
+                 "不可重复结案" in _fixture_dispatch("incident_resolve", {
                      "incident_id": iid, "root_cause": "x", "resolution": "y"})
                  .get("error", "")),
                 ("结案后不可追加",
-                 "已结案" in registry.dispatch("incident_update", {
+                 "已结案" in _fixture_dispatch("incident_update", {
                      "incident_id": iid, "note": "x"}).get("error", "")),
             ]
         finally:
@@ -1022,7 +1082,7 @@ def run_lineage_layer() -> int:
         try:
             ev = {"uid": "u_1009", "ip": "203.0.113.66", "device_id": "dev_pixel_z9",
                   "type": "order", "amount": 4999.0, "ts": 1784106480}
-            ex = registry.dispatch("decision_explain", {"event": ev})
+            ex = _fixture_dispatch("decision_explain", {"event": ev})
             checks += [
                 ("实时解释:决策/指纹/版本字段齐全",
                  ex.get("decision") == "reject"
@@ -1035,7 +1095,7 @@ def run_lineage_layer() -> int:
                 ("实时解释:显式标注未落库",
                  "未落库" in ex.get("note", "") and ex.get("found") is not True),
             ]
-            tr0 = registry.dispatch("decision_trace", {"event": ev})
+            tr0 = _fixture_dispatch("decision_trace", {"event": ev})
             checks.append(("未落库时追踪:返回现场解释并标注",
                            tr0.get("found") is False and "未落库" in tr0["note"]))
             decision = {"action": "reject", "hits": [{"rule_id": "R001",
@@ -1043,7 +1103,7 @@ def run_lineage_layer() -> int:
                         "policy_version": "v9", "source": "remote_engine",
                         "degraded": False}
             did = write_lineage(ev, decision, approver="serve")
-            tr1 = registry.dispatch("decision_trace", {"event": ev})
+            tr1 = _fixture_dispatch("decision_trace", {"event": ev})
             checks += [
                 ("落库后可追踪:命中记录且带审批来源",
                  tr1.get("found") is True
@@ -1061,7 +1121,7 @@ def run_lineage_layer() -> int:
 def run_feature_health_layer() -> int:
     """离线:特征健康检查 —— 原始样本全绿;脏数据(负值/未知类型/高缺失)判 fail。"""
     checks = []
-    r = registry.dispatch("feature_health_check", {})
+    r = _fixture_dispatch("feature_health_check", {})
     checks += [
         ("原始样本:summary=ok 且 5 维全绿",
          r.get("summary") == "ok"
@@ -1088,7 +1148,7 @@ def run_feature_health_layer() -> int:
         (base / "thresholds.json").write_text("[]", encoding="utf-8")
         os.environ["FK_DATA_DIR"] = td
         try:
-            r2 = registry.dispatch("feature_health_check", {})
+            r2 = _fixture_dispatch("feature_health_check", {})
             vc = r2["checks"]["value_range"]
             ec = r2["checks"]["enum_drift"]
             mc = r2["checks"]["missingness"]["features"]
@@ -1134,7 +1194,7 @@ def run_capability_layer() -> int:
             ]
             r_deny = registry.dispatch("approve", {"id": 1})
             r_unknown = registry.dispatch("not_a_tool", {})
-            r_exec = registry.dispatch("mismatch_resolve", {
+            r_exec = _fixture_dispatch("mismatch_resolve", {
                 "key": "u_x:1", "cause": "other"})
             r_read = registry.dispatch("feature_catalog", {})
             audit_path = base / "security_audit.jsonl"
@@ -1157,7 +1217,7 @@ def run_capability_layer() -> int:
                  and len(kinds) == 3),
             ]
             from agent.tools.capability import (
-                clear_user_text, set_user_text, user_requests_write,
+                clear_user_text, set_user_text, user_requests_write, request_scope,
                 user_requests_immediate_land)
             from agent.tools import actions as _act
             checks += [
@@ -1181,34 +1241,46 @@ def run_capability_layer() -> int:
             ]
             set_user_text("现在的数据里有没有团伙作案的迹象?")
             try:
-                blocked = registry.dispatch("blacklist_add", {
+                with request_scope(None, "请把设备 dev_no_scope 拉黑"):
+                    no_scope = registry.dispatch("blacklist_add", {
+                        "dimension": "device_id", "value": "dev_no_scope",
+                        "list": "black", "reason": "eval:缺少scope"})
+                blocked = _fixture_dispatch("blacklist_add", {
                     "dimension": "device_id", "value": "dev_gate_x",
-                    "list": "black", "reason": "eval:未点名"})
+                    "list": "black", "reason": "eval:未点名"},
+                    user_text="现在的数据里有没有团伙作案的迹象?")
+                empty_intent = _fixture_dispatch("blacklist_add", {
+                    "dimension": "device_id", "value": "dev_empty_intent",
+                    "list": "black", "reason": "eval:空意图"}, user_text="")
                 pending_blocked = _act.list_pending()
             finally:
                 clear_user_text()
             set_user_text("请把设备 dev_gate_y 拉黑")
             try:
-                allowed = registry.dispatch("blacklist_add", {
+                allowed = _fixture_dispatch("blacklist_add", {
                     "dimension": "device_id", "value": "dev_gate_y",
                     "list": "black", "reason": "eval:点名写入"})
             finally:
                 clear_user_text()
             set_user_text("提交决议并立即生效")
             try:
-                land_blocked = registry.dispatch("appeal_resolve", {
+                land_blocked = _fixture_dispatch("appeal_resolve", {
                     "appeal_id": 2, "decision": "accept",
-                    "reason": "eval:越权落地"})
+                    "reason": "eval:越权落地"}, user_text="提交决议并立即生效")
                 pending_land = _act.list_pending()
             finally:
                 clear_user_text()
             checks += [
+                ("缺少请求scope不能靠用户文字获得提案权限",
+                 "scope" in no_scope.get("error", "") and not pending_blocked),
+                ("有scope但空意图仍不得提案",
+                 "propose blocked" in empty_intent.get("error", "") and not pending_blocked),
                 ("未点名 propose 硬拒且不进队列",
                  "propose blocked" in blocked.get("error", "")
                  and not pending_blocked),
                 ("点名写入 propose 放行进待审批",
                  allowed.get("status") == "pending_confirmation"
-                 and allowed.get("action_id", 0) >= 1),
+                 and bool(allowed.get("action_id"))),
                 ("立即生效 propose 硬拒且不进队列",
                  "propose blocked" in land_blocked.get("error", "")
                  and "立即生效" in land_blocked.get("error", "")
@@ -1288,59 +1360,62 @@ def run_job_layer() -> int:
             shutil.copy(ROOT / "data" / f, base / f)
         os.environ["FK_DATA_DIR"] = td
         try:
-            bad = registry.dispatch("job_submit", {"type": "nope"})
+            bad = _fixture_dispatch("job_submit", {"type": "nope"})
             checks.append(("未知任务类型拒绝", "未知任务类型" in bad.get("error", "")))
-            j1 = registry.dispatch("job_submit", {"type": "dataset_build"})
+            j1 = _fixture_dispatch("job_submit", {"type": "dataset_build"})
             jid = j1["job_id"]
             deadline = time.time() + 15
-            st = registry.dispatch("job_status", {"job_id": jid})
+            st = _fixture_dispatch("job_status", {"job_id": jid})
             while st.get("status") not in ("success", "failed") and time.time() < deadline:
                 time.sleep(0.1)
-                st = registry.dispatch("job_status", {"job_id": jid})
+                st = _fixture_dispatch("job_status", {"job_id": jid})
             checks += [
                 ("提交:queued 且带参数指纹",
                  j1.get("status") == "queued"
                  and bool(j1.get("job_id"))
-                 and len(registry.dispatch("job_status", {"job_id": jid})
+                 and len(_fixture_dispatch("job_status", {"job_id": jid})
                          .get("request_fingerprint", "")) == 16),
                 ("轮询至 success 且产物落盘",
                  st.get("status") == "success"
                  and bool(st.get("result_path"))
                  and Path(st["result_path"]).exists()),
                 ("job_result 取回产物(manifest 摘要)",
-                 registry.dispatch("job_result", {"job_id": jid})
+                 _fixture_dispatch("job_result", {"job_id": jid})
                  .get("result", {}).get("manifest", {}).get("rows") == 6),
             ]
-            j2 = registry.dispatch("job_submit", {"type": "replay"})
+            j2 = _fixture_dispatch("job_submit", {"type": "replay"})
             jid2 = j2["job_id"]
             deadline = time.time() + 15
-            st2 = registry.dispatch("job_status", {"job_id": jid2})
+            st2 = _fixture_dispatch("job_status", {"job_id": jid2})
             while st2.get("status") not in ("success", "failed") and time.time() < deadline:
                 time.sleep(0.1)
-                st2 = registry.dispatch("job_status", {"job_id": jid2})
-            checks.append(("replay 任务成功且记录数=事件数",
+                st2 = _fixture_dispatch("job_status", {"job_id": jid2})
+            replay_result = _fixture_dispatch("job_result", {"job_id": jid2}, projection=False).get("result")
+            source_events = json.loads((base / "events_sample.json").read_text())
+            checks.append(("replay 完整产物记录数=事件数，不把 LLM 摘要冒充结果",
                            st2.get("status") == "success"
-                           and registry.dispatch("job_result", {"job_id": jid2})
-                           .get("result", {}).get("records") >= 1))
+                           and isinstance(replay_result, list)
+                           and len(replay_result) == len(source_events)
+                           and replay_result == json.loads(Path(st2["result_path"]).read_text())))
             # 取消:测试钩子让执行线程等 gate
             os.environ["FK_JOB_TEST_GATE"] = "1"
-            j3 = registry.dispatch("job_submit", {"type": "dataset_build"})
+            j3 = _fixture_dispatch("job_submit", {"type": "dataset_build"})
             jid3 = j3["job_id"]
             time.sleep(0.5)
-            st3 = registry.dispatch("job_status", {"job_id": jid3})
-            r_cancel = registry.dispatch("job_cancel", {"job_id": jid3})
+            st3 = _fixture_dispatch("job_status", {"job_id": jid3})
+            r_cancel = _fixture_dispatch("job_cancel", {"job_id": jid3})
             deadline = time.time() + 10
-            st3b = registry.dispatch("job_status", {"job_id": jid3})
+            st3b = _fixture_dispatch("job_status", {"job_id": jid3})
             while st3b.get("status") == "running" and time.time() < deadline:
                 time.sleep(0.1)
-                st3b = registry.dispatch("job_status", {"job_id": jid3})
+                st3b = _fixture_dispatch("job_status", {"job_id": jid3})
             checks += [
                 ("取消:running 任务被置 cancelled 且无产物",
                  r_cancel.get("status") == "cancelled"
                  and st3b.get("status") == "cancelled"
                  and st3b.get("result_path") is None),
             ]
-            r_cancel2 = registry.dispatch("job_cancel", {"job_id": jid})
+            r_cancel2 = _fixture_dispatch("job_cancel", {"job_id": jid})
             checks.append(("已终态任务不可取消",
                            "不可取消" in r_cancel2.get("error", "")))
         finally:
@@ -1380,11 +1455,11 @@ def run_replay_engine_layer() -> int:
                  and not (base / "audit.jsonl").exists()
                  and not (base / "mismatch_queue.json").exists()),
             ]
-            registry.dispatch("strategy_register", {
+            _fixture_dispatch("strategy_register", {
                 "strategy_name": "rep_s", "version": "1.0",
                 "thresholds": {"r006_reject_emulator": 0,
                                "r006_reject_rooted": 0}})
-            registry.dispatch("strategy_promote", {
+            _fixture_dispatch("strategy_promote", {
                 "strategy_name": "rep_s", "version": "1.0", "to": "validated"})
             ev_emu = {"uid": "u_1003", "ip": "198.51.100.20",
                       "device_id": "dev_emu_9f3a", "type": "coupon_claim",
@@ -1411,7 +1486,7 @@ def run_replay_engine_layer() -> int:
                 two_src = True
             checks.append(("回放:双阈值源显式拒绝(口径事故)",
                            two_src))
-            registry.dispatch("model_register", {
+            _fixture_dispatch("model_register", {
                 "name": "rp_m", "version": "1.0", "train_fingerprint": "x"})
             r5 = replay_event(ev, model_version="rp_m:1.0")
             try:
@@ -1450,21 +1525,21 @@ def run_strategy_shadow_layer() -> int:
             shutil.copy(ROOT / "data" / f, base / f)
         os.environ["FK_DATA_DIR"] = td
         try:
-            registry.dispatch("strategy_register", {
+            _fixture_dispatch("strategy_register", {
                 "strategy_name": "replay_s", "version": "1.0",
                 "rules": ["R001", "R002", "R003", "R004", "R005", "R006"],
                 "thresholds": {"r006_reject_emulator": 0},
                 "note": "eval:关闭模拟器强拒"})
-            r_draft = registry.dispatch("strategy_replay", {
+            r_draft = _fixture_dispatch("strategy_replay", {
                 "strategy_name": "replay_s", "version": "1.0"})
             checks.append(("draft 不可回放",
                            "不可回放" in r_draft.get("error", "")))
-            registry.dispatch("strategy_promote", {
+            _fixture_dispatch("strategy_promote", {
                 "strategy_name": "replay_s", "version": "1.0",
                 "to": "validated"})
-            r1 = registry.dispatch("strategy_replay", {
+            r1 = _fixture_dispatch("strategy_replay", {
                 "strategy_name": "replay_s", "version": "1.0"})
-            r1b = registry.dispatch("strategy_replay", {
+            r1b = _fixture_dispatch("strategy_replay", {
                 "strategy_name": "replay_s", "version": "1.0"})
             checks += [
                 ("回放:关闭模拟器强拒后 3 账号判定变化",
@@ -1482,7 +1557,7 @@ def run_strategy_shadow_layer() -> int:
                  "false_positive_delta" in r1 and "false_negative_delta" in r1
                  and "cost_delta" in r1),
             ]
-            s1 = registry.dispatch("strategy_shadow", {
+            s1 = _fixture_dispatch("strategy_shadow", {
                 "strategy_name": "replay_s", "version": "1.0"})
             checks += [
                 ("影子:结果落盘 out/shadow/ 且路径存在",
@@ -1511,10 +1586,10 @@ def run_strategy_registry_layer() -> int:
         os.environ["FK_DATA_DIR"] = td
         try:
             fp = dataset_fingerprint()
-            reg = registry.dispatch("model_register", {
+            reg = _fixture_dispatch("model_register", {
                 "name": "strat_m", "version": "1.0", "train_fingerprint": fp})
             assert reg.get("status") == "registered"
-            r0 = registry.dispatch("strategy_register", {
+            r0 = _fixture_dispatch("strategy_register", {
                 "strategy_name": "coupon_v1", "version": "1.0",
                 "rules": ["R001", "R002"],
                 "thresholds": {"r002_max_gap_seconds": 15},
@@ -1526,15 +1601,15 @@ def run_strategy_registry_layer() -> int:
                  r0["entry"]["status"] == "draft"
                  and r0["entry"]["dataset_fingerprint"] == fp),
                 ("同名同版本覆盖被拒",
-                 registry.dispatch("strategy_register", {
+                 _fixture_dispatch("strategy_register", {
                      "strategy_name": "coupon_v1", "version": "1.0"})
                  .get("status") == "already_registered"),
             ]
-            r_bad = registry.dispatch("strategy_register", {
+            r_bad = _fixture_dispatch("strategy_register", {
                 "strategy_name": "bad_v1", "version": "1.0",
                 "thresholds": {"r999_unknown": 1},
                 "model_dependencies": ["ghost:9.9"]})
-            p_bad = registry.dispatch("strategy_promote", {
+            p_bad = _fixture_dispatch("strategy_promote", {
                 "strategy_name": "bad_v1", "version": "1.0", "to": "validated"})
             checks += [
                 ("未验证策略禁止离开 draft",
@@ -1542,13 +1617,13 @@ def run_strategy_registry_layer() -> int:
                  and "r999_unknown" in p_bad["error"]
                  and "ghost:9.9" in p_bad["error"]),
             ]
-            r_v = registry.dispatch("strategy_validate", {
+            r_v = _fixture_dispatch("strategy_validate", {
                 "strategy_name": "coupon_v1", "version": "1.0"})
             checks.append(("校验通过且问题清单为空",
                            r_v.get("valid") is True and r_v["problems"] == []))
-            p1 = registry.dispatch("strategy_promote", {
+            p1 = _fixture_dispatch("strategy_promote", {
                 "strategy_name": "coupon_v1", "version": "1.0", "to": "validated"})
-            p2 = registry.dispatch("strategy_promote", {
+            p2 = _fixture_dispatch("strategy_promote", {
                 "strategy_name": "coupon_v1", "version": "1.0", "to": "shadow"})
             checks += [
                 ("draft->validated->shadow 两段晋升",
@@ -1556,31 +1631,31 @@ def run_strategy_registry_layer() -> int:
                  and p2.get("status") == "promoted"
                  and p2.get("to") == "shadow"),
             ]
-            p3 = registry.dispatch("strategy_promote", {
+            p3 = _fixture_dispatch("strategy_promote", {
                 "strategy_name": "coupon_v1", "version": "1.0", "to": "active"})
-            st = registry.dispatch("strategy_list", {"strategy_name": "coupon_v1"})
+            st = _fixture_dispatch("strategy_list", {"strategy_name": "coupon_v1"})
             checks += [
                 ("shadow->active 须审批且未生效",
                  p3.get("status") == "pending_confirmation"
                  and st["strategies"][0]["status"] == "shadow"),
             ]
             actions.decide(p3["action_id"], approve=True, operator="eval_op")
-            st = registry.dispatch("strategy_list", {"strategy_name": "coupon_v1"})
+            st = _fixture_dispatch("strategy_list", {"strategy_name": "coupon_v1"})
             checks.append(("批准后 active 且带审批人/上线时间",
                            st["strategies"][0]["status"] == "active"
                            and st["strategies"][0]["approved_by"] == "eval_op"
                            and bool(st["strategies"][0]["deployed_at"])))
-            registry.dispatch("strategy_register", {
+            _fixture_dispatch("strategy_register", {
                 "strategy_name": "coupon_v1", "version": "2.0",
                 "thresholds": {"r002_max_gap_seconds": 20}})
-            registry.dispatch("strategy_promote", {
+            _fixture_dispatch("strategy_promote", {
                 "strategy_name": "coupon_v1", "version": "2.0", "to": "validated"})
-            registry.dispatch("strategy_promote", {
+            _fixture_dispatch("strategy_promote", {
                 "strategy_name": "coupon_v1", "version": "2.0", "to": "shadow"})
-            p4 = registry.dispatch("strategy_promote", {
+            p4 = _fixture_dispatch("strategy_promote", {
                 "strategy_name": "coupon_v1", "version": "2.0", "to": "active"})
             actions.decide(p4["action_id"], approve=True)
-            st = registry.dispatch("strategy_list", {"strategy_name": "coupon_v1"})
+            st = _fixture_dispatch("strategy_list", {"strategy_name": "coupon_v1"})
             by = {x["version"]: x for x in st["strategies"]}
             checks += [
                 ("同名 active 唯一:新上线旧 deprecated",
@@ -1588,19 +1663,19 @@ def run_strategy_registry_layer() -> int:
                  and by["1.0"]["status"] == "deprecated"
                  and len(st["active"]) == 1),
             ]
-            d = registry.dispatch("strategy_diff", {
+            d = _fixture_dispatch("strategy_diff", {
                 "strategy_name": "coupon_v1", "version_a": "1.0", "version_b": "2.0"})
             checks.append(("strategy_diff 检出阈值差异",
                            d["threshold_diff"] == [{"param": "r002_max_gap_seconds",
                                                     "a": 15, "b": 20}]))
-            rb1 = registry.dispatch("strategy_rollback", {
+            rb1 = _fixture_dispatch("strategy_rollback", {
                 "strategy_name": "coupon_v1", "version": "1.0", "reason": "x"})
             checks.append(("非法回滚被拒(非 active)",
                            "非法回滚" in rb1.get("error", "")))
-            rb2 = registry.dispatch("strategy_rollback", {
+            rb2 = _fixture_dispatch("strategy_rollback", {
                 "strategy_name": "coupon_v1", "version": "2.0", "reason": "指标恶化"})
             actions.decide(rb2["action_id"], approve=True, operator="eval_op")
-            st = registry.dispatch("strategy_list", {"strategy_name": "coupon_v1"})
+            st = _fixture_dispatch("strategy_list", {"strategy_name": "coupon_v1"})
             by = {x["version"]: x for x in st["strategies"]}
             audit_lines = (base / "audit.jsonl").read_text(encoding="utf-8").splitlines()
             checks += [
@@ -1640,43 +1715,43 @@ def run_model_lifecycle_layer() -> int:
                  and sp["train_fingerprint"] != sp["eval_fingerprint"]
                  and set(sp["train_accounts"]) & set(sp["eval_accounts"]) == set()),
             ]
-            r0 = registry.dispatch("model_register", {
+            r0 = _fixture_dispatch("model_register", {
                 "name": "xgb_demo", "version": "0.1", "train_fingerprint": train_fp})
             checks.append(("登记:状态 candidate 且绑定特征目录指纹",
                            r0["entry"]["status"] == "candidate"
                            and len(r0["entry"]["feature_catalog_version"]) == 16))
-            r1 = registry.dispatch("model_promote", {
+            r1 = _fixture_dispatch("model_promote", {
                 "name": "xgb_demo", "version": "0.1", "to": "shadow"})
             checks.append(("candidate->shadow 自动", r1.get("status") == "promoted"))
-            r2 = registry.dispatch("model_promote", {
+            r2 = _fixture_dispatch("model_promote", {
                 "name": "xgb_demo", "version": "0.1", "to": "challenger"})
             checks.append(("评估门禁:无评估结果拒绝晋升",
                            "评估门禁" in r2.get("error", "")))
-            re_no = registry.dispatch("model_eval", {
+            re_no = _fixture_dispatch("model_eval", {
                 "name": "xgb_demo", "version": "0.1", "scores": eval_scores})
             checks.append(("泄漏门禁:缺 eval_fingerprint 拒绝评估",
                            "泄漏门禁" in re_no.get("error", "")))
-            re_same = registry.dispatch("model_eval", {
+            re_same = _fixture_dispatch("model_eval", {
                 "name": "xgb_demo", "version": "0.1", "scores": eval_scores,
                 "eval_fingerprint": train_fp})
             checks.append(("泄漏门禁:评估指纹 == 训练指纹拒绝(同源=泄漏)",
                            "泄漏门禁" in re_same.get("error", "")
                            and "leakage" in re_same.get("error", "").lower()))
-            re_fake = registry.dispatch("model_eval", {
+            re_fake = _fixture_dispatch("model_eval", {
                 "name": "xgb_demo", "version": "0.1", "scores": eval_scores,
                 "eval_fingerprint": "deadbeef"})
             checks.append(("泄漏门禁:非本数据集评估切分拒绝",
                            "泄漏门禁" in re_fake.get("error", "")
                            and "deadbeef" in re_fake.get("error", "")))
             # 指纹对了、账号错了也要拦:训练侧账号分数混进评估 = 标签泄漏
-            re_leak = registry.dispatch("model_eval", {
+            re_leak = _fixture_dispatch("model_eval", {
                 "name": "xgb_demo", "version": "0.1",
                 "scores": {"u_1001": 0.1, "u_1004": 0.8},  # u_1001 在训练侧
                 "eval_fingerprint": eval_fp})
             checks.append(("泄漏门禁:scores 含评估切分之外的账号拒绝",
                            "泄漏门禁" in re_leak.get("error", "")
                            and "u_1001" in re_leak.get("error", "")))
-            re_ = registry.dispatch("model_eval", {
+            re_ = _fixture_dispatch("model_eval", {
                 "name": "xgb_demo", "version": "0.1", "scores": eval_scores,
                 "eval_fingerprint": eval_fp})
             checks += [
@@ -1696,85 +1771,85 @@ def run_model_lifecycle_layer() -> int:
                 ("评估:单侧样本 AUC 诚实返回 None(不编数)",
                  re_["metrics"]["auc"] is None),
             ]
-            r3 = registry.dispatch("model_promote", {
+            r3 = _fixture_dispatch("model_promote", {
                 "name": "xgb_demo", "version": "0.1", "to": "challenger"})
             checks.append(("过门禁后 shadow->challenger",
                            r3.get("status") == "promoted"))
-            r4 = registry.dispatch("model_promote", {
+            r4 = _fixture_dispatch("model_promote", {
                 "name": "xgb_demo", "version": "0.1", "to": "champion"})
-            st = registry.dispatch("model_status", {"name": "xgb_demo"})
+            st = _fixture_dispatch("model_status", {"name": "xgb_demo"})
             checks.append(("challenger->champion 须审批:提交待审批且未生效",
                            r4.get("status") == "pending_confirmation"
                            and st["models"][0]["status"] == "challenger"))
             actions.decide(r4["action_id"], approve=True, operator="eval_op")
-            st = registry.dispatch("model_status", {"name": "xgb_demo"})
+            st = _fixture_dispatch("model_status", {"name": "xgb_demo"})
             checks.append(("批准后 champion 上线且带 approval_id/deployed_at",
                            st["models"][0]["status"] == "champion"
                            and bool(st["models"][0]["approval_id"])
                            and bool(st["models"][0]["deployed_at"])))
-            registry.dispatch("model_register", {
+            _fixture_dispatch("model_register", {
                 "name": "xgb_bad", "version": "0.1",
                 "train_fingerprint": "deadbeef"})
-            re_bad = registry.dispatch("model_eval", {
+            re_bad = _fixture_dispatch("model_eval", {
                 "name": "xgb_bad", "version": "0.1", "scores": eval_scores,
                 "eval_fingerprint": "beefdead"})
             checks.append(("泄漏门禁:非本数据集评估切分拒绝",
                            "泄漏门禁" in re_bad.get("error", "")))
-            r_dup = registry.dispatch("model_promote", {
+            r_dup = _fixture_dispatch("model_promote", {
                 "name": "xgb_demo", "version": "0.1", "to": "shadow"})
             checks.append(("重复晋升被拒(已在更远状态)",
                            "非法转移" in r_dup.get("error", "")))
-            registry.dispatch("model_register", {
+            _fixture_dispatch("model_register", {
                 "name": "xgb_v2", "version": "0.2", "train_fingerprint": train_fp})
             for to in ("shadow", "challenger"):
-                registry.dispatch("model_promote", {
+                _fixture_dispatch("model_promote", {
                     "name": "xgb_v2", "version": "0.2", "to": to})
                 if to == "shadow":
-                    registry.dispatch("model_eval", {
+                    _fixture_dispatch("model_eval", {
                         "name": "xgb_v2", "version": "0.2",
                         "scores": eval_scores, "eval_fingerprint": eval_fp})
-            r5p = registry.dispatch("model_promote", {
+            r5p = _fixture_dispatch("model_promote", {
                 "name": "xgb_v2", "version": "0.2", "to": "champion"})
             actions.decide(r5p["action_id"], approve=True)
-            st_all = registry.dispatch("model_status", {})
+            st_all = _fixture_dispatch("model_status", {})
             by = {m["name"]: m for m in st_all["models"]}
             checks.append(("champion 唯一:新上线旧自动退役",
                            by["xgb_v2"]["status"] == "champion"
                            and by["xgb_demo"]["status"] == "deprecated"
                            and len(st_all["champions"]) == 1))
-            registry.dispatch("model_register", {
+            _fixture_dispatch("model_register", {
                 "name": "xgb_worse", "version": "0.3",
                 "train_fingerprint": train_fp})
-            registry.dispatch("model_promote", {
+            _fixture_dispatch("model_promote", {
                 "name": "xgb_worse", "version": "0.3", "to": "shadow"})
-            registry.dispatch("model_eval", {
+            _fixture_dispatch("model_eval", {
                 "name": "xgb_worse", "version": "0.3",
                 "scores": eval_scores, "eval_fingerprint": eval_fp})
-            registry.dispatch("model_promote", {
+            _fixture_dispatch("model_promote", {
                 "name": "xgb_worse", "version": "0.3", "to": "challenger"})
             from agent.tools import model_registry as _mr
             items = _mr._load()
             worse = _mr._find(items, "xgb_worse", "0.3")
             worse["metrics"] = dict(worse["metrics"], recall=0.1)
             _mr._save(items)
-            r_sig = registry.dispatch("model_promote", {
+            r_sig = _fixture_dispatch("model_promote", {
                 "name": "xgb_worse", "version": "0.3", "to": "champion"})
             checks.append(("显著性门禁:指标劣化的 challenger 不得进审批",
                            "显著性门禁" in r_sig.get("error", "")
                            and "recall" in r_sig.get("error", "")))
-            r_illegal = registry.dispatch("model_rollback", {
+            r_illegal = _fixture_dispatch("model_rollback", {
                 "name": "xgb_bad", "version": "0.1", "reason": "x"})
             checks.append(("非法回滚被拒(非 champion)",
                            "非法回滚" in r_illegal.get("error", "")))
-            r_rb = registry.dispatch("model_rollback", {
+            r_rb = _fixture_dispatch("model_rollback", {
                 "name": "xgb_v2", "version": "0.2", "reason": "指标恶化"})
             actions.decide(r_rb["action_id"], approve=False)
-            st2 = registry.dispatch("model_status", {"name": "xgb_v2"})
+            st2 = _fixture_dispatch("model_status", {"name": "xgb_v2"})
             still_champ = st2["models"][0]["status"] == "champion"
-            r_rb2 = registry.dispatch("model_rollback", {
+            r_rb2 = _fixture_dispatch("model_rollback", {
                 "name": "xgb_v2", "version": "0.2", "reason": "指标恶化"})
             actions.decide(r_rb2["action_id"], approve=True, operator="eval_op")
-            st3 = registry.dispatch("model_status", {"name": "xgb_v2"})
+            st3 = _fixture_dispatch("model_status", {"name": "xgb_v2"})
             audit_lines = (base / "audit.jsonl").read_text(
                 encoding="utf-8").splitlines()
             checks += [
@@ -1786,7 +1861,7 @@ def run_model_lifecycle_layer() -> int:
                     '"decided_by": "eval_op"' in ln
                     and '"model_rollback"' in ln for ln in audit_lines)),
             ]
-            cmp_ = registry.dispatch("model_compare", {
+            cmp_ = _fixture_dispatch("model_compare", {
                 "challenger_name": "xgb_v2", "challenger_version": "0.2",
                 "champion_name": "xgb_demo", "champion_version": "0.1"})
             # 评估侧全 fraud:auc/ks 诚实为 None,compare 跳过缺失指标,
@@ -1856,7 +1931,7 @@ def run_model_lifecycle_layer() -> int:
 def run_ml_tools_layer() -> int:
     """离线:算法人三件套 —— 特征清单自检、建模样本导出(PIT+指纹)、模型登记簿。"""
     checks = []
-    fc = registry.dispatch("feature_catalog", {})
+    fc = _fixture_dispatch("feature_catalog", {})
     checks += [
         ("特征清单:>=14 个特征且目录与真实输出一致",
          fc.get("feature_count", 0) >= 14 and fc.get("consistency_ok") is True),
@@ -1876,7 +1951,7 @@ def run_ml_tools_layer() -> int:
                                           encoding="utf-8")
         os.environ["FK_DATA_DIR"] = td
         try:
-            r = registry.dispatch("build_dataset", {})
+            r = _fixture_dispatch("build_dataset", {})
             m = r.get("manifest", {})
 
             def count_lt(uid, pred):
@@ -1903,7 +1978,7 @@ def run_ml_tools_layer() -> int:
             checks.append(("样本导出:指纹与内容哈希一致(可复现)",
                            m["fingerprint"] == dataset_fingerprint()))
             # P0-1:时间切分导出 train+eval 两份,零重叠、指纹不同
-            sp_r = registry.dispatch("build_dataset", {"split_ratio": 0.7})
+            sp_r = _fixture_dispatch("build_dataset", {"split_ratio": 0.7})
             checks += [
                 ("时间切分导出:双 manifest + 零重叠 + 指纹不同",
                  sp_r.get("split") is True
@@ -1919,12 +1994,12 @@ def run_ml_tools_layer() -> int:
                  and sp_r["eval_accounts"] == ["u_1002"]
                  and sp_r["cutoff_ts"] is not None),
             ]
-            reg1 = registry.dispatch("model_register", {
+            reg1 = _fixture_dispatch("model_register", {
                 "name": "xgb_eval", "version": "0.1",
                 "train_fingerprint": m["fingerprint"], "metrics": {"auc": 0.9}})
-            reg_dup = registry.dispatch("model_register",
+            reg_dup = _fixture_dispatch("model_register",
                                         {"name": "xgb_eval", "version": "0.1"})
-            lst = registry.dispatch("model_list", {})
+            lst = _fixture_dispatch("model_list", {})
             checks += [
                 ("模型登记:成功登记", reg1.get("status") == "registered"),
                 ("模型登记:同名同版本拒绝重复",
@@ -1982,7 +2057,8 @@ def run_agent_log_layer() -> int:
         log_path = Path(td) / "agent_runs.jsonl"
 
         def new_agent(client):
-            a = Agent.__new__(Agent)  # 不走 __init__(openai 未装)
+            a = Agent.__new__(Agent)  # offline client stub
+            a._ask_lock = __import__("threading").RLock()
             a._system = "sys"
             a.messages = [{"role": "system", "content": "sys"}]
             a.session_usage = {"prompt": 0, "completion": 0, "total": 0,
@@ -2046,7 +2122,7 @@ def run_engine_layer() -> int:
           "amount": 4999.0}
     checks = []
 
-    r = registry.dispatch("rule_eval", {"event": ev})
+    r = _fixture_dispatch("rule_eval", {"event": ev})
     checks.append(("默认未接引擎:判定来自本地实现且结论 reject",
                    r.get("source") == "local_rules" and r["action"] == "reject"))
     checks.append(("本地判定带 reason_codes + escalate + 不可覆盖",
@@ -2054,9 +2130,9 @@ def run_engine_layer() -> int:
                    and "R003_AMOUNT" in (r.get("reason_codes") or [])
                    and r.get("escalate_to_human") is True
                    and r.get("agent_cannot_override") is True))
-    st = registry.dispatch("engine_status", {})
+    st = _fixture_dispatch("engine_status", {})
     checks.append(("engine_status 报告 local_rules", st.get("mode") == "local_rules"))
-    r_ok = registry.dispatch("rule_eval", {
+    r_ok = _fixture_dispatch("rule_eval", {
         "event": {"uid": "u_1001", "ip": "112.96.100.23",
                   "device_id": "dev_iphone_a1", "type": "order", "amount": 129.0}})
     checks.append(("干净放行:escalate=false 且无 CIRCUIT 码",
@@ -2103,7 +2179,7 @@ def run_engine_layer() -> int:
     os.environ["FK_ENGINE_DRYRUN_TOKEN"] = "tok123"
     try:
         _ur.urlopen = fake_urlopen
-        r2 = registry.dispatch("rule_eval",
+        r2 = _fixture_dispatch("rule_eval",
                                {"event": ev, "use_current_policy": True})
         checks.append(("远程 dry-run 优先:source=remote_engine 且映射正确",
                        r2.get("source") == "remote_engine"
@@ -2115,13 +2191,13 @@ def run_engine_layer() -> int:
                        and calls[-1]["payload"]["use_current_policy"] is True))
         checks.append(("鉴权 token 注入 Authorization 头",
                        calls[-1]["headers"].get("Authorization") == "Bearer tok123"))
-        st2 = registry.dispatch("engine_status", {})
+        st2 = _fixture_dispatch("engine_status", {})
         checks.append(("engine_status 报告 remote_engine 且不泄漏 query 凭据",
                        st2.get("mode") == "remote_engine"
                        and st2["url"] == "http://fake-engine/dry-run"))
 
         _ur.urlopen = boom
-        r3 = registry.dispatch("rule_eval", {"event": ev})
+        r3 = _fixture_dispatch("rule_eval", {"event": ev})
         checks.append(("引擎失败显式降级:degraded + engine_error + 本地结论",
                        r3.get("source") == "local_rules_fallback"
                        and r3.get("degraded") is True
@@ -2133,7 +2209,7 @@ def run_engine_layer() -> int:
             return _Resp(_json.dumps({"action": "ALLOW"}).encode("utf-8"))
 
         _ur.urlopen = bad_allow
-        r_allow = registry.dispatch("rule_eval", {"event": ev})
+        r_allow = _fixture_dispatch("rule_eval", {"event": ev})
         checks.append(("远程非法 action 显式降级并熔断",
                        r_allow.get("source") == "local_rules_fallback"
                        and r_allow.get("degraded") is True
@@ -2144,7 +2220,7 @@ def run_engine_layer() -> int:
             return _Resp(_json.dumps({"action": "reject", "hits": "oops"}).encode("utf-8"))
 
         _ur.urlopen = bad_hits
-        r_hits = registry.dispatch("rule_eval", {"event": ev})
+        r_hits = _fixture_dispatch("rule_eval", {"event": ev})
         checks.append(("远程畸形 hits 显式降级",
                        r_hits.get("source") == "local_rules_fallback"
                        and r_hits.get("degraded") is True
@@ -2154,7 +2230,7 @@ def run_engine_layer() -> int:
         _ur.urlopen = fake_urlopen
         prev_ov = policy.set_overrides({"r003_high_amount": 100})
         try:
-            r4 = registry.dispatch("rule_eval", {"event": ev})
+            r4 = _fixture_dispatch("rule_eval", {"event": ev})
             checks.append(("what-if 覆盖强制本地且注明原因",
                            r4.get("source") == "local_rules"
                            and bool(r4.get("source_note"))))
@@ -2190,9 +2266,9 @@ def run_engine_layer() -> int:
             raise OSError("connection refused")
 
         _ur.urlopen = boom_count
-        r_c1 = registry.dispatch("rule_eval", {"event": ev})
-        r_c2 = registry.dispatch("rule_eval", {"event": ev})
-        st3 = registry.dispatch("engine_status", {})
+        r_c1 = _fixture_dispatch("rule_eval", {"event": ev})
+        r_c2 = _fixture_dispatch("rule_eval", {"event": ev})
+        st3 = _fixture_dispatch("engine_status", {})
         checks += [
             ("熔断:第一次失败显式降级",
              r_c1.get("degraded") is True
@@ -2232,27 +2308,27 @@ def run_decision_plane_layer() -> int:
         try:
             ev1009 = {"uid": "u_1009", "ip": "203.0.113.66",
                       "type": "order", "amount": 4999.0, "ts": 1784106480}
-            base_r = registry.dispatch("rule_eval", {"event": ev1009})
+            base_r = _fixture_dispatch("rule_eval", {"event": ev1009})
             r003_in = any(h["rule_id"] == "R003" for h in base_r["hits"])
             checks.append(("基线:R003 命中且无策略/模型血缘",
                            r003_in and "strategy_version" not in base_r
                            and "model_version" not in base_r))
 
             # --- P0-3: active strategy 阈值覆盖生效 ---
-            registry.dispatch("strategy_register", {
+            _fixture_dispatch("strategy_register", {
                 "strategy_name": "s_strict", "version": "1",
                 "rules": ["R001", "R002", "R003"],
                 "thresholds": {"r003_high_amount": 999999.0}})
-            registry.dispatch("strategy_promote", {
+            _fixture_dispatch("strategy_promote", {
                 "strategy_name": "s_strict", "version": "1", "to": "validated"})
-            registry.dispatch("strategy_promote", {
+            _fixture_dispatch("strategy_promote", {
                 "strategy_name": "s_strict", "version": "1", "to": "shadow"})
-            p3 = registry.dispatch("strategy_promote", {
+            p3 = _fixture_dispatch("strategy_promote", {
                 "strategy_name": "s_strict", "version": "1", "to": "active",
                 "reason": "eval"})
             actions.decide(p3["action_id"], approve=True, operator="eval_op")
             # 当前口径(use_current_policy=True):策略覆盖生效
-            r1 = registry.dispatch("rule_eval", {"event": ev1009,
+            r1 = _fixture_dispatch("rule_eval", {"event": ev1009,
                                                  "use_current_policy": True})
             checks += [
                 ("active strategy:阈值覆盖进入判定(R003 失效)",
@@ -2267,15 +2343,15 @@ def run_decision_plane_layer() -> int:
             ]
             ev_hook = {"uid": "u_cut", "type": "login",
                        "device_id": "dev_pixel_z9", "ts": 1784099100}
-            r_cut = registry.dispatch("rule_eval", {"event": ev_hook,
+            r_cut = _fixture_dispatch("rule_eval", {"event": ev_hook,
                                                     "use_current_policy": True})
-            r_cut_asof = registry.dispatch("rule_eval", {"event": ev_hook})
+            r_cut_asof = _fixture_dispatch("rule_eval", {"event": ev_hook})
             checks.append(("active strategy:本会命中的 R006 被规则集裁掉",
                            r_cut.get("strategy_rules") == ["R001", "R002", "R003"]
                            and not any(h["rule_id"] == "R006" for h in r_cut["hits"])
                            and any(h["rule_id"] == "R006"
                                    for h in r_cut_asof["hits"])))
-            r_u1 = registry.dispatch("rule_eval", {"event": {
+            r_u1 = _fixture_dispatch("rule_eval", {"event": {
                 "uid": "u_1001", "type": "order", "amount": 5000.0,
                 "ts": 1784099100}, "use_current_policy": True})
             checks.append(("active strategy:原 R003 大额正常单变 pass",
@@ -2283,7 +2359,7 @@ def run_decision_plane_layer() -> int:
                            and not any(h["rule_id"] == "R003"
                                       for h in r_u1["hits"])))
             # 回放口径(use_current_policy=False):策略覆盖不应用,防污染对账
-            r_rp = registry.dispatch("rule_eval", {"event": ev1009})
+            r_rp = _fixture_dispatch("rule_eval", {"event": ev1009})
             checks.append(("回放口径:active strategy 覆盖不应用(R003 仍按当时阈值命中)",
                            any(h["rule_id"] == "R003" for h in r_rp["hits"])
                            and "strategy_thresholds" not in r_rp
@@ -2294,7 +2370,7 @@ def run_decision_plane_layer() -> int:
             from agent.tools import policy as _policy
             prev = _policy.set_overrides({"r003_high_amount": 1.0})
             try:
-                r_wi = registry.dispatch("rule_eval", {"event": ev1009})
+                r_wi = _fixture_dispatch("rule_eval", {"event": ev1009})
                 checks.append(("what-if 覆盖优先于 active strategy",
                                any(h["rule_id"] == "R003" for h in r_wi["hits"])
                                and r_wi.get("source_note")
@@ -2305,24 +2381,24 @@ def run_decision_plane_layer() -> int:
             # --- P0-2: champion 模型信号 R007 ---
             from agent.tools.dataset import split_datasets
             sp = split_datasets(0.7)
-            registry.dispatch("model_register", {
+            _fixture_dispatch("model_register", {
                 "name": "xgb_dp", "version": "1",
                 "train_fingerprint": sp["train_fingerprint"]})
-            registry.dispatch("model_promote", {
+            _fixture_dispatch("model_promote", {
                 "name": "xgb_dp", "version": "1", "to": "shadow"})
-            registry.dispatch("model_eval", {
+            _fixture_dispatch("model_eval", {
                 "name": "xgb_dp", "version": "1",
                 "scores": {"u_1004": 0.8, "u_1005": 0.75},
                 "eval_fingerprint": sp["eval_fingerprint"]})
-            registry.dispatch("model_promote", {
+            _fixture_dispatch("model_promote", {
                 "name": "xgb_dp", "version": "1", "to": "challenger"})
-            pm = registry.dispatch("model_promote", {
+            pm = _fixture_dispatch("model_promote", {
                 "name": "xgb_dp", "version": "1", "to": "champion",
                 "reason": "eval"})
             actions.decide(pm["action_id"], approve=True, operator="eval_op")
             ev_low = {"uid": "u_1001", "type": "order", "amount": 50.0,
                       "ts": 1784099100}
-            r_ns = registry.dispatch("rule_eval", {"event": ev_low})
+            r_ns = _fixture_dispatch("rule_eval", {"event": ev_low})
             checks += [
                 ("champion 上线无分数:判定不变,附模型血缘",
                  r_ns["model_version"] == "xgb_dp 1"
@@ -2332,7 +2408,7 @@ def run_decision_plane_layer() -> int:
             ]
             (base / "model_scores.json").write_text(
                 json.dumps({"u_1001": 0.3}), encoding="utf-8")
-            r_lo = registry.dispatch("rule_eval", {"event": ev_low})
+            r_lo = _fixture_dispatch("rule_eval", {"event": ev_low})
             checks.append(("champion 低分(<review 阈值):不命中 R007",
                            r_lo.get("model_score") == 0.3
                            and "低于模型阈值" in r_lo.get("model_signal", "")
@@ -2340,7 +2416,7 @@ def run_decision_plane_layer() -> int:
                                       for h in r_lo["hits"])))
             (base / "model_scores.json").write_text(
                 json.dumps({"u_1001": 0.99}), encoding="utf-8")
-            r_hi = registry.dispatch("rule_eval", {"event": ev_low})
+            r_hi = _fixture_dispatch("rule_eval", {"event": ev_low})
             checks += [
                 ("champion 高分(>=reject 阈值):R007 reject 且取最重",
                  r_hi["action"] == "reject"
@@ -2352,22 +2428,22 @@ def run_decision_plane_layer() -> int:
             # 确定性验证),再上线 s_model 把 reject 阈值提到 1.01、review 降到
             # 0.5 -> 同分 0.99 由 reject 降为 review,证明 R007 阈值同样受
             # active strategy 覆盖(而非只走 policy 版本表)。
-            rb = registry.dispatch("strategy_rollback", {
+            rb = _fixture_dispatch("strategy_rollback", {
                 "strategy_name": "s_strict", "version": "1", "reason": "eval"})
             actions.decide(rb["action_id"], approve=True, operator="eval_op")
-            registry.dispatch("strategy_register", {
+            _fixture_dispatch("strategy_register", {
                 "strategy_name": "s_model", "version": "1", "rules": [],
                 "thresholds": {"model_score_review_threshold": 0.5,
                                "model_score_reject_threshold": 1.01}})
-            registry.dispatch("strategy_promote", {
+            _fixture_dispatch("strategy_promote", {
                 "strategy_name": "s_model", "version": "1", "to": "validated"})
-            registry.dispatch("strategy_promote", {
+            _fixture_dispatch("strategy_promote", {
                 "strategy_name": "s_model", "version": "1", "to": "shadow"})
-            pm2 = registry.dispatch("strategy_promote", {
+            pm2 = _fixture_dispatch("strategy_promote", {
                 "strategy_name": "s_model", "version": "1", "to": "active",
                 "reason": "eval"})
             actions.decide(pm2["action_id"], approve=True, operator="eval_op")
-            r_mt = registry.dispatch("rule_eval", {"event": ev_low,
+            r_mt = _fixture_dispatch("rule_eval", {"event": ev_low,
                                                    "use_current_policy": True})
             checks += [
                 ("策略覆盖 model_score 阈值:R007 按覆盖值判定(reject->review)",
@@ -2393,6 +2469,7 @@ def run_decision_plane_layer() -> int:
                 def read(self):
                     return _j.dumps({
                         "action": "review", "policy_version": "engine-p9",
+                        "strategy_version": "remote-strategy-v9", "model_version": "remote-model-v9",
                         "hits": [{"rule_id": "R_ENGINE", "reason": "引擎",
                                   "action": "review"}]}).encode("utf-8")
 
@@ -2406,15 +2483,18 @@ def run_decision_plane_layer() -> int:
             os.environ["FK_ENGINE_DRYRUN_URL"] = "http://fake/dry-run"
             try:
                 _ur.urlopen = fake_urlopen
-                r_rem = registry.dispatch("rule_eval", {"event": ev_low})
+                r_rem = _fixture_dispatch("rule_eval", {"event": ev_low})
                 checks += [
                     ("远程模式:请求体带 strategy_version 且判定来自引擎",
                      seen["payload"].get("strategy_version") == "s_model 1"
                      and r_rem["source"] == "remote_engine"
                      and r_rem["action"] == "review"
-                     and r_rem["strategy_version"] == "s_model 1"),
+                     and r_rem["strategy_version"] == "remote-strategy-v9"
+                     and r_rem["expected_strategy_version"] == "s_model 1"
+                     and r_rem["producer_metadata"]["strategy_version"] == "remote-strategy-v9"),
                     ("远程模式:本地模型信号不叠加(融合归生产引擎),附血缘",
-                     r_rem["model_version"] == "xgb_dp 1"
+                     r_rem["model_version"] == "remote-model-v9"
+                     and r_rem["expected_model_version"] == "xgb_dp 1"
                      and not any(h["rule_id"] == "R007"
                                 for h in r_rem["hits"])),
                 ]
@@ -2437,7 +2517,7 @@ def run_feature_parity_layer() -> int:
         os.environ["FK_DATA_DIR"] = td
         sys.path.insert(0, td)
         try:
-            r0 = registry.dispatch("feature_parity_check", {})
+            r0 = _fixture_dispatch("feature_parity_check", {})
             checks += [
                 ("默认(未注入在线实现):全部账号一致且诚实标注未验证",
                  r0["checked"] == 6 and r0["passed"] == 6
@@ -2457,7 +2537,7 @@ def run_feature_parity_layer() -> int:
                 "        r['coupon_claims'] = (r.get('coupon_claims') or 0) + 1\n"
                 "    return r\n", encoding="utf-8")
             os.environ["FK_FEATURE_ONLINE_MODULE"] = "broken_online:online_features"
-            r1 = registry.dispatch("feature_parity_check",
+            r1 = _fixture_dispatch("feature_parity_check",
                                    {"uids": ["u_1001", "u_1002"]})
             checks += [
                 ("注入破损在线实现:检出差异且点名账号与特征",
@@ -2472,7 +2552,7 @@ def run_feature_parity_layer() -> int:
             # 无差异账号(破损实现对无 coupon 账号可能一致):u_1009 无领券?
             # 破损实现只改 coupon_claims,若某账号本就 0 且 found=True 会 +1,
             # 全账号都应有差异;这里验证 uids 过滤生效
-            r2 = registry.dispatch("feature_parity_check", {"uids": ["u_1003"]})
+            r2 = _fixture_dispatch("feature_parity_check", {"uids": ["u_1003"]})
             checks.append(("uids 过滤生效",
                            r2["checked"] == 1 and r2["diff_count"] == 1))
             os.environ.pop("FK_FEATURE_ONLINE_MODULE", None)
@@ -2503,14 +2583,15 @@ def run_gen_layer() -> int:
             # 不能只活在规则注释里
             r006_fp = [u for u, a in r["per_account"].items()
                        if a["label"] == "normal" and "R006" in a["rules"]]
-            cal = registry.dispatch("threshold_calibrate", {"fpr_budget": 0.01})
+            cal = _fixture_dispatch("threshold_calibrate", {"fpr_budget": 0.01})
             realized = cal.get("realized_fpr_normal_wide")
             # 阈值扫描在带边界样本的大样本上必须有敏感度(慢速 bot / 重度用户
             # 制造的张力),平线说明生成器的阈值张力设计坏了
             sw = chart_threshold_sweep("r002_max_gap_seconds")
             # 关联分量必须与团伙一一对应:曾因随机 IP 撞号 + 弱边并组,把
             # 互不相干的 bot 和两个团伙画成一组(idc/proxy IP 不作并组依据)
-            gr = graph_relations()
+            from agent.tools.datasource import load_events
+            gr = graph_relations(as_of_ts=max(e["ts"] for e in load_events()) + 1)
             comps_pure = all(
                 len({u.rsplit("_", 1)[0] for u in c["accounts"]}) == 1
                 and c["accounts"][0].startswith("g_ring_")
@@ -2520,10 +2601,10 @@ def run_gen_layer() -> int:
             gl = _gl_review()
             gl_expected = sum(1 for r in json.loads(
                 (out / "blacklist.json").read_text(encoding="utf-8")) if r["list"] == "gray")
-            fr = registry.dispatch("feature_risk", {"include_bins": True})
+            fr = _fixture_dispatch("feature_risk", {"include_bins": True})
             fr_top = (fr["features"].get(fr["ranking_by_iv"][0], {})
                       if fr.get("ranking_by_iv") else {})
-            mined = registry.dispatch("rule_mining", {
+            mined = _fixture_dispatch("rule_mining", {
                 "split_ratio": 0.7,
                 "min_support": 0.03,
                 "min_lift": 1.05,
@@ -2542,7 +2623,7 @@ def run_gen_layer() -> int:
                 None,
             )
             mined_draft = (
-                registry.dispatch("rule_draft_test", {
+                _fixture_dispatch("rule_draft_test", {
                     "conditions": draft_candidate["conditions"]})
                 if draft_candidate else {"error": "无兼容候选"}
             )
@@ -2573,7 +2654,7 @@ def run_gen_layer() -> int:
                 ("宽口径 f1 >= 0.85", wide["f1"] >= 0.85),
                 ("严口径 precision >= 0.7", strict["precision"] >= 0.7),
                 ("无生产日志时对账优雅降级",
-                 registry.dispatch("consistency_check", {}).get("available") is False),
+                 _fixture_dispatch("consistency_check", {}).get("available") is False),
                 ("R006 强拒误伤被计量(root 真机正常用户 >= 1)", len(r006_fp) >= 1),
                 ("区分度评估:大样本上有排名且指标有界",
                  bool(fr.get("ranking_by_iv")) and fr_top.get("iv", 0) > 0
@@ -2617,7 +2698,7 @@ def run_gen_layer() -> int:
                  gl["gray_total"] == gl_expected
                  and sum(gl["recommendations"].values()) == gl["gray_total"]),
                 ("灰名单巡检结果在单工具预算内",
-                 len(json.dumps(registry.dispatch("graylist_review", {}),
+                 len(json.dumps(_fixture_dispatch("graylist_review", {}),
                                 ensure_ascii=False)) <= 5000),
                 ("单工具结果 <= 5000 chars(最大: %s %d)" % biggest, biggest[1] <= 5000),
                 # 1500 是纯指标期的瘦身线;rule_contribution(规则贡献)/cost
@@ -2664,18 +2745,18 @@ def run_whitelist_layer() -> int:
             "d_hook": {"platform": "安卓", "is_emulator": False, "is_rooted": False,
                        "hook_detected": True, "signals": ["Frida 注入"], "risk": "high"}}))
         (base / "blacklist.json").write_text(json.dumps([
-            {"dimension": "uid", "value": "t_vip", "list": "white",
-             "reason": "eval:申诉通过", "added_at": "2026-07-01", "expires_at": "2099-01-01"},
-            {"dimension": "uid", "value": "t_rej", "list": "white",
-             "reason": "eval:申诉通过", "added_at": "2026-07-01"},
-            {"dimension": "uid", "value": "t_exp", "list": "white",
+            {"dimension": "uid", "value": "t_vip", "list": "white", "scope": "coupon_claim", "owner": "eval_owner",
+             "reason": "eval:申诉通过", "added_at": "2026-07-01", "expires_at": "2026-07-30"},
+            {"dimension": "uid", "value": "t_rej", "list": "white", "scope": "coupon_claim", "owner": "eval_owner",
+             "reason": "eval:申诉通过", "added_at": "2026-07-01", "expires_at": "2026-07-30"},
+            {"dimension": "uid", "value": "t_exp", "list": "white", "scope": "coupon_claim", "owner": "eval_owner",
              "reason": "eval:已过期", "added_at": "2025-12-01", "expires_at": "2026-01-01"},
-            {"dimension": "uid", "value": "t_conf", "list": "white",
-             "reason": "eval:冲突白", "added_at": "2026-07-01"},
+            {"dimension": "uid", "value": "t_conf", "list": "white", "scope": "coupon_claim", "owner": "eval_owner",
+             "reason": "eval:冲突白", "added_at": "2026-07-01", "expires_at": "2026-07-30"},
             {"dimension": "uid", "value": "t_conf", "list": "black",
              "reason": "eval:冲突黑", "added_at": "2026-07-02"},
-            {"dimension": "uid", "value": "t_hook", "list": "white",
-             "reason": "eval:白名单+作案设备", "added_at": "2026-07-01"},
+            {"dimension": "uid", "value": "t_hook", "list": "white", "scope": "coupon_claim", "owner": "eval_owner",
+             "reason": "eval:白名单+作案设备", "added_at": "2026-07-01", "expires_at": "2026-07-30"},
         ]))
         os.environ["FK_DATA_DIR"] = td
         try:
@@ -2715,14 +2796,14 @@ def run_whitelist_layer() -> int:
                  r_hook_seq["action"] == "review"
                  and any(h["rule_id"] == "R006" for h in r_hook_seq["hits"])))
             # 审批流:白名单带有效期落盘;同值不同色允许提交(灰升黑/黑值申诉加白)
-            r_w = registry.dispatch("blacklist_add", {
-                "dimension": "device_id", "value": "d_new", "list": "white",
+            r_w = _fixture_dispatch("blacklist_add", {
+                "dimension": "device_id", "value": "d_new", "list": "white", "scope": "coupon_claim", "owner": "eval_owner",
                 "reason": "eval:临时白", "expires_days": 30})
             actions.decide(r_w.get("action_id", -1), approve=True)
-            rec = [r for r in registry.dispatch(
+            rec = [r for r in _fixture_dispatch(
                 "blacklist_query", {"dimension": "device_id", "value": "d_new"})["records"]
                 if r["list"] == "white"]
-            r_up = registry.dispatch("blacklist_add", {
+            r_up = _fixture_dispatch("blacklist_add", {
                 "dimension": "uid", "value": "t_rej", "list": "gray",
                 "reason": "eval:白值提灰(升级路径)"})
             checks += [
@@ -2752,8 +2833,15 @@ def run_whitelist_layer() -> int:
             os.environ.pop("FK_DATA_DIR", None)
 
     # 样本集集成:u_1001 白名单演示条目不产生任何风险信号与指标扰动
-    mon = account_monitor("u_1001")
-    prof = registry.dispatch("account_profile", {"uid": "u_1001"})
+    from unittest.mock import patch
+    from agent.tools import blacklist as BL
+    valid_records = BL.load_blacklist() + [{"dimension": "uid", "value": "u_1001",
+        "list": "white", "scope": "order", "owner": "eval_owner", "reason": "eval",
+        "added_at": "2026-07-01", "expires_at": "2026-07-30"}]
+    with patch.object(BL, "load_blacklist", return_value=valid_records), \
+            patch.object(BL.time, "time", return_value=1784100000):
+        mon = account_monitor("u_1001")
+        prof = _fixture_dispatch("account_profile", {"uid": "u_1001"})
     checks += [
         ("白名单不是风险信号(monitor 无 blacklist 信号,单列标注)",
          "blacklist" not in mon["signal_types"] and bool(mon.get("whitelist_notes"))),
@@ -2803,16 +2891,16 @@ def run_graylist_layer() -> int:
             r2 = graylist_review()
             by_val = {e["value"]: e for e in r2["entries"]}
             # 出灰全流程:提案 -> 审批 -> 名单移除 -> R001 不再命中
-            rm = registry.dispatch("blacklist_remove", {
+            rm = _fixture_dispatch("blacklist_remove", {
                 "dimension": "ip", "value": "9.9.9.9", "list": "gray",
                 "reason": "eval:graylist_review 期满干净"})
             actions.decide(rm.get("action_id", -1), approve=True)
-            gone = not registry.dispatch("blacklist_query",
+            gone = not _fixture_dispatch("blacklist_query",
                                          {"dimension": "ip", "value": "9.9.9.9"})["hit"]
-            rm_absent = registry.dispatch("blacklist_remove", {
+            rm_absent = _fixture_dispatch("blacklist_remove", {
                 "dimension": "ip", "value": "9.9.9.9", "list": "gray", "reason": "eval:再删"})
             # 灰名单默认观察期:不带 expires_days 的灰提案自动带上
-            g_add = registry.dispatch("blacklist_add", {
+            g_add = _fixture_dispatch("blacklist_add", {
                 "dimension": "ip", "value": "7.7.7.7", "list": "gray", "reason": "eval:默认观察期"})
             g_entry = [a for a in actions.list_pending()
                        if a.get("kind", "blacklist_add") == "blacklist_add"
@@ -2828,7 +2916,7 @@ def run_graylist_layer() -> int:
                  g_add.get("status") == "pending_confirmation"
                  and bool(g_entry) and g_entry[0].get("expires_days") == 30),
             ]
-            gm = registry.dispatch("graylist_metrics", {})
+            gm = _fixture_dispatch("graylist_metrics", {})
             checks.append(("灰名单指标:停留/建议分布/误伤成本且不编历史率",
                            gm.get("gray_active", 0) >= 1
                            and "p50" in (gm.get("dwell_days") or {})
@@ -2863,7 +2951,7 @@ def run_policy_layer() -> int:
             # rule_drift 双口径:同一版本表下,当前口径与当时口径的命中率差异
             # 必须与 policy_shift_note 的有无一致(有差必有注记,无差必无)——
             # 监控层对"自己批的阈值"不再失明
-            rd = registry.dispatch("rule_drift", {})
+            rd = _fixture_dispatch("rule_drift", {})
             has_diff = any("flag_rate_asof" in e for e in rd["verdict_mix"]["trend"]) \
                 if rd.get("found") else False
             checks = [
@@ -2888,9 +2976,9 @@ def run_governance_layer() -> int:
             shutil.copy(ROOT / "data" / f, Path(td) / f)
         os.environ["FK_DATA_DIR"] = td
         try:
-            r1 = registry.dispatch("threshold_propose",
+            r1 = _fixture_dispatch("threshold_propose",
                                    {"values": {"r002_min_events": 12}, "reason": "eval:测试"})
-            r_limit = registry.dispatch("threshold_propose",
+            r_limit = _fixture_dispatch("threshold_propose",
                                         {"values": {"r002_max_gap_seconds": 300}, "reason": "eval:大改"})
             pending_prop = [a for a in actions.list_pending()
                             if a.get("kind") == "threshold_change"]
@@ -2911,13 +2999,13 @@ def run_governance_layer() -> int:
             actions.decide(r1.get("action_id", -1), approve=True)
             from agent.tools.policy import active_policy
             pol = active_policy()
-            hist = registry.dispatch("policy_history", {})
+            hist = _fixture_dispatch("policy_history", {})
             # 把已落盘版本的基线快照改成离谱值,漂移告警必须响
             tpath = Path(td) / "thresholds.json"
             versions = json.loads(tpath.read_text(encoding="utf-8"))
             versions[-1]["baseline_snapshot"] = {"event_count": {"p99": 1}}
             tpath.write_text(json.dumps(versions), encoding="utf-8")
-            cal = registry.dispatch("threshold_calibrate", {})
+            cal = _fixture_dispatch("threshold_calibrate", {})
             checks = [
                 ("提案进入待审批", r1.get("status") == "pending_confirmation"),
                 ("提案绑定影子证据/指纹/commit/过期",
@@ -2943,10 +3031,10 @@ def run_shadow_layer() -> int:
     """离线:影子回测 + 覆盖原子性(防部分应用泄漏的回归守卫)。
     候选策略 = 关掉 R006 的 root/hook 强拒 + 放宽 R002 —— 正是评估
     '设备强拒开关值多少召回'的真实用法。"""
-    r = registry.dispatch("shadow_backtest", {"overrides": {
+    r = _fixture_dispatch("shadow_backtest", {"overrides": {
         "r006_reject_rooted": 0, "r006_reject_hook": 0, "r002_min_events": 99}})
     after_shadow = backtest()["operating_points"]["flag=review+reject"]
-    bad = registry.dispatch("rule_backtest", {"overrides": {"r002_min_events": 5, "bogus": 1}})
+    bad = _fixture_dispatch("rule_backtest", {"overrides": {"r002_min_events": 5, "bogus": 1}})
     after_bad = backtest()["operating_points"]["flag=review+reject"]
     return _report("影子回测与覆盖原子性(离线)", [
         ("影子:关掉设备强拒 + 放宽频率后 u_1002 会被放过",
@@ -2997,12 +3085,12 @@ def run_baseline_layer() -> int:
 
 def run_intel_layer() -> int:
     """离线:IP 情报与举报查询。"""
-    i1 = registry.dispatch("ip_intel", {"ip": "203.0.113.66"})
-    i2 = registry.dispatch("ip_intel", {"ip": "10.222.1.1"})
-    r9 = registry.dispatch("report_query", {"uid": "u_1009"})
-    r1 = registry.dispatch("report_query", {"uid": "u_1001"})
-    d1 = registry.dispatch("device_intel", {"device_id": "dev_emu_9f3a"})
-    d2 = registry.dispatch("device_intel", {"device_id": "dev_unknown_x"})
+    i1 = _fixture_dispatch("ip_intel", {"ip": "203.0.113.66"})
+    i2 = _fixture_dispatch("ip_intel", {"ip": "10.222.1.1"})
+    r9 = _fixture_dispatch("report_query", {"uid": "u_1009"})
+    r1 = _fixture_dispatch("report_query", {"uid": "u_1001"})
+    d1 = _fixture_dispatch("device_intel", {"device_id": "dev_emu_9f3a"})
+    d2 = _fixture_dispatch("device_intel", {"device_id": "dev_unknown_x"})
     return _report("IP/设备情报与举报(离线)", [
         ("机房段识别为 idc/high", i1.get("type") == "idc" and i1.get("risk") == "high"),
         ("未知段优雅降级", i2.get("type") == "unknown"),
@@ -3041,7 +3129,10 @@ def run_profile_layer() -> int:
     from agent.tools.profile import account_profile
     p9 = account_profile("u_1009")   # 老号高价值被盗形态
     p2 = account_profile("u_1002")   # 新号刷券形态
-    p3 = account_profile("u_1003")   # 灰名单设备批量注册形态
+    from unittest.mock import patch
+    from agent.tools.datasource import load_events
+    with patch("agent.tools.graph.time.time", return_value=max(e["ts"] for e in load_events()) + 1):
+        p3 = account_profile("u_1003")   # fixed fixture graph clock
     px = account_profile("u_9999")   # 无主档无事件,须优雅降级
     return _report("账号档案(离线)", [
         ("u_1009:老号高价值,误伤代价 high",
@@ -3091,10 +3182,10 @@ def run_profile_layer() -> int:
 def run_reconcile_layer() -> int:
     """离线:模拟一致性对账 —— 埋设的生产漂移必须被抓出,一致部分不得误报,
     失信标记必须自动挂到模拟类工具的返回上。"""
-    r = registry.dispatch("consistency_check", {})
+    r = _fixture_dispatch("consistency_check", {})
     got = {(m["uid"], m["ts"]) for m in r.get("mismatches", [])}
     planted = {("u_1001", 1784099100), ("u_1002", 1784109633), ("u_1003", 1784110800)}
-    bt = registry.dispatch("rule_backtest", {})
+    bt = _fixture_dispatch("rule_backtest", {})
     sim = bt.get("sim_consistency", {})
     mm = r.get("master_mismatches", [])
     return _report("模拟一致性对账(离线)", [
@@ -3118,27 +3209,27 @@ def run_mismatch_queue_layer() -> int:
             shutil.copy(ROOT / "data" / f, Path(td) / f)
         os.environ["FK_DATA_DIR"] = td
         try:
-            c1 = registry.dispatch("consistency_check", {})
+            c1 = _fixture_dispatch("consistency_check", {})
             checks = [
                 ("首次对账开出 3 张工单(与埋设漂移数一致)",
                  c1.get("mismatch_queue", {}).get("fresh_open") == 3
                  and c1["mismatch_queue"]["open"] == 3),
             ]
-            registry.dispatch("mismatch_resolve",
+            _fixture_dispatch("mismatch_resolve",
                               {"key": "u_1002:1784109633", "cause": "known_diff",
                                "note": "eval:测试销单"})
-            q = registry.dispatch("mismatch_queue", {})
+            q = _fixture_dispatch("mismatch_queue", {})
             checks.append(("销单后 open=2 resolved=1",
                            q["stats"]["open"] == 2 and q["stats"]["resolved"] == 1
                            and q["stats"]["total"] == 3))
-            registry.dispatch("consistency_check", {})  # 状态未变 -> 缓存命中
-            q = registry.dispatch("mismatch_queue", {})
+            _fixture_dispatch("consistency_check", {})  # 状态未变 -> 缓存命中
+            q = _fixture_dispatch("mismatch_queue", {})
             checks.append(("对账缓存命中不打扰已销单",
                            q["stats"]["open"] == 2 and q["stats"]["resolved"] == 1))
             dp = Path(td) / "decisions_log.json"
             dp.write_text(dp.read_text(encoding="utf-8") + "\n")  # mtime 触发重跑
-            registry.dispatch("consistency_check", {})
-            q = registry.dispatch("mismatch_queue", {})
+            _fixture_dispatch("consistency_check", {})
+            q = _fixture_dispatch("mismatch_queue", {})
             item = [i for i in q["items"] if i["key"] == "u_1002:1784109633"]
             checks.append(("复发自动重开且保留原销单说明",
                            q["stats"]["total"] == 3 and item
@@ -3149,8 +3240,8 @@ def run_mismatch_queue_layer() -> int:
                                "rules": [], "policy_version": "v",
                                "register_risk_score": 0}],
             }, ensure_ascii=False), encoding="utf-8")
-            registry.dispatch("consistency_check", {})
-            q = registry.dispatch("mismatch_queue", {})
+            _fixture_dispatch("consistency_check", {})
+            q = _fixture_dispatch("mismatch_queue", {})
             checks.append(("对账恢复自动销单,无重复工单",
                            q["stats"]["open"] == 0 and q["stats"]["stale"] == 3
                            and q["stats"]["total"] == 3))
@@ -3163,13 +3254,13 @@ def run_privacy_layer() -> int:
     """离线:脱敏层往返与稳定性 + 用户内容注入防线(含逃逸尝试)。"""
     from agent.privacy import Tokenizer
     t = Tokenizer()
-    raw = json.dumps(registry.dispatch("account_profile", {"uid": "u_1009"}),
+    raw = json.dumps(_fixture_dispatch("account_profile", {"uid": "u_1009"}),
                      ensure_ascii=False, default=str)
     tok = t.tokenize(raw)
     leaked = [s for s in ("u_1009", "116.25.40.77", "203.0.113.66",
                           "dev_pixel_z9", "dev_iphone_b7") if s in tok]
     cjk_tok = t.tokenize("账号u_1002可疑")  # 中文紧邻 ID,\\b 边界会漏,lookaround 不会
-    rq = registry.dispatch("report_query", {"uid": "u_1009"})
+    rq = _fixture_dispatch("report_query", {"uid": "u_1009"})
     text = rq["reports"][0]["text"]
     # 逃逸尝试:举报文本里伪造闭合标记,必须被清洗后再包裹
     with tempfile.TemporaryDirectory() as td:
@@ -3180,7 +3271,7 @@ def run_privacy_layer() -> int:
         }]), encoding="utf-8")
         os.environ["FK_DATA_DIR"] = td
         try:
-            evil = registry.dispatch("report_query", {"uid": "t_x"})["reports"][0]["text"]
+            evil = _fixture_dispatch("report_query", {"uid": "t_x"})["reports"][0]["text"]
         finally:
             os.environ.pop("FK_DATA_DIR", None)
     return _report("脱敏与注入防线(离线)", [
@@ -3281,14 +3372,18 @@ def run_regression_layer() -> int:
     a_wseq, _ = combine_hits(hits_white_gray, {"decision_combine": "sequential"})
     from agent.tools.backtest import shadow_compare
     sh_vote = shadow_compare({"decision_combine": "vote"})
-    sl_h = registry.dispatch("slice_eval", {"slice": "holdout"})
-    integ = registry.dispatch("integration_status", {})
+    sl_h = _fixture_dispatch("slice_eval", {"slice": "holdout"})
+    integ = _fixture_dispatch("integration_status", {})
     from agent.tools.idemp_store import begin, complete, lookup
-    _fp = "eval-idemp-pin"
-    st1 = begin(_fp)
-    complete(_fp, {"action": "pass", "rules": []})
-    st2 = begin(_fp)
-    idemp_ok = st1 == "compute" and st2 == "hit" and (lookup(_fp) or {}).get("action") == "pass"
+    from unittest.mock import patch
+    # Persistent idempotency is tested in its own deployment, not implicitly reset
+    # by an unrelated HTTP smoke test or contaminated by a previous eval run.
+    with tempfile.TemporaryDirectory() as idemp_dir, patch.dict(os.environ, {"FK_DATA_DIR": idemp_dir}):
+        _fp = "eval-idemp-pin"
+        st1 = begin(_fp)
+        complete(_fp, {"action": "pass", "rules": []})
+        st2 = begin(_fp)
+        idemp_ok = st1 == "compute" and st2 == "hit" and (lookup(_fp) or {}).get("action") == "pass"
     v_ok = validate_strategy({"rules": ["R001"],
                               "thresholds": {"decision_combine": "vote"}})
     v_bad = validate_strategy({"rules": ["R001"],
@@ -3422,7 +3517,7 @@ def run_regression_layer() -> int:
                             "type": "coupon_claim", "ts": 1000 + (n - 1) * 2})
             checks.append(("R002:恰好刷满阈值次数的第 N 次即命中(无差一)",
                            any(h["rule_id"] == "R002" for h in r2["hits"])))
-            cal = registry.dispatch("threshold_calibrate", {})
+            cal = _fixture_dispatch("threshold_calibrate", {})
             checks.append(("漂移:快照 P99=0 抬升必须告警(0 不是缺失)",
                            cal.get("drift_alarm") is True
                            and any("从 0" in s for s in cal.get("drift_alarms", []))))
@@ -3446,7 +3541,7 @@ def run_regression_layer() -> int:
             # decide 原子性:落盘失败 -> 申请留在队列、进程内名单缓存不被污染
             actions.blacklist_add("device_id", "t_evil", reason="eval", **{"list": "gray"})
             pending_before = len(actions.list_pending())
-            bl_before = len(registry.dispatch("blacklist_query",
+            bl_before = len(_fixture_dispatch("blacklist_query",
                                               {"dimension": "device_id", "value": "t_evil"})["records"])
             real_path = actions.blacklist_path
             actions.blacklist_path = lambda: base / "no_such_dir" / "bl.json"
@@ -3459,7 +3554,7 @@ def run_regression_layer() -> int:
                     raised = True
             finally:
                 actions.blacklist_path = real_path
-            bl_after = len(registry.dispatch("blacklist_query",
+            bl_after = len(_fixture_dispatch("blacklist_query",
                                              {"dimension": "device_id", "value": "t_evil"})["records"])
             checks.append(("审批原子性:落盘失败时申请留队、缓存无幻影记录",
                            raised and len(actions.list_pending()) == pending_before
@@ -3635,10 +3730,10 @@ def run_depth_layer() -> int:
         try:
             bt = backtest()
             wide = bt["operating_points"]["flag=review+reject"]
-            adv = registry.dispatch("adversary_watch", {})
-            fd = registry.dispatch("feature_drift", {})
-            rd = registry.dispatch("rule_drift", {})
-            brief = registry.dispatch("daily_brief", {})
+            adv = _fixture_dispatch("adversary_watch", {})
+            fd = _fixture_dispatch("feature_drift", {})
+            rd = _fixture_dispatch("rule_drift", {})
+            brief = _fixture_dispatch("daily_brief", {})
             near_alarm = any("近阈" in a for a in adv.get("alarms", []))
             return _report("防御纵深(离线,规则盲区攻击)", [
                 ("攻击确实在规则盲区(recall=0,40 个全漏)",
@@ -3665,32 +3760,32 @@ def run_strategy_layer() -> int:
             from agent.tools import actions
             from agent.tools.datasource import load_appeals, load_labels, postmortems_path
 
-            fr = registry.dispatch("feature_risk", {})
+            fr = _fixture_dispatch("feature_risk", {})
             levels = {d["level"] for d in fr["features"].values()}
             # 日报聚合:处置清单齐全、待办申诉计数正确、安静项显式列出
-            brief = registry.dispatch("daily_brief", {})
+            brief = _fixture_dispatch("daily_brief", {})
             # 试衣间:u_1002(高频领券多 IP)已被现有规则覆盖 → 应判无增量
-            draft = registry.dispatch("rule_draft_test", {"conditions": [
+            draft = _fixture_dispatch("rule_draft_test", {"conditions": [
                 {"feature": "distinct_ip", "op": ">=", "value": 5}]})
-            adv = registry.dispatch("adversary_watch", {})
+            adv = _fixture_dispatch("adversary_watch", {})
             queue = {q["uid"]: q["recommendation"]
-                     for q in registry.dispatch("appeal_review", {})["queue"]}
+                     for q in _fixture_dispatch("appeal_review", {})["queue"]}
             # 值班台:盯梢 + 告警确认(确认后静默但计数可见,凭空 ack 被拒)
-            registry.dispatch("duty_ops", {"action": "watch_add", "dimension": "uid",
+            _fixture_dispatch("duty_ops", {"action": "watch_add", "dimension": "uid",
                                            "value": "u_1002", "reason": "eval 盯梢"})
-            b_watch = registry.dispatch("daily_brief", {})
+            b_watch = _fixture_dispatch("daily_brief", {})
             first_alerts = [a for v in b_watch["alerts"].values()
                             for a in (v if isinstance(v, list) else [v])]
             ack_ok = ack_after = bogus = None
             if first_alerts:
-                ack_ok = registry.dispatch("duty_ops", {
+                ack_ok = _fixture_dispatch("duty_ops", {
                     "action": "ack_alarm", "alarm": first_alerts[0], "reason": "eval 确认"})
-                ack_after = registry.dispatch("daily_brief", {})
-            bogus = registry.dispatch("duty_ops", {
+                ack_after = _fixture_dispatch("daily_brief", {})
+            bogus = _fixture_dispatch("duty_ops", {
                 "action": "ack_alarm", "alarm": "不存在的告警 PSI=9.9"})
-            r1 = registry.dispatch("appeal_resolve", {
+            r1 = _fixture_dispatch("appeal_resolve", {
                 "appeal_id": 1, "decision": "reject", "reason": "灰名单设备+套现模式+fraud 标签"})
-            r2 = registry.dispatch("appeal_resolve", {
+            r2 = _fixture_dispatch("appeal_resolve", {
                 "appeal_id": 2, "decision": "accept", "reason": "判定 pass 无名单无属实举报"})
             actions.decide(r1["action_id"], approve=True)
             actions.decide(r2["action_id"], approve=True)
@@ -3716,7 +3811,7 @@ def run_strategy_layer() -> int:
                 ("申诉决议经审批落盘", statuses == {1: "rejected", 2: "accepted"}),
                 ("误伤核实自动修正标签", load_labels().get("u_1001", {}).get("label") == "normal"),
                 ("复盘日志已沉淀", postmortems_path().exists()),
-                ("已决议申诉不可重复提交", registry.dispatch("appeal_resolve", {
+                ("已决议申诉不可重复提交", _fixture_dispatch("appeal_resolve", {
                     "appeal_id": 1, "decision": "accept", "reason": "x"})["status"] == "already_resolved"),
             ])
         finally:
@@ -3734,16 +3829,18 @@ def run_serve_layer() -> int:
     with socket.socket() as s:  # 拿一个空闲端口
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    idemp_p = ROOT / "data" / "decide_idemp.json"
-    try:
-        idemp_p.unlink()
-    except OSError:
-        pass
+    deployment = tempfile.TemporaryDirectory()
+    previous_data_dir = os.environ.get("FK_DATA_DIR")
+    for filename in ("events_sample.json", "blacklist.json", "thresholds.json", "labels.json", "accounts.json", "device_intel.json", "ip_intel.json", "reports.json"):
+        shutil.copy(ROOT / "data" / filename, Path(deployment.name) / filename)
+    os.environ["FK_DATA_DIR"] = deployment.name
     serve_token = "eval-serve-token-at-least-16"
     operator_secret = "eval-operator-hmac-secret"
     serve_env = dict(os.environ)
     serve_env.update({"FK_SERVE_TOKEN": serve_token,
-                      "FK_OPERATOR_HMAC_SECRET": operator_secret})
+                      "FK_OPERATOR_HMAC_SECRET": operator_secret,
+                      "FK_SERVE_SOURCE_KIND": "legacy_client",
+                      "FK_SERVE_LOG_PATH": str(Path(deployment.name) / "serve_decisions.jsonl")})
     proc = subprocess.Popen([sys.executable, str(ROOT / "serve.py"), "--port", str(port)],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             env=serve_env)
@@ -3782,8 +3879,19 @@ def run_serve_layer() -> int:
         eval_now = time.time()
         event = {"event_id": "eval-coupon-1", "uid": "u_1002",
                  "type": "coupon_claim", "ts": eval_now}
-        offline = rule_eval(dict(event), use_current_policy=True)
-        logp = ROOT / "out" / "serve_decisions.jsonl"
+        # Online evidence must come from committed requests in this deployment.
+        # Reuse the same observed history for the offline comparison.
+        history = []
+        for index in range(10):
+            prior = dict(event, event_id="seed-coupon-%d" % index, ts=time.time())
+            seed_code, seed_decision = _req("/decide", prior)
+            assert seed_code == 200, (index, seed_decision)
+            history.append(prior)
+        event["ts"] = time.time()
+        from agent.tools.datasource import event_snapshot
+        with event_snapshot(history, (deployment.name, "eval-smoke-offline")):
+            offline = rule_eval(dict(event), use_current_policy=True)
+        logp = Path(deployment.name) / "serve_decisions.jsonl"
         n0 = len(logp.read_text(encoding="utf-8").splitlines()) if logp.exists() else 0
         code, online = _req("/decide", event)
         n1 = len(logp.read_text(encoding="utf-8").splitlines()) if logp.exists() else 0
@@ -3839,6 +3947,11 @@ def run_serve_layer() -> int:
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+        if previous_data_dir is None:
+            os.environ.pop("FK_DATA_DIR", None)
+        else:
+            os.environ["FK_DATA_DIR"] = previous_data_dir
+        deployment.cleanup()
 
 
 def run_cost_layer() -> int:

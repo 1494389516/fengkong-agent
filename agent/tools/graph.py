@@ -1,46 +1,123 @@
 # -*- coding: utf-8 -*-
-"""关联图谱工具:账号-设备-IP 二部图,连通分量即天然的"疑似团伙"分组。
+"""Bounded, point-in-time association evidence; connectivity is not a fraud label.
 
-为什么是图:单账号视角看 u_1003 只是"灰名单设备 + 小额订单",拉成图才能
-看到 u_1003/u_1004/u_1005 挂在同一台设备上 —— 团伙结构是关联出来的,
-不是单点特征算出来的。连通分量 ID 还可以反哺规则(同分量内有黑账号,
-其余成员升灰)。
-
-返回给模型的是分量的结构化描述(成员/资源/名单命中),图渲染成 PNG 给人看。
-
-边分强弱(教训:随机 IP 撞号曾把互不相干的 bot 与两个团伙并成一组):
-- 强边(并组依据):共享设备;共享家宽/基站 IP(物理同址才是身份证据)。
-- 弱边(仅展示):机房/代理/未知类型 IP —— 公共出口,陌生人共用是常态,
-  拿它并组等于把路人并进案子(超级节点桥接,真实风控的经典事故)。
-连通分量只在强边子图上算;弱关联 IP 挂在成员名下画出来(虚线),
-并在返回里单列 weak_ips,不冒充团伙纽带。
+All IP edges are weak, including mobile and residential shared public exits.
+Device identity is an asserted identifier, not proof of a human or exclusive ownership.
 """
+import math
+import time
+from collections import deque
 from typing import Optional
 
 import networkx as nx
 
 from . import tool
 from .charts import LABEL_COLORS, PALETTE, _save, _t, plt
-from .datasource import load_blacklist, load_events, load_labels
+from .datasource import load_events, load_labels
+from .blacklist import active_records
 from .intel import device_risk_flags, device_type_summary, ip_info
 
 MAX_DRAW_COMPONENTS = 9  # 最多画的分量面板数:每个分量独立一个子图,超出只画最大的前 N 个
 
-STRONG_IP_TYPES = ("residential", "mobile")  # 物理同址类 IP 才配当并组纽带
+DEFAULT_WINDOW_SECONDS = 30 * 86400
+MAX_GRAPH_EVENTS = 50000
+MAX_GRAPH_NODES = 5000
+MAX_RESOURCE_DEGREE = 20
+MAX_COMPONENT_NODES = 100
+MAX_COMPONENT_HOPS = 4
+MAX_COMPONENTS = 100
+MAX_EXPANDED_NODES = 200
 
 
-def _build_graph() -> nx.Graph:
+def _finite_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _build_graph(as_of_ts=None, window_seconds=DEFAULT_WINDOW_SECONDS) -> nx.Graph:
+    anchor = time.time() if as_of_ts is None else as_of_ts
+    if not _finite_number(anchor) or not _finite_number(window_seconds) or window_seconds <= 0:
+        raise ValueError("as_of_ts must be finite; window_seconds must be positive and finite")
+    if window_seconds > 366 * 86400:
+        raise ValueError("graph window must not exceed 366 days")
     g = nx.Graph()
-    for e in load_events():
+    g.graph.update(as_of_ts=anchor, window_seconds=window_seconds, truncated=False,
+                   invalid_events=0, interpretation="association_only")
+    for index, e in enumerate(load_events()):
+        if index >= MAX_GRAPH_EVENTS:
+            g.graph["truncated"] = True
+            break
+        ts = e.get("ts")
+        if not _finite_number(ts) or not isinstance(e.get("uid"), str) or not e["uid"]:
+            g.graph["invalid_events"] += 1
+            continue
+        if not anchor - window_seconds <= ts < anchor:
+            continue
         uid = ("uid", e["uid"])
+        resources = [(k, e[k]) for k in ("device_id", "ip")
+                     if isinstance(e.get(k), str) and e[k]]
+        if len(set([uid] + resources) - set(g)) + len(g) > MAX_GRAPH_NODES:
+            g.graph["truncated"] = True
+            break
         g.add_node(uid, kind="uid")
-        dev = ("device_id", e["device_id"])
-        g.add_node(dev, kind="device_id")
-        g.add_edge(uid, dev, strong=True)
-        ip = ("ip", e["ip"])
-        g.add_node(ip, kind="ip")
-        g.add_edge(uid, ip, strong=ip_info(e["ip"])["type"] in STRONG_IP_TYPES)
+        for resource in resources:
+            g.add_node(resource, kind=resource[0])
+            previous = g.get_edge_data(uid, resource, {})
+            g.add_edge(uid, resource, strong=resource[0] == "device_id",
+                       first_seen=min(ts, previous.get("first_seen", ts)),
+                       last_seen=max(ts, previous.get("last_seen", ts)),
+                       observation_count=previous.get("observation_count", 0) + 1,
+                       identity_trust="asserted_identifier",
+                       weak_reason="shared_public_exit" if resource[0] == "ip" else None)
+    for node in list(g):
+        if node[0] == "device_id" and g.degree(node) > MAX_RESOURCE_DEGREE:
+            for neighbor in g[node]:
+                g[node][neighbor].update(strong=False, weak_reason="high_degree_resource")
     return g
+
+
+def _bounded_component(sg, node):
+    found = {node}
+    queue = deque([(node, 0)])
+    truncated = False
+    while queue:
+        current, depth = queue.popleft()
+        for neighbor in sorted(sg[current]):
+            if neighbor in found:
+                continue
+            if depth >= MAX_COMPONENT_HOPS or len(found) >= MAX_COMPONENT_NODES:
+                truncated = True
+                continue
+            found.add(neighbor)
+            queue.append((neighbor, depth + 1))
+    return found, truncated
+
+
+def _active_blacklist(g):
+    # Shared list-service semantics, including expiry boundaries, with one anchor.
+    hits, evidence = {}, []
+    for kind, value in g:
+        for record in active_records(kind, value, g.graph["as_of_ts"], lists=("black", "gray")):
+            key = (kind, value)
+            if hits.get(key) != "black":
+                hits[key] = record["list"]
+            evidence.append({"dimension": kind, "value": value, "list": record["list"],
+                             "added_at": record.get("added_at"),
+                             "expires_at": record.get("expires_at"),
+                             "as_of_ts": g.graph["as_of_ts"]})
+    return hits, evidence
+
+
+def _contextual_info(g, strong, expanded, blacklisted, labels, evidence, truncated=False):
+    info = _component_info(strong, expanded, blacklisted, labels)
+    info.update(g.graph)
+    info["truncated"] = bool(truncated or g.graph["truncated"])
+    info["blacklist_evidence"] = [r for r in evidence if (r["dimension"], r["value"]) in expanded]
+    info["edge_evidence"] = [dict(source=list(u), target=list(v), **d)
+                             for u, v, d in g.subgraph(expanded).edges(data=True)]
+    info["limitations"] = ["Connectivity is association only, not a malicious label.",
+                           "Device identifiers do not establish exclusive physical ownership.",
+                           "Device flags and known labels are current annotations, not historical evidence."]
+    return info
 
 
 def _strong_subgraph(g: nx.Graph) -> nx.Graph:
@@ -51,11 +128,17 @@ def _strong_subgraph(g: nx.Graph) -> nx.Graph:
 
 
 def _expand_weak(g: nx.Graph, strong_nodes) -> set:
-    """强分量 + 成员账号名下的弱关联 IP(展示用,不参与并组)。"""
+    """Display-only resources are capped too; truncation is visible in evidence."""
     ext = set(strong_nodes)
-    for nd in strong_nodes:
+    for nd in sorted(strong_nodes):
         if nd[0] == "uid":
-            ext.update(g[nd])
+            for resource in sorted(g[nd]):
+                if resource in ext:
+                    continue
+                if len(ext) >= MAX_EXPANDED_NODES:
+                    g.graph["truncated"] = True
+                    return ext
+                ext.add(resource)
     return ext
 
 
@@ -77,29 +160,31 @@ def _component_info(strong_nodes, all_nodes, blacklisted: dict, labels: dict) ->
     }
 
 
-def component_summary(uid: str):
-    """某账号所在关联分量的结构化描述(不渲染图)。account_profile 复用;
-    找不到该账号返回 None。"""
-    g = _build_graph()
+def component_summary(uid: str, as_of_ts=None, window_seconds=DEFAULT_WINDOW_SECONDS):
+    """Bounded association neighborhood at [as_of-window, as_of); absent account -> None."""
+    g = _build_graph(as_of_ts, window_seconds)
     node = ("uid", uid)
     if node not in g:
         return None
-    # 图上的"名单命中"只标黑/灰(风险);白名单是抑制标注,不该画成红圈
-    blacklisted = {(r["dimension"], r["value"]): r["list"] for r in load_blacklist()
-                   if r["list"] in ("black", "gray")}
-    labels = {k: v["label"] for k, v in load_labels().items()}
-    strong = nx.node_connected_component(_strong_subgraph(g), node)
-    return _component_info(strong, _expand_weak(g, strong), blacklisted, labels)
+    blacklisted, evidence = _active_blacklist(g)
+    # Label/intelligence snapshots are not versioned; omit them in historical replay.
+    labels = {} if as_of_ts is not None else {k: v["label"] for k, v in load_labels().items()}
+    strong, truncated = _bounded_component(_strong_subgraph(g), node)
+    info = _contextual_info(g, strong, _expand_weak(g, strong), blacklisted, labels, evidence, truncated)
+    if as_of_ts is not None:
+        info["device_flags"] = {}
+        info["device_summary"] = {"status": "historical_snapshot_unavailable"}
+    return info
 
 
 @tool(
     name="graph_relations",
     description=(
-        "账号-设备-IP 关联图谱:连通分量即疑似团伙。并组只认强证据(共享设备/"
-        "家宽/基站 IP);机房/代理只进 weak_ips,不作团伙依据。"
+        "账号-设备-IP 时窗关联证据:连通性不是恶意标签。所有 IP 为弱边；"
+        "设备高连接度弱化，关联扩张有预算。"
         "不传参返回多账号分量(按账号数降序)+ PNG;传 uid 或 device_id 只返回"
         "该节点所在分量。返回含成员、设备/IP、device_flags、名单、标签、"
-        "member_verdicts(各 uid 的 action/rules)。有团伙/某设备上有谁直接调,"
+        "edge_evidence 与时间边界；成员处置不从连通性推导。有设备关联问题直接调,"
         "不要先体检,不要再拆 device_intel/ip_intel,不要对成员逐个档案。"
         "未点名写入时不要 blacklist_add。目标 uid 已判不存在时不要再调。"
     ),
@@ -108,40 +193,61 @@ def component_summary(uid: str):
         "properties": {
             "uid": {"type": "string", "description": "可选:只看该账号所在分量"},
             "device_id": {"type": "string", "description": "可选:只看该设备所在分量"},
+            "as_of_ts": {"type": "number", "description": "取证时点(unix秒)，默认当前时间"},
+            "window_seconds": {"type": "integer", "description": "历史窗口秒数，默认30天，最多366天"},
             "min_accounts": {"type": "integer",
-                             "description": "分量最少账号数,默认 2(单账号分量不是团伙)"},
+                             "description": "关联分量最少账号数,默认 2"},
         },
     },
 )
 def graph_relations(uid: Optional[str] = None, device_id: Optional[str] = None,
-                    min_accounts: int = 2):
+                    min_accounts: int = 2, as_of_ts=None,
+                    window_seconds=DEFAULT_WINDOW_SECONDS):
     if uid and device_id:
         return {"error": "uid 与 device_id 不要同时传;设备问题用 device_id"}
-    g = _build_graph()
+    g = _build_graph(as_of_ts, window_seconds)
     sg = _strong_subgraph(g)
-    # 图上的"名单命中"只标黑/灰(风险);白名单是抑制标注,不该画成红圈
-    blacklisted = {(r["dimension"], r["value"]): r["list"] for r in load_blacklist()
-                   if r["list"] in ("black", "gray")}
-    labels = {k: v["label"] for k, v in load_labels().items()}
+    blacklisted, evidence = _active_blacklist(g)
+    labels = {} if as_of_ts is not None else {k: v["label"] for k, v in load_labels().items()}
+    component_truncation = []
+
 
     if uid is not None or device_id is not None:
         kind, val = ("uid", uid) if uid is not None else ("device_id", device_id)
         node = (kind, val)
         if node not in g:
             return {kind: val, "found": False, "next_action": "stop",
-                    "stop_reason": "图上无此 %s。设备可改调 device_intel 看指纹是否入库。"
+                    "as_of_ts": g.graph["as_of_ts"], "window_seconds": window_seconds,
+                    "truncated": g.graph["truncated"],
+                    "stop_reason": "当前时窗图中无此 %s，不代表全历史不存在。"
                     % kind}
-        comps = [nx.node_connected_component(sg, node)]
+        component, truncated = _bounded_component(sg, node)
+        comps = [component]
+        component_truncation = [truncated]
     else:
-        comps = [c for c in nx.connected_components(sg)
-                 if sum(1 for k, _ in c if k == "uid") >= max(min_accounts, 1)]
-        comps.sort(key=lambda c: -sum(1 for k, _ in c if k == "uid"))
+        comps, seen = [], set()
+        for node in sorted(sg):
+            if node[0] != "uid" or node in seen:
+                continue
+            component, truncated = _bounded_component(sg, node)
+            seen.update(component)
+            if sum(k == "uid" for k, _ in component) >= max(min_accounts, 1):
+                comps.append(component)
+                component_truncation.append(truncated)
+            if len(comps) >= MAX_COMPONENTS:
+                g.graph["truncated"] = True
+                break
 
     expanded = [_expand_weak(g, c) for c in comps]
-    infos = [_component_info(c, e, blacklisted, labels) for c, e in zip(comps, expanded)]
-    from .intel import verdict_brief
+    infos = [_contextual_info(g, c, e, blacklisted, labels, evidence, t)
+             for c, e, t in zip(comps, expanded, component_truncation)]
     for info in infos:
-        info["member_verdicts"] = verdict_brief(info.get("accounts") or [])
+        # Existing verdict_brief consumes all history and cannot support this time domain.
+        info["member_verdicts"] = {}
+        info["member_verdicts_status"] = "unavailable_in_graph_time_domain"
+        if as_of_ts is not None:
+            info["device_flags"] = {}
+            info["device_summary"] = {"status": "historical_snapshot_unavailable"}
 
     chart_path = None
     draw_comps = expanded[:MAX_DRAW_COMPONENTS]
@@ -150,8 +256,10 @@ def graph_relations(uid: Optional[str] = None, device_id: Optional[str] = None,
 
     result = {"components": infos, "component_count": len(infos), "chart_path": chart_path,
               "next_action": "answer",
-              "stop_reason": "分量成员判定见 member_verdicts,直接作答,"
-                             "不要再对每个 uid 调 account_profile。"}
+              "stop_reason": "这是限定时窗关联证据，不是成员恶意判定。",
+              "as_of_ts": g.graph["as_of_ts"], "window_seconds": window_seconds,
+              "truncated": g.graph["truncated"] or any(component_truncation),
+              "interpretation": "association_only"}
     if uid is not None:
         result["uid"] = uid
         result["found"] = True
@@ -245,7 +353,7 @@ def _draw(g, comps, blacklisted, labels, uid=None) -> str:
     for ax in axes.flat[n:]:  # 网格里多出来的空面板隐藏
         ax.axis("off")
     fig.suptitle(_t("关联图谱:每个面板一个分量 | 圆=账号(红=fraud) 方=设备 三角=IP | 红描边=名单命中 | "
-                    "虚线+淡色三角=机房/代理 IP(公共出口,不作并组依据)",
-                    "Relation graph: one component per panel | dashed+pale = idc/proxy ip (not a grouping edge)"),
+                    "虚线+淡色三角=IP弱关联(不作并组依据)",
+                    "Relation graph: one component per panel | dashed+pale = weak association (not a grouping edge)"),
                  fontsize=10)
     return _save(fig, "relations_%s.png" % (uid or "all"))

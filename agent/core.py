@@ -266,11 +266,36 @@ class Agent:
         # propose 硬门看的是用户原话,必须在进 LLM / 脱敏之前挂上。
         from .tools import ask_state, capability as _cap_mod
         from .tools.packs import request_pack
-        identity = (scope.principal, scope.tenant, scope.dataset) if scope else None
-        if getattr(self, "_scope_identity", None) != identity:
-            self.reset()
-        self._scope_identity = identity
+        # Validate before exposing any previous conversation to the model.
+        if scope is not None:
+            import math
+            valid = (isinstance(scope, _cap_mod.RequestScope)
+                     and all(isinstance(v, str) and v.strip()
+                             for v in (scope.principal, scope.tenant, scope.dataset))
+                     and isinstance(scope.expires_at, (int, float))
+                     and not isinstance(scope.expires_at, bool)
+                     and math.isfinite(scope.expires_at)
+                     and scope.expires_at > time.time()
+                     and isinstance(scope.capabilities, (tuple, list, frozenset))
+                     and all(isinstance(name, str) for name in scope.capabilities))
+            if not valid:
+                self.reset()
+                self._scope_identity = None
+                raise PermissionError("missing or expired request scope identity")
+        identity = (scope.principal, scope.tenant, scope.dataset,
+                    tuple(sorted(scope.capabilities)), scope.expires_at) if scope else None
         with _cap_mod.request_scope(scope, user_input), request_pack(getattr(self, "tool_pack", "analyst")):
+            if scope is not None:
+                from .tools.datasource import data_dir
+                try:
+                    data_dir()  # Enforce the deployment tenant and dataset binding now.
+                except PermissionError:
+                    self.reset()
+                    self._scope_identity = None
+                    raise
+            if getattr(self, "_scope_identity", None) != identity:
+                self.reset()
+            self._scope_identity = identity
             ask_state.begin_ask()
             try:
                 return self._ask_loop(user_input, on_tool, on_usage, on_notice)
