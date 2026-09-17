@@ -14,6 +14,7 @@
                   的正常行为算进来造成误伤 —— R003 曾在生成大样本上实锤过。
 """
 import hashlib
+import math
 import json
 import statistics
 from collections import Counter
@@ -27,11 +28,19 @@ from .datasource import data_dir, load_events
 _uid_index_cache: Dict[str, tuple] = {}
 
 
+def _validate_runtime_catalog():
+    from ..runtime_bundle import current_bundle
+    bundle = current_bundle()
+    if bundle is not None and bundle.get("feature", {}).get("catalog_version") != FEATURE_CATALOG_VERSION:
+        raise ValueError("runtime feature catalog version is not supported by this executable")
+
+
 def _events_by_uid() -> Dict[str, List[Dict]]:
     """按 uid 分组的事件索引,按数据集 (路径, mtime) 缓存(_dataset_key 见下)。
     回测/巡检要对每个账号取事件:没有索引时每次都全量扫 events,N 账号 × E 事件
     退化成 O(N·E)(大样本上量到过 6000+ 次全表扫描);建一次索引后账号取数只碰
     自己那一撮。索引条目从不外泄(返回都是新列表),不会被调用方就地改写。"""
+    _validate_runtime_catalog()
     key = _dataset_key()
     hit = _uid_index_cache.get("idx")
     if hit and hit[0] == key:
@@ -43,11 +52,24 @@ def _events_by_uid() -> Dict[str, List[Dict]]:
     return idx
 
 
+def _visible_at(event, as_of_ts):
+    """Both event time and knowledge time must precede replay evidence boundary."""
+    ts = event.get("ts")
+    recorded = event.get("recorded_at", ts)
+    if any(not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v)
+           for v in (ts, recorded)):
+        return False
+    return as_of_ts is None or (ts < as_of_ts and recorded <= as_of_ts)
+
+
 def _account_events(uid: str, as_of_ts: Optional[float] = None) -> List[Dict]:
     evs = _events_by_uid().get(uid, ())
-    if as_of_ts is None:
-        return list(evs)
-    return [e for e in evs if e["ts"] < as_of_ts]
+    return [e for e in evs if _visible_at(e, as_of_ts)]
+
+
+def _resource_value(value):
+    """Only observed nonblank string identifiers represent resources."""
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def account_features(uid: str, as_of_ts: Optional[float] = None,
@@ -68,6 +90,8 @@ def account_features(uid: str, as_of_ts: Optional[float] = None,
     types: Dict[str, int] = {}
     for e in evs:
         types[e["type"]] = types.get(e["type"], 0) + 1
+    ips = {_resource_value(e.get("ip")) for e in evs} - {None}
+    devices = {_resource_value(e.get("device_id")) for e in evs} - {None}
     amounts = [e["amount"] for e in evs if e["type"] == "order" and e.get("amount") is not None]
     return {
         "uid": uid,
@@ -75,8 +99,10 @@ def account_features(uid: str, as_of_ts: Optional[float] = None,
         "as_of_ts": as_of_ts,
         "window_seconds": window_seconds,
         "event_count": len(evs),
-        "distinct_ip": len({e["ip"] for e in evs}),
-        "distinct_device": len({e["device_id"] for e in evs}),
+        "distinct_ip": len(ips),
+        "distinct_device": len(devices),
+        "missing_ip_events": sum(_resource_value(e.get("ip")) is None for e in evs),
+        "missing_device_events": sum(_resource_value(e.get("device_id")) is None for e in evs),
         "event_types": types,
         "coupon_claims": types.get("coupon_claim", 0),
         "order_count": len(amounts),
@@ -85,8 +111,8 @@ def account_features(uid: str, as_of_ts: Optional[float] = None,
         "min_gap_seconds": min(gaps) if gaps else None,
         "coupon_min_gap_seconds": min(coupon_gaps) if coupon_gaps else None,
         "span_seconds": ts[-1] - ts[0],
-        "ips": sorted({e["ip"] for e in evs}),
-        "devices": sorted({e["device_id"] for e in evs}),
+        "ips": sorted(ips),
+        "devices": sorted(devices),
     }
 
 
@@ -140,12 +166,16 @@ def behavior_paths(uid: str, as_of_ts: Optional[float] = None,
 
 def accounts_per(dimension: str, value: str, as_of_ts: Optional[float] = None) -> Dict:
     """反向基数特征:一个 ip / device_id 上出现过多少账号(含查询账号自身)。
-    真实电商风控里最强的单特征之一 —— 资源被多账号共用是团伙的直接证据。"""
+    共享资源仅是关联证据，公共出口和家庭设备不构成恶意标签。"""
+    _validate_runtime_catalog()
     assert dimension in ("ip", "device_id")
+    if _resource_value(value) is None:
+        return {"dimension": dimension, "value": value, "count": 0,
+                "accounts": [], "missing": True}
     accounts = sorted({e["uid"] for e in load_events()
-                       if e[dimension] == value and (as_of_ts is None or e["ts"] < as_of_ts)})
+                       if _resource_value(e.get(dimension)) == value and _visible_at(e, as_of_ts)})
     return {"dimension": dimension, "value": value,
-            "count": len(accounts), "accounts": accounts}
+            "count": len(accounts), "accounts": accounts, "missing": False}
 
 
 # ---------------------------------------------------------------------------
@@ -164,12 +194,17 @@ _pop_cache: Dict[str, Tuple] = {}
 
 
 def _dataset_key() -> Tuple[str, int]:
+    from .datasource import event_snapshot_identity
+    identity = event_snapshot_identity()
+    if identity is not None:
+        return identity
     p = data_dir() / "events_sample.json"
     return (str(p), p.stat().st_mtime_ns)
 
 
 def _all_account_features() -> List[Dict]:
     """全量账号的特征 dict 列表,按数据集 (路径, mtime) 缓存。"""
+    _validate_runtime_catalog()
     key = _dataset_key()
     hit = _pop_cache.get("feats")
     if hit and hit[0] == key:
@@ -229,12 +264,25 @@ def batch_features():
     全历史口径 —— 探索性分析不需要 point-in-time,规则评估才需要。"""
     import pandas as pd  # 惰性导入:规则/评估路径不强依赖 pandas
 
-    df = pd.DataFrame(load_events()).sort_values("ts").reset_index(drop=True)
+    _validate_runtime_catalog()
+    events = load_events()
+    columns = ["event_count", "distinct_ip", "distinct_device", "coupon_claims",
+               "order_amount_max", "min_gap_seconds", "shared_device_accounts",
+               "missing_ip_events", "missing_device_events"]
+    if not events:
+        return pd.DataFrame(columns=columns, index=pd.Index([], name="uid"))
+    df = pd.DataFrame(events).sort_values("ts").reset_index(drop=True)
+    for dimension in ("ip", "device_id"):
+        if dimension not in df.columns:
+            df[dimension] = None
+        df[dimension] = df[dimension].map(_resource_value)
     feats = df.groupby("uid").agg(
         event_count=("ts", "size"),
         distinct_ip=("ip", "nunique"),
         distinct_device=("device_id", "nunique"),
     )
+    for dimension, column in (("ip", "missing_ip_events"), ("device_id", "missing_device_events")):
+        feats[column] = df[dimension].isna().groupby(df["uid"]).sum().astype(int)
     feats["coupon_claims"] = (
         df[df["type"] == "coupon_claim"].groupby("uid").size()
         .reindex(feats.index).fillna(0).astype(int))
@@ -245,7 +293,7 @@ def batch_features():
     # 反向基数:该账号用过的设备中,被最多账号共用的那台的账号数
     dev_accounts = df.groupby("device_id")["uid"].nunique()
     feats["shared_device_accounts"] = (
-        df["device_id"].map(dev_accounts).groupby(df["uid"]).max().astype(int))
+        df["device_id"].map(dev_accounts).groupby(df["uid"]).max().astype(float))
     return feats
 
 
@@ -260,10 +308,10 @@ FEATURE_CATALOG = [
      "definition": "事件总数(可加窗口)", "point_in_time": "是",
      "consumers": "人群基线/百分位/群体对比"},
     {"key": "distinct_ip", "group": "资源", "source": "account_features",
-     "definition": "去重 IP 数(轮换信号)", "point_in_time": "是",
+     "definition": "已观测非空 IP 去重数(缺失不构成实体；缺失事件数另列)", "point_in_time": "是",
      "consumers": "R002 升级条件/基线"},
     {"key": "distinct_device", "group": "资源", "source": "account_features",
-     "definition": "去重设备数(多开信号)", "point_in_time": "是",
+     "definition": "已观测非空设备去重数(缺失不构成实体；缺失事件数另列)", "point_in_time": "是",
      "consumers": "基线/群体对比"},
     {"key": "coupon_claims", "group": "行为", "source": "account_features",
      "definition": "领券次数(可加窗口)", "point_in_time": "是",
@@ -293,11 +341,11 @@ FEATURE_CATALOG = [
      "definition": "登录到下单最短间隔(盗号'直奔下单'信号)", "point_in_time": "是",
      "consumers": "监控(盗号信号)"},
     {"key": "shared_device_accounts", "group": "团伙", "source": "accounts_per(device_id)",
-     "definition": "其设备中被最多账号共用的那台的账号数", "point_in_time": "是",
+     "definition": "已观测设备中最大共享账号数；无设备观测为缺失", "point_in_time": "是",
      "consumers": "关联图谱/群体对比"},
     {"key": "shared_ip_accounts", "group": "团伙", "source": "accounts_per(ip)",
      "definition": "其 IP 中被最多账号共用的那个的账号数", "point_in_time": "是",
-     "consumers": "关联图谱(强边判定)"},
+     "consumers": "关联图谱(共享出口弱关联)"},
 ]
 
 

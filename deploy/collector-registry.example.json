@@ -1,0 +1,22 @@
+{
+  "replace-with-64-hex-sha256-of-an-expiring-sdk-token": {
+    "principal": "installation-bound-sdk-subject",
+    "tenant": "a",
+    "app": "app",
+    "data_dir": "/tenant",
+    "source_kind": "sdk",
+    "permissions": ["reports.write"],
+    "expires_at": 0,
+    "subject": "server-registered-installation-id",
+    "generation": "1",
+    "identity_key_version": "1",
+    "session_sha256": "replace-with-sha256-of-authorized-session-token",
+    "key_ids": ["sdk-key-1"],
+    "require_hardware_attestation": true,
+    "app_attest_enrollment": {
+      "root_certificate_file": "/trust/apple-app-attest-root.pem",
+      "app_id": "YOURTEAMID.com.example.app",
+      "environment": "production"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "replace-with-64-hex-sha256-of-an-expiring-business-token": {
+    "principal": "business-event-producer",
+    "tenant": "a",
+    "app": "app",
+    "data_dir": "/tenant",
+    "source_kind": "business",
+    "permissions": ["decisions.write"],
+    "expires_at": 0
+  },
+  "replace-with-64-hex-sha256-of-an-expiring-case-reader-token": {
+    "principal": "case-evidence-reader",
+    "tenant": "a",
+    "app": "app",
+    "data_dir": "/tenant",
+    "source_kind": "operator",
+    "permissions": ["cases.read"],
+    "expires_at": 0
+  }
+}

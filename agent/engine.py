@@ -39,6 +39,7 @@ Decision Plane 接入(P0-2/P0-3,骨架的"治理 -> 判定"打通):
 import json
 import math
 import copy
+import hashlib
 import os
 import threading
 import time
@@ -143,6 +144,8 @@ def annotate_decision(result: Dict[str, Any]) -> Dict[str, Any]:
     由 combine_hits 写入,本函数原样露出,远程缺失时不伪造 worst。
     Agent 只能读这些字段,不能改 action —— 字段本身是契约,dispatch
     没有"改判定"工具。"""
+    from .runtime_bundle import annotate_bundle
+    annotate_bundle(result)
     codes: List[str] = list(result.get("reason_codes") or [])
     seen = set(codes)
     for h in result.get("hits") or []:
@@ -305,10 +308,22 @@ def _read_registry(loader, path, kind):
             raise ValueError("multiple champion models")
         with _registry_lock:
             _registry_snapshots[key] = copy.deepcopy(rows)
+        from .tools.datasource import atomic_write_json
+        encoded = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+        atomic_write_json(path.with_suffix(path.suffix + ".lkg"), {"rows": rows, "sha256": hashlib.sha256(encoded.encode()).hexdigest()})
         return rows, None
     except Exception as exc:
         with _registry_lock:
             rows = copy.deepcopy(_registry_snapshots.get(key, []))
+        if not rows:
+            try:
+                cached = json.loads(path.with_suffix(path.suffix + ".lkg").read_text())
+                encoded = json.dumps(cached["rows"], sort_keys=True, separators=(",", ":"))
+                if hashlib.sha256(encoded.encode()).hexdigest() != cached["sha256"]:
+                    raise ValueError("invalid registry cache digest")
+                rows = cached["rows"]
+            except Exception:
+                rows = []
         return rows, {"status": "invalid", "reason": "registry_invalid",
                       "required": True, "using_last_known_good": bool(rows),
                       "error_type": type(exc).__name__}
@@ -332,6 +347,10 @@ def _active_strategy() -> Dict:
     远程引擎模式:阈值由生产配置中心下发,本地 registry 是治理镜像 ——
     判定以引擎为准,这里只把版本号带进血缘。
     """
+    from .runtime_bundle import current_bundle
+    bundle = current_bundle()
+    if bundle is not None:
+        return bundle["strategy"]
     from .tools.strategy_registry import _load as _sload, _path
     rows, error = _read_registry(_sload, _path(), "strategy")
     actives = [s for s in rows if s.get("status") == "active"]
@@ -361,6 +380,10 @@ def _active_strategy() -> Dict:
 
 def _champion() -> Dict:
     """当前 champion 模型(唯一)。无则返回 {}。"""
+    from .runtime_bundle import current_bundle
+    bundle = current_bundle()
+    if bundle is not None:
+        return bundle["model"]
     from .tools.model_registry import _load as _mload, _path
     rows, error = _read_registry(_mload, _path(), "model")
     ch = [m for m in rows if m.get("status") == "champion"]
@@ -431,11 +454,11 @@ def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
     if not ch.get("name"):
         _component(result, "model", "disabled", "no_champion", False)
         return result
-    result["model_version"] = "%s %s" % (ch["name"], ch["version"])
+    expected = "%s %s" % (ch["name"], ch["version"])
+    result["expected_model_version"] = expected
     uid = event.get("uid", "")
     try:
-        score = (_model_score_remote(uid, event) if os.environ.get(MODEL_URL_ENV)
-                 else _model_score_local(uid))
+        score, provenance = _bound_model_score(uid, event)
         if score is None:
             _component(result, "model", "unavailable", "missing_score", True)
             result["model_degraded"] = True
@@ -449,6 +472,11 @@ def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
         result["model_degraded"] = True
         result["model_signal"] = reason
         return result
+    if provenance != expected:
+        _component(result, "model", "invalid", "model_version_unbound" if not provenance else "model_version_mismatch", True)
+        result["model_degraded"] = True
+        return result
+    result["model_version"] = provenance
     _component(result, "model", "ok", required=True)
     result["model_score"] = score
     from .tools.policy import active_policy
@@ -522,7 +550,7 @@ def _expected_metadata(result, strategy, champion_snapshot=None):
         _component(result, "model_registry", "invalid", "registry_invalid", False)
 
 
-def evaluate_event(event: Dict[str, Any],
+def _evaluate_event(event: Dict[str, Any],
                    use_current_policy: bool = False) -> Dict[str, Any]:
     """判定的唯一入口。返回结构与本地 rule_eval 兼容,附 source 字段
     (local_rules / remote_engine / local_rules_fallback)供溯源;
@@ -577,7 +605,7 @@ def evaluate_event(event: Dict[str, Any],
         return annotate_decision(r)
 
 
-def evaluate_batch(events: List[Dict[str, Any]],
+def _evaluate_batch(events: List[Dict[str, Any]],
                    use_current_policy: bool = False) -> List[Dict[str, Any]]:
     """批量判定:全量工具(backtest/scan 的 account_verdicts)在远程模式下
     的唯一形态 —— 一次 POST 覆盖全部事件,顺序与请求对齐。覆盖生效/未配置
@@ -666,3 +694,38 @@ def engine_status() -> Dict[str, Any]:
         "note": ("远程 dry-run 优先;调用失败自动降级本地并带 degraded/"
                  "engine_error 标记,连续失败触发粘滞熔断(冷却期内不打引擎)。"),
     }
+
+
+def _bound_model_score(uid, event):
+    if os.environ.get(MODEL_URL_ENV):
+        raw = _post_json(os.environ[MODEL_URL_ENV], {"uid": uid, "event": event})
+        if not isinstance(raw, dict):
+            raise ValueError("invalid_score")
+        return _validate_score(raw.get("score")), raw.get("model_version")
+    from .runtime_bundle import current_bundle
+    bundle = current_bundle()
+    if bundle is not None:
+        record = bundle["model"].get("scores", {}).get(uid)
+    else:
+        from .tools.datasource import data_dir
+        try:
+            record = json.loads((data_dir() / "model_scores.json").read_text()).get(uid)
+        except (OSError, ValueError, AttributeError):
+            record = None
+    if isinstance(record, dict):
+        return _validate_score(record.get("score")), record.get("model_version")
+    if bundle is not None:
+        return (_validate_score(record) if record is not None else None), None
+    return _model_score_local(uid), None
+
+
+def evaluate_event(event, use_current_policy=False):
+    from .runtime_bundle import request_bundle
+    with request_bundle():
+        return _evaluate_event(event, use_current_policy)
+
+
+def evaluate_batch(events, use_current_policy=False):
+    from .runtime_bundle import request_bundle
+    with request_bundle():
+        return _evaluate_batch(events, use_current_policy)

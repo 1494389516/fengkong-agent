@@ -12,6 +12,7 @@
 落盘纪律(骨架期):JSON 状态文件必须 os.replace 原子写,跨线程/进程用 flock。
 崩溃或磁盘满时旧文件仍是合法 JSON,不能半截覆盖。
 """
+from contextvars import ContextVar
 import fcntl
 import json
 import os
@@ -23,18 +24,76 @@ from typing import Any, Dict, Iterator, List, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
+_event_snapshot = ContextVar("online_event_snapshot", default=None)
+
+
+@contextmanager
+def event_snapshot(events, identity):
+    token = _event_snapshot.set((identity, events))
+    try:
+        yield
+    finally:
+        _event_snapshot.reset(token)
+
+
+def event_snapshot_identity():
+    snapshot = _event_snapshot.get()
+    if snapshot is not None:
+        return snapshot[0]
+    path = data_dir() / "online.sqlite3"
+    if not path.exists():
+        return None
+    # SQLite WAL commits need not alter the main database file. Include both
+    # inode and WAL metadata, and tenant/app identity, in feature cache keys.
+    from agent.tenancy import current_context
+    ctx = current_context()
+    versions = []
+    for file in (path, Path(str(path) + "-wal")):
+        try:
+            st = file.stat()
+            versions.append((str(file), st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+        except FileNotFoundError:
+            versions.append((str(file), None))
+    return ("online_sql", ctx.tenant if ctx else None, ctx.app if ctx else None, tuple(versions))
+
+
 _cache: Dict[Path, Tuple[int, Any]] = {}
 _cache_lock = threading.RLock()
 _io_lock = threading.RLock()
 
 
 def data_dir() -> Path:
+    import sys
+    from agent.tenancy import current_context, authorized_dataset
+    context = current_context()
+    capability = sys.modules.get("agent.tools.capability")
+    scope = capability.get_scope() if capability and hasattr(capability, "get_scope") else None
+    if context is not None:
+        if context.expires_at <= __import__("time").time():
+            raise PermissionError("request credential expired")
+        if scope is not None and (scope.tenant != context.tenant or scope.dataset != context.dataset):
+            raise PermissionError("tool scope and authenticated request differ")
+        return Path(context.dataset)
+    if scope is not None and os.environ.get("FK_AUTH_CONFIG"):
+        if not authorized_dataset(scope.tenant, scope.dataset):
+            raise PermissionError("request scope is outside registered dataset")
+        return Path(scope.dataset).resolve()
     override = os.environ.get("FK_DATA_DIR")
-    if override:
-        return Path(override)
-    if os.environ.get("FK_DATASET") == "gen":
-        return ROOT / "data" / "gen"
-    return ROOT / "data"
+    path = Path(override) if override else ROOT / "data" / "gen" if os.environ.get("FK_DATASET") == "gen" else ROOT / "data"
+    path = path.resolve()
+    if scope is not None:
+        if (scope.dataset != str(path) or not os.environ.get("FK_SCOPE_TENANT")
+                or scope.tenant != os.environ["FK_SCOPE_TENANT"]):
+            raise PermissionError("request scope does not match deployment dataset/tenant")
+    return path
+
+
+def output_dir():
+    from agent.tenancy import current_context
+    import sys
+    capability = sys.modules.get("agent.tools.capability")
+    scope = capability.get_scope() if capability and hasattr(capability, "get_scope") else None
+    return data_dir() / "out" if (current_context() or scope or os.environ.get("FK_AUTH_CONFIG")) else ROOT / "out"
 
 
 def _load_json(path: Path):
@@ -152,11 +211,55 @@ def append_jsonl(path: Path, rec: Any) -> None:
             os.fsync(f.fileno())
 
 
-def load_events() -> List[Dict]:
-    return _load_json(data_dir() / "events_sample.json")
+def load_events(*, limit=None, as_of_ts=None, window_seconds=None) -> List[Dict]:
+    if limit is not None and (type(limit) is not int or not 0 <= limit <= 1000000):
+        raise ValueError("invalid event limit")
+    snapshot = _event_snapshot.get()
+    if snapshot is not None:
+        rows = snapshot[1]
+    elif (data_dir()/"online.sqlite3").exists():
+        import sqlite3
+        from agent.tenancy import current_context
+        db=sqlite3.connect("file:"+str(data_dir()/"online.sqlite3")+"?mode=ro",uri=True)
+        try:
+            where=[];params=[]
+            ctx=current_context()
+            if ctx:
+                where.extend(["tenant=?","app=?"]);params.extend([ctx.tenant,ctx.app])
+            if as_of_ts is not None:
+                where.extend(["occurred_at<?","recorded_at<=?"]);params.extend([as_of_ts,as_of_ts])
+                if window_seconds is not None:
+                    where.append("occurred_at>=?");params.append(as_of_ts-window_seconds)
+            query="SELECT body FROM events"+(" WHERE "+" AND ".join(where) if where else "")+" ORDER BY occurred_at,event_id"
+            if limit is not None:
+                query+=" LIMIT ?";params.append(limit)
+            return [json.loads(r[0]) for r in db.execute(query,params)]
+        finally:
+            db.close()
+    else:
+        rows = _load_json(data_dir() / "events_sample.json")
+    result=[]
+    for e in rows:
+        ts=e.get("ts",0)
+        if as_of_ts is not None and (ts>=as_of_ts or e.get("recorded_at",e.get("received_at",ts))>as_of_ts):
+            continue
+        if window_seconds is not None and as_of_ts is not None and ts<as_of_ts-window_seconds:
+            continue
+        if limit is not None and len(result)>=limit:
+            break
+        result.append(dict(e))
+    return result
 
 
 def load_blacklist() -> List[Dict]:
+    from agent.runtime_bundle import current_bundle
+    bundle = current_bundle()
+    if bundle is not None:
+        component = bundle.get("list")
+        records = component.get("records") if isinstance(component, dict) else None
+        if not isinstance(records, list) or not all(isinstance(row, dict) for row in records):
+            raise ValueError("runtime list snapshot must contain records")
+        return records
     return _load_json(data_dir() / "blacklist.json")
 
 

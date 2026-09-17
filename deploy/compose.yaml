@@ -1,0 +1,81 @@
+# Provision files per README.md before starting. No sample credential works.
+x-common: &common
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp]
+services:
+  collector:
+    <<: *common
+    command: [python, serve.py, --host, "0.0.0.0", --port, "8081"]
+    ports: ["127.0.0.1:8081:8081"]
+    environment:
+      FK_ENV: production
+      FK_AUTH_CONFIG: /config/collector-auth.json
+      FK_COLLECTOR_KEYS: /keys/collector-keys.json
+      FK_IDENTITY_KEY_FILE: /keys/identity.key
+    volumes:
+      - ./state/tenant:/tenant
+      - ./state/collector-out:/app/out
+      - ./config/collector-auth.json:/config/collector-auth.json:ro
+      - ./secrets/collector-keys.json:/keys/collector-keys.json:ro
+      - ./secrets/identity.key:/keys/identity.key:ro
+      - ./config/apple-app-attest-root.pem:/trust/apple-app-attest-root.pem:ro
+  runtime:
+    <<: *common
+    command: [python, serve.py, --host, "0.0.0.0", --port, "8080"]
+    ports: ["127.0.0.1:8080:8080"]
+    environment:
+      FK_ENV: production
+      FK_AUTH_CONFIG: /config/runtime-auth.json
+      FK_RUNTIME_BUNDLE_DIR: /release
+      FK_RUNTIME_PUBLIC_KEY: /config/publisher.pub
+      FK_RUNTIME_CACHE_DIR: /app/out/runtime-cache
+    volumes:
+      - ./state/tenant:/tenant
+      - ./state/runtime-out:/app/out
+      - ./config/runtime-auth.json:/config/runtime-auth.json:ro
+      - ./config/publisher.pub:/config/publisher.pub:ro
+      - ./state/bundles:/release:ro
+  agent:
+    <<: *common
+    profiles: [investigate]
+    command: [python, main.py]
+    stdin_open: true
+    tty: true
+    environment:
+      FK_ENV: production
+      FK_AUTH_CONFIG: /config/agent-auth.json
+      FK_AGENT_TOKEN: ${FK_AGENT_TOKEN:-}
+      FK_RUNTIME_BUNDLE_DIR: /release
+      FK_RUNTIME_PUBLIC_KEY: /config/publisher.pub
+      FK_RUNTIME_CACHE_DIR: /app/out/runtime-cache
+    volumes:
+      - ./state/tenant:/tenant:ro
+      - ./state/agent-out:/app/out
+      - ./state/agent-out:/tenant/out
+      - ./config/agent-auth.json:/config/agent-auth.json:ro
+      - ./config/publisher.pub:/config/publisher.pub:ro
+      - ./state/bundles:/release:ro
+  controller:
+    <<: *common
+    profiles: [release]
+    command: [python, -m, agent.control_plane, --store, /journal/releases.json, --credentials, /config/release-auth.json, --scope, "tenant:a/app:app"]
+    stdin_open: true
+    network_mode: none
+    volumes:
+      - ./state/journal:/journal
+      - ./config/release-auth.json:/config/release-auth.json:ro
+  publisher:
+    <<: *common
+    profiles: [release]
+    command: [python, -m, agent.release_publisher, --store, /journal/releases.json, --output, /release, --private-key, /keys/publisher.pem]
+    network_mode: none
+    volumes:
+      - ./state/journal:/journal:ro
+      - ./state/bundles:/release
+      - ./secrets/publisher.pem:/keys/publisher.pem:ro

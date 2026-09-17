@@ -82,11 +82,13 @@ def _t(zh: str, en: str) -> str:
 
 
 def _save(fig, filename: str) -> str:
-    OUT.mkdir(parents=True, exist_ok=True)
-    path = OUT / filename
+    from .datasource import output_dir
+    out = output_dir() / "charts"
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / filename
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
-    return str(path.relative_to(ROOT))
+    return str(path)
 
 
 def _events_df(uid: Optional[str] = None) -> pd.DataFrame:

@@ -1,26 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""在线决策服务(骨架):把规则引擎包成 HTTP 端点,是"接真实流量"的最小形态。
+"""Authenticated Collector and decision HTTP entrypoints.
 
-端点:
-  POST /decide   body 为事件 JSON(字段同 rule_eval 的 event),返回处置决策。
-                 线上口径固定 use_current_policy=True(线上永远用当前策略;
-                 回放历史策略是审计场景,不该出现在决策路径)。
-                 每个决策追加写入 out/serve_decisions.jsonl —— 这就是
-                 reconcile 对账语义里"生产决策日志"的雏形:本服务上生产后,
-                 agent 的本地模拟就降级为镜像,靠这份日志对账。
-  GET  /health   存活 + 当前策略版本(探针/发布检查用)。
-  GET  /brief    值班日报(daily_brief),给内部看板/机器人拉取。
+POST /reports stores verified SDK evidence; POST /decisions consumes a typed
+DecisionRequest; POST /decide retains the legacy business-event adapter.
+GET /cases and /evidence/{id} require scoped investigator credentials.
+Attestation enrollment and assertion challenges have dedicated endpoints.
 
-边界(诚实声明):
-- /brief 与 /decide 强制 Bearer 认证(FK_SERVE_TOKEN);/health 保持匿名。
-  网关如需注入 X-Operator,必须用 FK_OPERATOR_HMAC_SECRET 签名,
-  未签名或过期的身份头会被拒绝,不作为审计事实。
-- 幂等:必填 event_id 的哈希作唯一键，分片 flock 跨线程/进程合并；
-  同 event_id 换请求体返回 409。记录有 TTL/容量上限，重放不写血缘/日志。
-- 数据仍是 JSON 文件 + mtime 缓存。写路径(审批/申诉)仍走 CLI。
-
-用法:python3 serve.py [--port 8080] ;FK_DATASET/FK_DATA_DIR 照常生效。
+FK_AUTH_CONFIG binds every credential to tenant/app/dataset and permissions.
+SDK reports never reach the LLM. SQLite commits business decisions, idempotency,
+events and outbox atomically; JSONL/case projections are recoverable.
+Anonymous /health exposes liveness only in configured deployments.
+Legacy FK_SERVE_TOKEN mode remains for explicit single-tenant compatibility.
 """
 import argparse
 import hashlib
@@ -56,7 +47,12 @@ def _public_view(decision: dict, replay: bool) -> dict:
     public = {k: decision.get(k) for k in (
         "action", "rules", "policy_version", "latency_ms",
         "reason_codes", "escalate_to_human", "degraded",
-        "agent_cannot_override", "decision_combine")}
+        "agent_cannot_override", "decision_combine", "decision_id",
+        "business_event_id", "tenant_id", "app_id", "feature_snapshot_id",
+        "strategy_version", "model_version", "component_status", "components",
+        "degraded_reason", "producer_metadata", "effective_versions",
+        "expected_strategy_version", "expected_model_version",
+        "runtime_activation_id", "runtime_bundle_versions")}
     public["idempotent_replay"] = replay
     return public
 
@@ -100,43 +96,32 @@ def _compute(event: dict, operator: str) -> dict:
         "combine_score": r.get("combine_score"),
         "latency_ms": round(1000 * (time.time() - t0), 1),
     }
-    write_lineage(logged_event, decision, approver=operator or "serve")
-    append_jsonl(_log_path(), decision)
-    return _public_view(decision, False)
+    for key in ("component_status", "components", "degraded_reason", "producer_metadata",
+                "effective_versions", "expected_strategy_version", "expected_model_version",
+        "runtime_activation_id", "runtime_bundle_versions"):
+        if key in r:
+            decision[key] = r[key]
+    return decision
 
 
-def _decide(event: dict, operator: str = "serve", received_at: float = None) -> dict:
-    from agent.tools.idemp_store import claim, complete, event_key, lookup, ttl_seconds
-    from agent.tools.lineage import event_fingerprint
-    key = event_key(event["event_id"])
-    input_fp = event_fingerprint(event)
-    with _mu:
-        cached = _idemp.get(key)
-        if cached is not None:
-            if time.time() - cached["completed_at"] > ttl_seconds():
-                _idemp.pop(key, None)
-                cached = None
-        if cached is not None:
-            if cached["input_fingerprint"] != input_fp:
-                from agent.tools.idemp_store import IdempotencyConflict
-                raise IdempotencyConflict("event_id 已用于不同请求体")
-            _idemp.move_to_end(key)
-            return _replay(cached["public"])
-    # 同键的跨线程/跨进程请求在计算全周期内串行。flock 由内核
-    # 在进程崩溃时释放,比“等 15s 后直接重算”的租约更可靠。
-    with claim(key):
-        public = lookup(key, input_fp)
-        if public is not None:
-            _remember(key, input_fp, public)
-            return _replay(public)
-        evaluation_event = dict(event)
-        if received_at is not None:
-            evaluation_event["_source_ts"] = event["ts"]
-            evaluation_event["ts"] = received_at
-        public = _compute(evaluation_event, operator)
-        complete(key, public, input_fp)
-        _remember(key, input_fp, public)
-        return public
+def _decide(event: dict, operator: str = "serve", received_at: float = None,
+            *, scope=None, source_kind="legacy_client", prepare=None) -> dict:
+    from agent.tools import online_store
+    scope = scope or (os.environ.get("FK_SERVE_TENANT", "local"),
+                      os.environ.get("FK_SERVE_APP", "default"))
+    # Legacy direct Python callers retain their historical timestamp behavior.
+    if received_at is None:
+        received_at = event["ts"]
+    record, replay = online_store.decide(event, operator, _compute, scope=scope,
+        source_kind=source_kind, received_at=received_at, prepare=prepare)
+    try:
+        online_store.export_outbox(_log_path())
+        projection_status = "current"
+    except (OSError, ValueError, __import__("sqlite3").Error):
+        projection_status = "pending"
+    public = _public_view(record, replay)
+    public["audit_projection_status"] = projection_status
+    return public
 
 
 def _remember(key: str, input_fp: str, public: dict) -> None:
@@ -153,6 +138,9 @@ def _serve_token() -> str:
 
 
 def _log_path() -> Path:
+    if os.environ.get("FK_AUTH_CONFIG"):
+        from agent.tools.datasource import output_dir
+        return output_dir() / "serve_decisions.jsonl"
     return Path(os.environ.get("FK_SERVE_LOG_PATH") or LOG_PATH)
 
 
@@ -185,8 +173,11 @@ def _signed_operator(headers, method: str, path: str):
 
 
 def _finite_number(value) -> bool:
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(float(value)))
+    try:
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(float(value)))
+    except (ValueError, TypeError, OverflowError):
+        return False
 
 
 def _nonnegative_env_float(name: str, default: float) -> float:
@@ -202,6 +193,8 @@ def _validate_json_value(value, depth=0):
         return "JSON 嵌套层数超过 8"
     if isinstance(value, str) and len(value) > MAX_STRING_LEN:
         return "字符串字段超过 %d 字符" % MAX_STRING_LEN
+    if isinstance(value, int) and value.bit_length() > 1024:
+        return "JSON integer exceeds supported range"
     if isinstance(value, float) and not math.isfinite(value):
         return "JSON 含 NaN/Infinity"
     if isinstance(value, dict):
@@ -221,9 +214,21 @@ def _validate_json_value(value, depth=0):
     return ""
 
 
-def _validate_event(event, now: float = None):
+def _validate_event(event, now: float = None, *, source_kind="legacy_client"):
     if not isinstance(event, dict):
         return "body 必须是 JSON object"
+    # Contract discriminator matches contracts/business-risk-event.schema.json.
+    # Absence retains legacy business-event compatibility; an explicit other
+    # envelope kind must never be laundered through an authenticated source.
+    if "kind" in event and event["kind"] != "business_risk_event":
+        return "kind 必须是 business_risk_event（不能提交 SDK 或决策请求封装）"
+    reserved = {"tenant_id", "app_id", "source_kind", "server_aggregates", "server_verified_attestation",
+                "received_at", "recorded_at", "decision_id", "_source_ts",
+                "identity_trust", "entity_generation", "evidence_refs", "hardware_attributes"}
+    if reserved.intersection(event):
+        return "客户端不得提供服务端身份、证明或聚合字段"
+    if source_kind not in ("legacy_client", "business"):
+        return "不支持的认证事件源"
     shape_error = _validate_json_value(event)
     if shape_error:
         return shape_error
@@ -232,7 +237,7 @@ def _validate_event(event, now: float = None):
         if not isinstance(value, str) or not value.strip() or len(value) > limit:
             return "%s 必须是 1~%d 字符串" % (key, limit)
     kind = event.get("type")
-    if kind not in EVENT_TYPES:
+    if not isinstance(kind, str) or kind not in EVENT_TYPES:
         return "type 必须是 %s" % "/".join(sorted(EVENT_TYPES))
     if not _finite_number(event.get("ts")) or event["ts"] <= 0:
         return "ts 必须是正的有限数值"
@@ -241,7 +246,7 @@ def _validate_event(event, now: float = None):
                                      EVENT_MAX_AGE_SECONDS)
     max_future = _nonnegative_env_float("FK_EVENT_MAX_FUTURE_SECONDS",
                                         EVENT_MAX_FUTURE_SECONDS)
-    if event["ts"] < now - max_age:
+    if source_kind == "legacy_client" and event["ts"] < now - max_age:
         return "ts 过旧(最多允许 %.0f 秒延迟)" % max_age
     if event["ts"] > now + max_future:
         return "ts 超前(最多允许 %.0f 秒时钟偏差)" % max_future
@@ -283,6 +288,18 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _require_auth(self) -> bool:
+        self.auth_context = None
+        if os.environ.get("FK_AUTH_CONFIG"):
+            from agent.tenancy import authenticate
+            try:
+                self.auth_context = authenticate(self.headers.get("Authorization", ""))
+                return True
+            except PermissionError:
+                self._json(401, {"error": "unauthorized"})
+                return False
+            except (ValueError, OSError):
+                self._json(503, {"error": "auth_configuration_invalid"})
+                return False
         if _valid_bearer(self.headers.get("Authorization", "")):
             return True
         self.send_response(401)
@@ -295,7 +312,26 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
+        if self.path == "/cases" or self.path.startswith("/evidence/"):
+            if not self._require_auth():
+                return
+            if self.auth_context is None:
+                self._json(403, {"error": "scoped_credential_required"})
+                return
+            try:
+                if self.path == "/cases":
+                    from agent.investigations import list_cases
+                    self._json(200, {"cases": list_cases(self.auth_context)})
+                else:
+                    from agent.collector import get_observation
+                    self._json(200, get_observation(self.path[len("/evidence/"):], self.auth_context))
+            except PermissionError:
+                self._json(403, {"error": "forbidden"})
+            return
         if self.path == "/health":
+            if os.environ.get("FK_AUTH_CONFIG"):
+                self._json(200, {"ok": True})
+                return
             from agent.engine import engine_status
             from agent.tools.policy import active_policy
             from agent.tools.readiness import _readiness
@@ -306,12 +342,21 @@ class Handler(BaseHTTPRequestHandler):
             if not self._require_auth():
                 return
             from agent.tools.brief import daily_brief
+            if self.auth_context is not None:
+                from agent.tenancy import data_context
+                try:
+                    self.auth_context.require("brief.read")
+                    with data_context(self.auth_context):
+                        self._json(200, daily_brief())
+                except PermissionError:
+                    self._json(403, {"error": "forbidden"})
+                return
             self._json(200, daily_brief())
         else:
             self._json(404, {"error": "unknown path,可用: GET /health /brief, POST /decide"})
 
     def do_POST(self):
-        if self.path != "/decide":
+        if self.path not in ("/decide", "/decisions", "/reports", "/attestation/challenge", "/attestation/enroll"):
             self._json(404, {"error": "unknown path"})
             return
         if not self._require_auth():
@@ -341,15 +386,30 @@ class Handler(BaseHTTPRequestHandler):
             if len(raw) != length:
                 self._json(400, {"error": "body 长度与 Content-Length 不符"})
                 return
-            event = json.loads(raw)
+            def unique_object(pairs):
+                obj = {}
+                for key, value in pairs:
+                    if key in obj:
+                        raise ValueError("duplicate JSON key")
+                    obj[key] = value
+                return obj
+            event = json.loads(raw, object_pairs_hook=unique_object)
         except socket.timeout:
             self._json(408, {"error": "request_timeout"})
             return
         except (ValueError, json.JSONDecodeError):
             self._json(400, {"error": "body 必须是 JSON 事件"})
             return
+        if self.auth_context is not None:
+            self._scoped_post(event, raw)
+            return
+        if self.path != "/decide":
+            self._json(403, {"error": "scoped_credential_required"})
+            return
         received_at = time.time()
-        invalid = _validate_event(event, now=received_at)
+        # Source trust is bound to this authenticated service deployment, never body fields.
+        source_kind = os.environ.get("FK_SERVE_SOURCE_KIND", "legacy_client")
+        invalid = _validate_event(event, now=received_at, source_kind=source_kind)
         if invalid:
             self._json(400, {"error": invalid})
             return
@@ -359,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             self._json(200, _decide(event, operator=operator,
-                                    received_at=received_at))
+                                    received_at=received_at, source_kind=source_kind))
         except Exception as exc:
             from agent.tools.idemp_store import IdempotencyConflict
             if isinstance(exc, IdempotencyConflict):
@@ -367,15 +427,65 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._json(500, {"error": "internal_error"})
 
+    def _scoped_post(self, event, raw):
+        from agent.tenancy import data_context
+        from agent.tools.idemp_store import IdempotencyConflict
+        ctx = self.auth_context
+        try:
+            with data_context(ctx):
+                if self.path == "/reports":
+                    from agent.collector import ingest
+                    result = ingest(event, ctx, wire_bytes=raw, remote_ip=self.client_address[0])
+                elif self.path == "/attestation/challenge":
+                    from agent.collector import issue_challenge
+                    if not isinstance(event, dict) or set(event) - {"purpose"}:
+                        raise ValueError("invalid challenge request")
+                    result = issue_challenge(ctx, purpose=event.get("purpose", "assertion"))
+                elif self.path == "/attestation/enroll":
+                    from agent.collector import register_attestation
+                    result = register_attestation(event, ctx)
+                else:
+                    ctx.require("decisions.write")
+                    if self.path == "/decisions":
+                        from agent.contracts.business_contract import decision_event
+                        event = decision_event(event)
+                    error = _validate_event(event, now=time.time(), source_kind=ctx.source_kind)
+                    if error:
+                        raise ValueError(error)
+                    from agent.collector import enrich_business_event
+                    result = _decide(event, operator=ctx.principal, received_at=time.time(),
+                                     scope=(ctx.tenant, ctx.app), source_kind=ctx.source_kind,
+                                     prepare=lambda value, db: enrich_business_event(value, ctx, connection=db))
+                    from agent.investigations import consume_decision_outbox
+                    try:
+                        consume_decision_outbox()
+                        result["investigation_projection_status"] = "current"
+                    except (OSError, ValueError, __import__("sqlite3").Error):
+                        result["investigation_projection_status"] = "pending"
+                self._json(200, result)
+        except PermissionError:
+            self._json(403, {"error": "forbidden"})
+        except IdempotencyConflict as exc:
+            self._json(409, {"error": str(exc)})
+        except (ValueError, TypeError, KeyError) as exc:
+            self._json(400, {"error": "invalid_request", "detail": str(exc)})
+        except Exception:
+            self._json(500, {"error": "internal_error"})
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="风控在线决策服务(骨架)")
     ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
     token = _serve_token()
-    if len(token) < 16:
+    if os.environ.get("FK_AUTH_CONFIG"):
+        from agent.tenancy import registry
+        if not registry():
+            raise SystemExit("拒绝启动:认证配置为空")
+    elif len(token) < 16:
         raise SystemExit("拒绝启动:请设置至少 16 字符的 FK_SERVE_TOKEN")
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print("决策服务就绪 http://127.0.0.1:%d  (POST /decide, GET /health /brief)" % args.port)
     srv.serve_forever()
 

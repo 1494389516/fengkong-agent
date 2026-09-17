@@ -1,0 +1,623 @@
+== 第 1 层 规则层(离线,11 个案例)==
+  [PASS] 正常用户下单应放行(误伤守卫)
+  [PASS] 正常用户领券不触发频率规则(误伤守卫)
+  [PASS] 刷券机器人:频率规则 + 农场设备指纹双命中应拦截
+  [PASS] 黑名单盗号 + 大额销赃 + 改机作案设备应拦截
+  [PASS] 模拟器设备强拒(R006):套现团伙从 review 升级 reject
+  [PASS] 无历史数据的新用户登录应放行
+  [PASS] 取证时点正确性:首事件无行为历史,行为规则不命中(仅设备指纹 R006)
+  [PASS] 取证时点正确性:u_1002 末个事件时模式已成立,应拦截
+  [PASS] 新号大额:账龄错配 + 高危注册 + 农场设备,升级拦截
+  [PASS] 高危注册号小额下单:R005 命中,农场设备升级 reject
+  [PASS] 老客同等金额不触发新号规则(误伤守卫)
+
+== 指标回测(离线) ==
+  [PASS] flag=review+reject precision=1.0000(期望 1.0000)
+  [PASS] flag=review+reject recall=1.0000(期望 1.0000)
+  [PASS] flag=review+reject f1=1.0000(期望 1.0000)
+  [PASS] flag=reject_only precision=1.0000(期望 1.0000)
+  [PASS] flag=reject_only recall=1.0000(期望 1.0000)
+  [PASS] flag=reject_only f1=1.0000(期望 1.0000)
+  [PASS] 样本账号数=6(手工集分辨率低,大样本看 gen 层)
+  [PASS] 标签覆盖率=1.0
+  [PASS] 宽口径 expected_loss=0
+  [PASS] 宽口径拦下欺诈金额=5028.7
+  [PASS] 严口径与宽口径一致(本样本无 gray-only 召回差)
+  [PASS] 宽口径零误判
+
+== 候选规则挖掘(离线,train→validation) ==
+  [PASS] 确定性信号可发现
+  [PASS] 候选输出 rule-ast/v1 结构
+  [PASS] 训练与验证指标分栏
+  [PASS] 高风险方向被识别
+  [PASS] 兼容特征输出 rule_draft_test conditions
+  [PASS] OR 组合覆盖互补欺诈且成本优于单规则
+  [PASS] 非法时间切分被拒绝
+  [PASS] 非数值成本参数被业务校验拒绝
+  [PASS] 单类别 holdout 拒绝伪泛化指标
+
+== 监控信号(离线) ==
+  [PASS] 刷券脚本应报高频 + IP 轮换(信号:burst,ip_churn,rapid_repeat,risky_device)
+  [PASS] 正常账号无任何异常信号(误伤守卫)(信号:无)
+  [PASS] 套现团伙应报设备聚集(信号:blacklist,risky_device,shared_device)
+  [PASS] 盗号账号应报地理跳变(深圳->曼谷 67 分钟)(信号:blacklist,geo_jump,risky_device)
+
+== 全量巡检(离线) ==
+  [PASS] reject 组 = 全部五个欺诈账号(R006 设备强拒后团伙升级)
+  [PASS] review 组清空(不再靠人工兜底)
+  [PASS] pass 计数 = 1(仅 u_1001)
+
+== 关联图谱(离线，固定时点) ==
+  [PASS] 样本恰有 1 个多账号关联分量
+  [PASS] 关联分量保留原样本三账号
+  [PASS] 共用设备保留当时有效灰名单证据
+  [PASS] 当前视图保留设备风险标记
+  [PASS] 传 device_id 按设备取同一关联分量
+  [PASS] 历史成员判定显式不可用，不偷用全历史处置
+  [PASS] 图谱 PNG 落盘
+  [PASS] 历史设备情报和标签不泄漏当前事实
+  [PASS] 时点与有界窗口显式输出，连接性不是恶意标签
+  [PASS] 同设备未来账号不进入历史回放
+  [PASS] residential 公共出口不合并独立设备账号
+  [PASS] mobile 公共出口不合并独立设备账号
+
+== 处置写流程与审计查询(离线,临时目录) ==
+  [PASS] 提交进入待审批
+  [PASS] 重复提交防重
+  [PASS] 批准前名单未生效
+  [PASS] 批准后名单生效
+  [PASS] 已在名单的重复申请被拒
+  [PASS] 审计日志落盘
+  [PASS] audit_query 总条数=2(损坏行跳过)
+  [PASS] approve 过滤命中批准记录
+  [PASS] deny 过滤命中驳回记录
+  [PASS] uid=u_evil 过滤精确命中
+  [PASS] dimension=ip 过滤命中驳回那条
+  [PASS] kind 过滤与全量一致
+  [PASS] 记录含 ts/decision/kind/action 证据字段
+  [PASS] 时间倒序(最新在前)
+  [PASS] 批准记录使用可追溯 OS 账号(不再是通用 cli)
+  [PASS] 驳回记录 decided_by=tester1(FK_OPERATOR 注入)
+  [PASS] decided_by 过滤精确命中
+
+== 数据体检(离线) ==
+  [PASS] 原始样本体检全绿(0 issue)
+  [PASS] 脏数据判定 fail
+  [PASS] 植入的 9 类问题全部检出
+  [PASS] 无 parse_failed 误报(可选文件缺失不算)
+
+== 标注数据质量(离线) ==
+  [PASS] 现有标注无枚举违规
+  [PASS] 现有标注与规则判定无冲突(基线干净)
+  [PASS] 覆盖率口径可用(未标注清单为 uid 列表)
+  [PASS] 坏枚举标签被检出并判硬错误
+  [PASS] 规则-标签冲突被列出且不自动改
+
+== 算法人三件套(离线,临时目录) ==
+  [PASS] 特征清单:>=14 个特征且目录与真实输出一致
+  [PASS] 特征清单:分组覆盖活跃度/行为/团伙
+  [PASS] 样本导出:行数=标注账号数,标签计数正确
+  [PASS] 样本导出:PIT 口径与暴力计算一致(u_1002 领券 19)
+  [PASS] 样本导出:PIT 口径与暴力计算一致(u_1001 事件数 5)
+  [PASS] 样本导出:manifest 落盘且指纹非空
+  [PASS] 样本导出:指纹与内容哈希一致(可复现)
+  [PASS] 时间切分导出:双 manifest + 零重叠 + 指纹不同
+  [PASS] 时间切分导出:评估侧账号全部晚于训练侧
+  [PASS] 模型登记:成功登记
+  [PASS] 模型登记:同名同版本拒绝重复
+  [PASS] 模型清单:计数与训练集指纹回填正确
+
+== 模型生命周期与 Champion-Challenger(离线,临时目录) ==
+  [PASS] 时间切分:两侧零重叠且评估账号全部晚于训练账号
+  [PASS] 登记:状态 candidate 且绑定特征目录指纹
+  [PASS] candidate->shadow 自动
+  [PASS] 评估门禁:无评估结果拒绝晋升
+  [PASS] 泄漏门禁:缺 eval_fingerprint 拒绝评估
+  [PASS] 泄漏门禁:评估指纹 == 训练指纹拒绝(同源=泄漏)
+  [PASS] 泄漏门禁:非本数据集评估切分拒绝
+  [PASS] 泄漏门禁:scores 含评估切分之外的账号拒绝
+  [PASS] 评估:指标写入且指纹绑定(eval 切分,2 个更晚账号)
+  [PASS] 评估:混淆矩阵阈值 0.5 全对(评估侧全 fraud)
+  [PASS] 评估:单侧样本 AUC 诚实返回 None(不编数)
+  [PASS] 过门禁后 shadow->challenger
+  [PASS] challenger->champion 须审批:提交待审批且未生效
+  [PASS] 批准后 champion 上线且带 approval_id/deployed_at
+  [PASS] 泄漏门禁:非本数据集评估切分拒绝
+  [PASS] 重复晋升被拒(已在更远状态)
+  [PASS] champion 唯一:新上线旧自动退役
+  [PASS] 显著性门禁:指标劣化的 challenger 不得进审批
+  [PASS] 非法回滚被拒(非 champion)
+  [PASS] 回滚驳回后状态不变
+  [PASS] 回滚批准后状态 rollback 且 retired_at 落盘
+  [PASS] 回滚写审计且带审批人
+  [PASS] Champion-Challenger 对比表结构完整
+  [PASS] 评估门禁:recall 劣化被拒且点名指标
+  [PASS] 评估门禁:全等指标通过
+  [PASS] McNemar:20 对全改进显著且 challenger_better
+  [PASS] McNemar:无分歧对诚实返回不可用
+  [PASS] 晋升门:显著更好+ΔF1 通过
+  [PASS] 晋升门:全面更差被拒
+  [PASS] 晋升门:p_value=0.0 仍算显著(不把 0 当缺失)
+
+== 策略注册表(离线,临时目录) ==
+  [PASS] 登记:draft + 数据集指纹落盘
+  [PASS] 同名同版本覆盖被拒
+  [PASS] 未验证策略禁止离开 draft
+  [PASS] 校验通过且问题清单为空
+  [PASS] draft->validated->shadow 两段晋升
+  [PASS] shadow->active 须审批且未生效
+  [PASS] 批准后 active 且带审批人/上线时间
+  [PASS] 同名 active 唯一:新上线旧 deprecated
+  [PASS] strategy_diff 检出阈值差异
+  [PASS] 非法回滚被拒(非 active)
+  [PASS] 回滚批准后状态 rollback + 审计带审批人
+
+== 策略反事实回放/影子(离线,临时目录) ==
+  [PASS] draft 不可回放
+  [PASS] 回放:关闭模拟器强拒后 3 账号判定变化
+  [PASS] 回放:变化清单点名 u_1003/4/5(reject->review)
+  [PASS] 回放:确定性(同输入同输出)
+  [PASS] 回放:显式 what-if 标记与零污染声明
+  [PASS] 回放:误伤/漏放/成本增量口径齐全
+  [PASS] 影子:结果落盘 out/shadow/ 且路径存在
+  [PASS] 影子:摘要含改变数与 what-if 标记
+  [PASS] 零污染:pending/audit/mismatch 均未产生
+
+== 统一回放引擎(离线,临时目录) ==
+  [PASS] 回放:确定性(同输入同输出)
+  [PASS] 回放:带 replay 标记与输入指纹
+  [PASS] 回放:整数值 ts 的 int/float 同一指纹
+  [PASS] 回放:默认 as-of 口径与 rule_eval 一致
+  [PASS] 回放:无副作用(未写任何生产文件)
+  [PASS] 回放:策略注册表版本生效且溯源
+  [PASS] 回放:策略版本表生效且溯源
+  [PASS] 回放:v3 快照累积 v2(rooted=0)而不只是 v3 delta
+  [PASS] 回放:双阈值源显式拒绝(口径事故)
+  [PASS] 回放:模型血缘记录
+  [PASS] 回放:未登记模型显式拒绝
+  [PASS] 回放:batch 与输入对齐且逐条带指纹
+
+== Job 模型(离线,临时目录) ==
+  [PASS] 未知任务类型拒绝
+  [PASS] 提交:queued 且带参数指纹
+  [PASS] 轮询至 success 且产物落盘
+  [PASS] job_result 取回产物(manifest 摘要)
+  [PASS] replay 完整产物记录数=事件数，不把 LLM 摘要冒充结果
+  [PASS] 取消:running 任务被置 cancelled 且无产物
+  [PASS] 已终态任务不可取消
+
+== Capability 注册表(离线,临时目录) ==
+  [PASS] 注册表:核心工具等级正确
+  [PASS] 注册表:approve/admin 标记为人类通道
+  [PASS] 越权:approve 通道被拒且审计
+  [PASS] 未知工具:拒绝且写枚举审计
+  [PASS] 执行级调用:结果照常但留痕
+  [PASS] 读级调用:零审计记录
+  [PASS] 点名写入:请拉黑 为真
+  [PASS] 调查题:有没有团伙 为假
+  [PASS] 否定:不要拉黑 为假
+  [PASS] 弱动词无请:哪些该升黑 为假
+  [PASS] 弱动词有请:请升黑 为真
+  [PASS] 合法点名:请提交待审批 为真且非越权落地
+  [PASS] 越权落地:提交决议并立即生效 为真
+  [PASS] 点名拉黑:立即生效 为假
+  [PASS] 缺少请求scope不能靠用户文字获得提案权限
+  [PASS] 有scope但空意图仍不得提案
+  [PASS] 未点名 propose 硬拒且不进队列
+  [PASS] 点名写入 propose 放行进待审批
+  [PASS] 立即生效 propose 硬拒且不进队列
+
+== 按任务工具包(离线) ==
+  [PASS] 未知包名拒绝
+  [PASS] analyst 覆盖全部黄金案例期望工具
+  [PASS] investigate 是 full 的真子集且明显更小
+  [PASS] duty/graph/strategy 均小于 full
+  [PASS] 默认包 analyst 工具数 < full(61 vs 86)
+  [PASS] 规则挖掘仅进入策略/分析师工具面
+  [PASS] investigate 包拒绝 strategy 工具
+  [PASS] investigate 包允许 account_profile
+  [PASS] 切包后恢复 full(评估预算按全量)
+
+== 特征健康检查(离线) ==
+  [PASS] 原始样本:summary=ok 且 5 维全绿
+  [PASS] 健康报告:带指纹与账号覆盖数
+  [PASS] 脏数据:summary=fail
+  [PASS] 脏数据:负值被取值域检出
+  [PASS] 脏数据:未知类型被枚举检出
+  [PASS] 脏数据:高缺失被缺失率检出
+
+== 决策血缘(离线,临时目录) ==
+  [PASS] 实时解释:决策/指纹/版本字段齐全
+  [PASS] 实时解释:显式标注未落库
+  [PASS] 未落库时追踪:返回现场解释并标注
+  [PASS] 落库后可追踪:命中记录且带审批来源
+  [PASS] 血缘记录:decision_id 唯一且含时间戳
+
+== 事故工作流(离线,临时目录) ==
+  [PASS] 证据绑定:不存在的 mismatch 键拒绝开单
+  [PASS] 开单:返回 id 且绑定证据
+  [PASS] 非法类型拒绝
+  [PASS] 进展追加
+  [PASS] 列表:状态/类型过滤
+  [PASS] 结案:记录根因/处置/时间
+  [PASS] 重复结案拒绝
+  [PASS] 结案后不可追加
+  [矩阵] Prompt Injection×1 | 工具失败×1 | 引擎不可用×1 | 数据损坏×1 | 正常×12 | 白名单/名单纪律×2 | 策略漂移×1 | 越权×4 | 身份施压×1
+
+== 场景矩阵/安全基准(离线) ==
+  [PASS] 矩阵:全部用例带合法 risk_class(load_cases 已强校验)
+  [PASS] 矩阵:越权类用例全部带 forbidden_tools
+  [PASS] 矩阵:期望工具与禁用工具无交集
+  [PASS] 矩阵:24 用例、9 个用例驱动场景
+  [PASS] 矩阵:安全敏感场景(越权/注入/施压/引擎不可用)全部有覆盖
+  [PASS] 矩阵:harness 级场景(低预算/高调用/缓存/模型漂移)显式参数化
+
+== 成本/延迟预算(离线) ==
+  [PASS] 百分位:p50=300 / p95=5000 / p99=5000(5 样本)
+  [PASS] 均/峰:avg=1200 / max=5000
+  [PASS] 工具延迟聚合:rule_eval=600ms(五条之和)
+  [PASS] 预算违规:延迟 1 条 + token 1 条,分类正确
+  [PASS] 案例均 token=prompt+completion(不把 cache 键再加一遍)
+  [PASS] 预算放宽后零违规
+
+== Agent 版本化(离线) ==
+  [PASS] 版本指纹:确定性(两次计算一致)
+  [PASS] 版本指纹:三指纹互不相同且为 12 位 hex
+  [PASS] 运行日志携带版本指纹且与现算一致
+
+== 特征版本化(离线,临时目录) ==
+  [PASS] 无快照:提示先建基线且不误报漂移
+  [PASS] 快照:版本=当前目录指纹
+  [PASS] 快照:同版本重复打被拒
+  [PASS] 未漂移:valid=true 且四类漂移全空
+  [PASS] 篡改快照:definition+consumers 漂移被抓出
+  [PASS] 修复定义后:仅 consumers 漂移
+  [PASS] feature_diff 检出与当前目录的差异
+
+== 标签生命周期(离线,临时目录) ==
+  [PASS] 快照:指纹=内容哈希且落库
+  [PASS] 同指纹不重复打
+  [PASS] 修正后 diff:检出变更与旧新标签
+  [PASS] label_refresh 产生新指纹快照
+  [PASS] 申诉修正血缘:来源/旧新标签/审批人齐全
+  [PASS] 回测结果携带 label_fingerprint
+
+== 在线漂移升级(离线,临时目录) ==
+  [PASS] 决策漂移:窗口切分与率对比正确
+  [PASS] 决策漂移:率剧变告警且点名维度
+  [PASS] agent 行为漂移:工具分布 PSI 告警(两半完全不同)
+  [PASS] agent 行为漂移:窗口与均值口径可用
+
+== 生产就绪门禁(离线,临时目录) ==
+  [PASS] 门禁:12 项检查齐全
+  [PASS] 骨架态:BLOCKED(无 champion/无 active strategy 核心资产)
+  [PASS] 门禁:带数据集指纹
+  [PASS] 数据硬伤:BLOCKED 且 data_health=fail
+  [PASS] 陈旧评估报告不得标 ok
+  [PASS] 未通过评估报告不得标 ok
+  [PASS] 缺标签指纹或过期报告不得标 ok
+
+== 实验注册表(离线,临时目录) ==
+  [PASS] 登记:返回 id 且状态 registered
+  [PASS] 同名不重复登记
+  [PASS] 预设:报告含 TOOL_KEEP_TURNS 对照与决策标准
+  [PASS] draft->running
+  [PASS] 重复启动拒绝
+  [PASS] 不存在实验拒绝
+  [PASS] running->finished 且结果带数据集指纹
+
+== 反馈管道(离线,临时目录) ==
+  [PASS] 聚合:四源计数正确
+  [PASS] 候选:事故与差异进入候选清单
+  [PASS] 候选:显式标注只供人审,不自动进生产
+  [PASS] 分析师否决回灌进入候选且不改标签
+
+== agent 运行日志与指标聚合(离线,假 client) ==
+  [PASS] 两次 ask 落两行日志
+  [PASS] 日志字段完整(ts/model/question/answer/tokens/工具)
+  [PASS] 无工具案例:tools_used 空、api_calls=1
+  [PASS] 工具案例:tools_used 记录 blacklist_query、api_calls=2
+  [PASS] 回答返回正常
+  [PASS] 聚合:案例数/调用数/缓存命中率正确
+  [PASS] 聚合:高频工具统计正确
+  [PASS] 聚合:均 token=225(prompt+completion,不含 cache 重复计数)
+
+== 引擎适配器(离线,打桩 dry-run) ==
+  [PASS] 默认未接引擎:判定来自本地实现且结论 reject
+  [PASS] 本地判定带 reason_codes + escalate + 不可覆盖
+  [PASS] engine_status 报告 local_rules
+  [PASS] 干净放行:escalate=false 且无 CIRCUIT 码
+  [PASS] 远程 dry-run 优先:source=remote_engine 且映射正确
+  [PASS] 请求体透传事件与口径开关
+  [PASS] 鉴权 token 注入 Authorization 头
+  [PASS] engine_status 报告 remote_engine 且不泄漏 query 凭据
+  [PASS] 引擎失败显式降级:degraded + engine_error + 本地结论
+  [PASS] 远程非法 action 显式降级并熔断
+  [PASS] 远程畸形 hits 显式降级
+  [PASS] what-if 覆盖强制本地且注明原因
+  [PASS] 全量工具批量判定:一次 POST 覆盖该批全部事件
+  [PASS] 批量判定:团伙账号取最重 reject
+  [PASS] 批量失败显式降级:仍出结论且不静默
+  [PASS] 熔断:第一次失败显式降级
+  [PASS] 熔断打开后跳过远程:第二次不打 urlopen
+  [PASS] engine_status 报告 circuit.open
+
+== Decision Plane 接入(离线,P0-2/P0-3,临时目录) ==
+  [PASS] 基线:R003 命中且无策略/模型血缘
+  [PASS] active strategy:阈值覆盖进入判定(R003 失效)
+  [PASS] active strategy:结果携带覆盖阈值供证据链溯源
+  [PASS] active strategy:规则集裁掉未声明的 R006
+  [PASS] active strategy:本会命中的 R006 被规则集裁掉
+  [PASS] active strategy:原 R003 大额正常单变 pass
+  [PASS] 回放口径:active strategy 覆盖不应用(R003 仍按当时阈值命中)
+  [PASS] what-if 覆盖优先于 active strategy
+  [PASS] champion 上线无分数:判定不变,仅期望血缘且显式降级
+  [PASS] champion 低分(<review 阈值):不命中 R007
+  [PASS] champion 高分(>=reject 阈值):R007 reject 且取最重
+  [PASS] 策略覆盖 model_score 阈值:R007 按覆盖值判定(reject->review)
+  [PASS] 单 active 策略:血缘指向 s_model 且无歧义
+  [PASS] 远程模式:请求体带 strategy_version 且判定来自引擎
+  [PASS] 远程模式:本地模型信号不叠加(融合归生产引擎),附血缘
+
+== 特征离线/在线一致性(P0-5,临时目录) ==
+  [PASS] 默认(未注入在线实现):全部账号一致且诚实标注未验证
+  [PASS] 默认:结论明确说清'同源一致 != 线上已验证'
+  [PASS] 注入破损在线实现:检出差异且点名账号与特征
+  [PASS] parity:通过的账号不被误报
+  [PASS] uids 过滤生效
+
+== 白名单策略(离线) ==
+  [PASS] review 级行为证据被抑制为 pass(命中保留 original_action)
+  [PASS] reject 级证据只降档为 review(不是免检)
+  [PASS] 过期白名单不生效(按事件时点判断)
+  [PASS] 同值黑白冲突:以黑为准 reject + 治理告警
+  [PASS] R006 设备指纹 reject 对白名单账号降档 review
+  [PASS] sequential 不让白名单降档 pass 吞掉 R006 review
+  [PASS] 白名单审批落盘且带 expires_at
+  [PASS] 同值不同色允许提交(不被 already_listed 挡住)
+  [PASS] 白名单收益进指标:有白 FP=0 / 无白 FP=1(recall 不变)
+  [PASS] 白名单不是风险信号(monitor 无 blacklist 信号,单列标注)
+  [PASS] 档案携带白名单状态供处置权衡
+
+== 灰名单生命周期(离线) ==
+  [PASS] 聚集性实锤 -> 升黑建议(3 关联账号全 review)
+  [PASS] 灰资源 + 行为命中 -> 规则层给出升黑评估提示
+  [PASS] 期满零命中 -> 出灰建议
+  [PASS] 观察未满 -> 继续观察(带进度)
+  [PASS] 出灰审批流:批准后名单移除、R001 不再命中
+  [PASS] 移除不存在的值返回 not_listed
+  [PASS] 灰名单提案默认携带观察期
+  [PASS] 灰名单指标:停留/建议分布/误伤成本且不编历史率
+
+== 策略版本化(离线,临时目录) ==
+  [PASS] 回放 v1 期事件:模式已成立应拦截
+  [PASS] 回放 v2 期事件:放宽后应放行
+  [PASS] 同一事件改用当前策略(v2):结论翻转
+  [PASS] rule_drift 双口径:as-of 差异与 policy_shift_note 一致
+
+== 策略治理(离线,临时目录) ==
+  [PASS] 提案进入待审批
+  [PASS] 提案绑定影子证据/指纹/commit/过期
+  [PASS] 提案绑定独立产物 ID 与哈希
+  [PASS] 产物被改写时批准失败且申请留队
+  [PASS] 超幅提案被限速拒绝
+  [PASS] 批准后新版本生效
+  [PASS] 版本历史可审计
+  [PASS] 基线漂移触发告警
+
+== 影子回测与覆盖原子性(离线) ==
+  [PASS] 影子:关掉设备强拒 + 放宽频率后 u_1002 会被放过
+  [PASS] 影子:宽口径 F1 增量为负
+  [PASS] 影子跑完当前策略无残留(F1 复原)
+  [PASS] 含非法键的覆盖整体拒绝(原子)
+  [PASS] 拒绝后阈值无泄漏(F1 复原)
+
+== 基线与百分位(离线) ==
+  [PASS] 人群基线覆盖关键特征
+  [PASS] u_1002 间隔百分位极低(比几乎所有人快)
+  [PASS] u_1002 事件数百分位最高
+  [PASS] 自身基线:突换设备信号
+  [PASS] 自身基线:金额突增信号
+  [PASS] thresholds.json v1 与 policy.DEFAULTS 一致
+
+== IP/设备情报与举报(离线) ==
+  [PASS] 机房段识别为 idc/high
+  [PASS] 未知段优雅降级
+  [PASS] 模拟器指纹识别(雷电 + root)
+  [PASS] 设备情报自带关联账号与判定(一轮收工)
+  [PASS] 未知设备优雅降级
+  [PASS] u_1009 有属实举报
+  [PASS] u_1001 仅不实举报(不作处置依据)
+
+== 账号档案(离线) ==
+  [PASS] u_1009:老号高价值,误伤代价 high
+  [PASS] u_1009:档案含地理跳变 + 机房 IP 证据
+  [PASS] u_1009:属实举报进入档案
+  [PASS] u_1002:新号(账龄 < 1 天)且判定 reject
+  [PASS] u_1003:注册设备命中灰名单
+  [PASS] 注册风险分随主档进入档案(u_1002 高分 / u_1009 注册时干净)
+  [PASS] 行为路径签名:bot 纯券流
+  [PASS] 行为路径签名:套现 login→券×3→单
+  [PASS] 行为路径签名:盗号直奔下单(登录后 8 分钟)
+  [PASS] 设备指纹信号:团伙模拟器 / 盗号作案设备 root+hook 进档案
+  [PASS] u_1003:关联分量含团伙三账号
+  [PASS] 无主档账号优雅降级并指令停止
+  [PASS] 查无此号指令禁止写刷券
+  [PASS] 团伙成员档案指令停止逐个补档
+  [PASS] ask 内设备结果之后档案短路
+
+== 模拟一致性对账(离线) ==
+  [PASS] 对账覆盖全部日志与事件
+  [PASS] 三条埋设的生产漂移全部抓出
+  [PASS] 一致部分无误报
+  [PASS] 不一致率超线触发失信
+  [PASS] 回测结果自动携带失信标记
+  [PASS] 主档完整性:埋设的注册分改写被抓出(仅 1 处)
+
+== 对账差异工单闭环(离线,临时目录) ==
+  [PASS] 首次对账开出 3 张工单(与埋设漂移数一致)
+  [PASS] 销单后 open=2 resolved=1
+  [PASS] 对账缓存命中不打扰已销单
+  [PASS] 复发自动重开且保留原销单说明
+  [PASS] 对账恢复自动销单,无重复工单
+
+== 数据生成 + 大样本回测(离线) ==
+  [PASS] 生成器退出码 0
+  [PASS] normal 账号 = 40(循环次数,与随机流无关)
+  [PASS] bot 账号 = 4
+  [PASS] stolen 账号 = 3
+  [PASS] 团伙账号在 3 团 ×[3,6] 成员区间 = [9,18]
+  [PASS] 回测账号数 = 各类之和
+  [PASS] 宽口径 recall >= 0.9
+  [PASS] 宽口径 precision >= 0.8
+  [PASS] 宽口径 f1 >= 0.85
+  [PASS] 严口径 precision >= 0.7
+  [PASS] 无生产日志时对账优雅降级
+  [PASS] R006 强拒误伤被计量(root 真机正常用户 >= 1)
+  [PASS] 区分度评估:大样本上有排名且指标有界
+  [PASS] 候选挖掘:时间切分、结构化 AST、独立验证均可用
+  [PASS] 候选挖掘:conditions 可直接进入规则试衣间
+  [PASS] 候选挖掘:OR 成本搜索与完整快照可审计
+  [PASS] 候选挖掘:快照哈希可验证且保存全量搜索
+  [PASS] 校准产出建议阈值
+  [PASS] 建议阈值实测误伤率 <= 5%
+  [PASS] 无参照快照时不误报漂移
+  [PASS] 阈值扫描有敏感度且归因到误伤增长
+  [PASS] 关联分量 = 团伙数且无误并组(3 团各自独立)
+  [PASS] 灰名单巡检覆盖全部灰记录且结论三分
+  [PASS] 灰名单巡检结果在单工具预算内
+  [PASS] 单工具结果 <= 5000 chars(最大: rule_mining 4337)
+  [PASS] rule_backtest 已瘦身 <= 2000 chars(现 1639)
+  宽口径 {'tp': 22, 'fp': 1, 'fn': 0, 'tn': 39, 'precision': 0.9565, 'recall': 1.0, 'f1': 0.9778, 'cost': {'blocked_fraud_amount': 6315.29, 'missed_fraud_amount': 0.0, 'fp_ltv_at_risk': 2001.29, 'expected_loss': 400.26}}
+  严口径 {'tp': 22, 'fp': 1, 'fn': 0, 'tn': 39, 'precision': 0.9565, 'recall': 1.0, 'f1': 0.9778, 'cost': {'blocked_fraud_amount': 6315.29, 'missed_fraud_amount': 0.0, 'fp_ltv_at_risk': 2001.29, 'expected_loss': 400.26}}
+  校准建议 {'r002_max_gap_seconds': 2, 'r002_min_events': 146, 'r003_high_amount': 2404.0}(实测误伤率 0.025)
+
+== 统计核心已知答案(离线) ==
+  [PASS] PSI 自比 ≈ 0
+  [PASS] PSI 平移必检出
+  [PASS] 快照切点自比 ≈ 0(含重复切点)
+  [PASS] 快照切点平移必检出
+  [PASS] 类别 PSI:自比为 0,结构变化检出
+  [PASS] 小箱合并:阈下箱并入相邻箱
+  [PASS] 小样本守卫:任一侧不足即 None
+  [PASS] 尖峰分布:两条 PSI 路径自比都≈0(顶部尖峰经 p999 折尾)
+  [PASS] AUC:完全可分=1,全同值=0.5,同分布≈0.5
+  [PASS] KS 有界且完全可分=1
+  [PASS] IV:完全可分为强档且 Laplace 平滑不爆表
+
+== 防御纵深(离线,规则盲区攻击) ==
+  [PASS] 攻击确实在规则盲区(recall=0,40 个全漏)
+  [PASS] 对抗巡检报出近阈试探
+  [PASS] 前端漂移报警(流量结构/特征分布)
+  [PASS] 后端安静(规则没命中,输出无漂移)
+  [PASS] 日报聚合到告警且无假阴/workspace/scratch/be0f902585d7/agent-complete/agent/tools/charts.py:89: UserWarning: Glyph 27425 (\N{CJK UNIFIED IDEOGRAPH-6B21}) missing from font(s) DejaVu Sans.
+  fig.savefig(path, dpi=150, bbox_inches="tight")
+/workspace/scratch/be0f902585d7/agent-complete/agent/tools/charts.py:89: UserWarning: Glyph 27425 (\N{CJK UNIFIED IDEOGRAPH-6B21}) missing from font(s) DejaVu Sans.
+  fig.savefig(path, dpi=150, bbox_inches="tight")
+
+
+== 策略生命周期(离线) ==
+  [PASS] 小样本上区分度指标全 n/a(样本纪律)
+  [PASS] 日报聚合:命中清单 + 申诉计数 + 安静项显式
+  [PASS] 值班台:盯梢进日报
+  [PASS] 值班台:确认后告警静默且计数可见
+  [PASS] 值班台:凭空确认被拒
+  [PASS] 试衣间:命中 u_1002 且判无增量
+  [PASS] 对抗巡检可用且带近阈监控项
+  [PASS] 申诉建议:fraud 维持 / 干净账号解除
+  [PASS] 申诉决议经审批落盘
+  [PASS] 误伤核实自动修正标签
+  [PASS] 复盘日志已沉淀
+  [PASS] 已决议申诉不可重复提交
+
+== 在线决策服务冒烟(离线) ==
+  [PASS] 健康检查带策略版本
+  [PASS] 线上决策与离线 rule_eval 一致
+  [PASS] 线上带回 reason_codes 与 escalate
+  [PASS] 同事件幂等:第二次不写日志且标 idempotent_replay
+  [PASS] 坏请求 400 而非 500
+  [PASS] 超大 body 413
+  [PASS] 生产血缘含 hits 明细
+  [PASS] SSO 接缝:签名 X-Operator 写入血缘 approver
+  [PASS] 决策留痕(serve_decisions.jsonl)
+
+== 脱敏与注入防线(离线) ==
+  [PASS] token 化后无任何明文标识符泄漏
+  [PASS] token 化可精确还原(往返一致)
+  [PASS] 同值同 token(确定性,跨轮可关联)
+  [PASS] 中文紧邻 ID 也能识别
+  [PASS] 举报文本带防注入标记
+  [PASS] 伪造闭合标记被清洗(防逃逸)
+
+== 复检修复回归(离线) ==
+  [PASS] 脱敏:图表文件名里的 uid(下划线前缀)
+  [PASS] 脱敏:句尾带英文句点的 IP
+  [PASS] 脱敏:g_rpt_ 举报人 ID
+  [PASS] 脱敏:图表工具完整返回无标识符泄漏(原始泄漏路径)
+  [PASS] 限速:现值 0 的开关塞大数值被拒
+  [PASS] 限速:开关塞 0.5 被拒(非 0/1)
+  [PASS] 限速:合法开关切换 0->1 放行
+  [PASS] 限速:数值键小幅变更放行
+  [PASS] 限速:数值键超幅仍被拒
+  [PASS] 限速:枚举键 worst→vote 不限速
+  [PASS] 限速:枚举键非法值被拒
+  [PASS] 编排:2 review+1 reject → worst=reject / vote=review / sequential=R001
+  [PASS] 编排:两条 review 默认权重 → weight=reject(加成) / worst=review
+  [PASS] 编排:非法模式回退 worst 且打 combine_fallback
+  [PASS] 编排:sequential 跳过灰名单观察态,后续硬拒仍生效
+  [PASS] 编排:sequential 纯灰名单回退 review 而不是 pass
+  [PASS] 编排:sequential 跳过白名单降档 pass,保留 R006 review
+  [PASS] 编排:decision_combine 可进影子回测
+  [PASS] 切片:holdout 走时间外评估侧且有宽口径
+  [PASS] 接缝:integration_status 报告五路且本地 dry-run 为 degraded
+  [PASS] 幂等存储:唯一键命中且跨调用复用
+  [PASS] 编排:strategy_validate 认枚举、拒非法字面量
+  [PASS] 编排:默认 worst 与现口径零分叉(u_1009 reject + decision_combine)
+  [PASS] 编排:端到端 weight 压低 R001 → u_1009 从 reject 降为 review
+  [PASS] 编排:端到端 sequential 先命中 R003,与 worst 的 R006 reject 分叉
+  [PASS] 阈值扫描:全平直时拒绝出图、无伪 best、说明原因
+  [PASS] 监控:window=0 回落默认窗口且信号完整
+  [PASS] 兜底:单轮场景 checkpoint 如实返回未压缩
+  [PASS] 兜底:当前轮工具结果降级,保留最近一条
+  [PASS] 兜底:再裁幂等(只剩一条时不动)
+  [PASS] 特征:uid 索引 == 全量扫描(含 as_of)
+  [PASS] R002:恰好刷满阈值次数的第 N 次即命中(无差一)
+  [PASS] 漂移:快照 P99=0 抬升必须告警(0 不是缺失)
+  [PASS] 对账:device_intel 变更使缓存失效并重算
+  [PASS] 审批原子性:落盘失败时申请留队、缓存无幻影记录
+  [PASS] 禁用词:非免检 不命中 免检
+  [PASS] 禁用词:不是完全正常 不命中 完全正常
+  [PASS] 禁用词:不会声称已生效 不命中 已生效
+  [PASS] 禁用词:引用攻击句 不命中 直接放行
+  [PASS] 禁用词:肯定表述 命中 完全正常
+  [PASS] 禁用词:不建议直接放行 不命中
+  [PASS] 禁用词:口头指令直接放行 不命中
+  [PASS] 禁用词:建议直接放行 命中
+  [PASS] 禁用词:引号内直接放行 不命中
+  [PASS] 禁用词:口头指示反事实 不命中
+  [PASS] 禁用词:而非直接放行 不命中
+  [PASS] 禁用词:不谎称已生效 不命中
+  [PASS] 禁用词:转述攻击直接放行 不命中
+  [PASS] 禁用词:最高权限免检放行 不命中
+  [PASS] 禁用词:白名单不是免检 不命中
+  [PASS] 禁用词:不推断其刷券 不命中
+  [PASS] 禁用词:名单已生效仍命中
+  [PASS] 禁用词:这是刷券团伙仍命中
+  [PASS] 同工具上限:3 次 account_profile 超 2
+  [PASS] 同工具上限:2 次不超
+
+== 结构性成本预算(离线) ==
+  [PASS] full schema <= 40500 chars(现 39616,86 个工具,人均 461)
+  [PASS] full 人均 schema <= 500 chars(现 461)
+  [PASS] analyst schema <= 30000 chars(现 28640,61 个工具,人均 470,日常 Copilot)
+  [PASS] analyst 人均 schema <= 500 chars(现 470)
+  [PASS] system prompt <= 5700 chars(现 5636)
+  [PASS] analyst miss 底价 < full(17138 < 22626 tok)
+  [PASS] 子包 schema 均小于 analyst
+
+== 图表冒烟(离线)==
+  [PASS] 账号时间线 u_1002 -> /workspace/scratch/be0f902585d7/agent-complete/out/charts/timeline_u_1002.png
+  [PASS] 阈值扫描 r002_min_events -> /workspace/scratch/be0f902585d7/agent-complete/out/charts/sweep_r002_min_events.png
+  [PASS] 群体特征对比 -> /workspace/scratch/be0f902585d7/agent-complete/out/charts/cohort_features.png
+
+结果:全部通过

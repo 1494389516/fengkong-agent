@@ -25,3 +25,12 @@ data/label_lineage.jsonl
 data/label_snapshots.json
 data/model_scores.json
 data/strategy_registry.json
+
+# Transactional runtime state (never publish customer events)
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Verified runtime caches are deployment state
+data/*.lkg
+data/runtime_lkg_*.json

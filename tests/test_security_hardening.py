@@ -43,6 +43,17 @@ class PrivacyTests(unittest.TestCase):
 
 
 class CapabilityTests(unittest.TestCase):
+    def setUp(self):
+        from agent.tools import capability
+        from agent.tools.datasource import data_dir
+        self.binding = mock.patch.dict(os.environ, {"FK_SCOPE_TENANT": "test"})
+        self.binding.start()
+        self.addCleanup(self.binding.stop)
+        self.scope = capability.request_scope(capability.RequestScope(
+            "test-reviewer", "test", str(data_dir()), tuple(capability.CAPABILITY), time.time()+60))
+        self.scope.__enter__()
+        self.addCleanup(self.scope.__exit__, None, None, None)
+
     def test_registry_is_fully_classified_and_unknown_registration_fails(self):
         from agent.tools import _REGISTRY
         from agent.tools.capability import validate_registry
@@ -143,8 +154,10 @@ class IdempotencyTests(unittest.TestCase):
     def test_disk_store_is_bounded(self):
         from agent.tools.idemp_store import complete, idemp_path
         with mock.patch.dict(os.environ, {"FK_IDEMP_MAX_RECORDS": "2"}, clear=False):
-            for i in range(3):
+            for i in range(2):
                 complete("key-%d" % i, {"action": "pass"}, "fp-%d" % i)
+            with self.assertRaisesRegex(RuntimeError, "capacity"):
+                complete("key-2", {"action": "pass"}, "fp-2")
         records = json.loads(idemp_path().read_text(encoding="utf-8"))
         self.assertEqual(len(records), 2)
 
@@ -186,7 +199,15 @@ class HttpServiceTests(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         data_dir = Path(cls.tmp.name) / "data"
-        shutil.copytree(ROOT / "data", data_dir)
+        data_dir.mkdir()
+        # Static JSON seeds tracked at baseline 1548785eccd5500545e5850d7399ba4b64158c4c.
+        # Runtime journals/idempotency stores must not enter a fresh deployment:
+        # existing legacy state correctly activates the explicit migration guard.
+        for filename in (
+                "accounts.json", "appeals.json", "blacklist.json", "decisions_log.json",
+                "device_intel.json", "events_sample.json", "ip_intel.json", "labels.json",
+                "reports.json", "thresholds.json"):
+            shutil.copy2(ROOT / "data" / filename, data_dir / filename)
         cls.log_path = Path(cls.tmp.name) / "serve.jsonl"
         cls.token = "test-bearer-token-at-least-16"
         cls.operator_secret = "test-operator-secret"
@@ -324,11 +345,15 @@ class ApprovalTransactionTests(unittest.TestCase):
         script = ("import os, sys\n"
                   "sys.path.insert(0, os.environ['PROJECT_ROOT'])\n"
                   "from agent.tools import dispatch\n"
-                  "dispatch('experiment_register', "
-                  "{'name': os.environ['EXP_NAME']})\n")
+                  "import time\n"
+                  "from agent.tools.capability import RequestScope, request_scope\n"
+                  "scope = RequestScope('test-worker', 'test', os.environ['FK_DATA_DIR'], ('experiment_register',), time.time()+60)\n"
+                  "with request_scope(scope, user_text='experiment_register'):\n"
+                  "    result = dispatch('experiment_register', {'name': os.environ['EXP_NAME']})\n"
+                  "    assert 'error' not in result, result\n")
         env = dict(os.environ)
         env.update({"FK_DATA_DIR": str(self.data_dir),
-                    "PROJECT_ROOT": str(ROOT), "PYTHONPATH": str(ROOT)})
+                    "PROJECT_ROOT": str(ROOT), "PYTHONPATH": str(ROOT), "FK_SCOPE_TENANT": "test"})
         procs = []
         for i in range(3):
             child_env = dict(env, EXP_NAME="concurrent-%d" % i)

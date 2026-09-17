@@ -36,9 +36,9 @@ def _load() -> Dict[str, Any]:
         obj = _load_json(p)
     except FileNotFoundError:
         return {}
-    except ValueError:
-        return {}
-    return obj if isinstance(obj, dict) else {}
+    if not isinstance(obj, dict):
+        raise ValueError("invalid idempotency store schema")
+    return obj
 
 
 def lookup(fp: str, input_fingerprint: str = "") -> Optional[Dict]:
@@ -169,10 +169,4 @@ def _prune(store: Dict[str, Any]) -> None:
     limit = _max_records()
     if len(store) <= limit:
         return
-    done = sorted(
-        ((float(rec.get("completed_at") or 0), key)
-         for key, rec in store.items() if rec.get("status") == "done"),
-        key=lambda item: item[0],
-    )
-    for _, key in done[:max(0, len(store) - limit)]:
-        store.pop(key, None)
+    raise RuntimeError("idempotency capacity exhausted; live records cannot be evicted")

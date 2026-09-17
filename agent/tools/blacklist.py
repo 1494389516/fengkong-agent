@@ -8,9 +8,9 @@
          (R002~R005)对其失效,但**硬证据只降档不豁免**(R001 黑名单、
          R006 设备指纹的 reject 降为 review):白名单账号被盗/被收买时
          仍有人工闸门,不是免死金牌。白名单本身是攻击面,进出必须走
-         两阶段审批,并建议带 expires_at 有效期。
+         两阶段审批,白名单强制 scope/owner/reason/expires_at 有效期。
 
-expires_at(可选,"YYYY-MM-DD"):到期后该记录视为不存在。判定按**事件
+expires_at(黑灰可选,白必填,"YYYY-MM-DD"):到期后该记录视为不存在。判定按**事件
 时点**比较(回放历史事件用当时的有效性,不是现在的)—— 与特征/策略的
 point-in-time 口径一致。added_at 目前不参与回放过滤(全名单库的已知简化:
 名单被视为"从来如此",接真实名单服务时应换成带版本的快照查询)。
@@ -26,23 +26,36 @@ VALID_LISTS = ("black", "gray", "white")
 
 
 def _expired(record: Dict, as_of_ts: Optional[float]) -> bool:
+    if record.get("list") == "white" and (
+            not record.get("scope") or record.get("scope") == "*"
+            or not record.get("owner") or not record.get("reason")):
+        return True
     exp = record.get("expires_at")
     if not exp:
-        return False
+        return record.get("list") == "white"
     try:
-        exp_ts = datetime.strptime(exp, "%Y-%m-%d").replace(
-            tzinfo=timezone.utc).timestamp() + 86400  # 到期日当天仍有效
-    except ValueError:
-        return False  # 格式坏了当永久,宁可多抑制也不静默丢记录
+        if "T" in exp:
+            parsed = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError("timezone required")
+            exp_ts = parsed.timestamp()
+        else:
+            exp_ts = datetime.strptime(exp, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc).timestamp() + 86400  # legacy day-precision records
+    except (ValueError, TypeError):
+        return True  # 无法确认有效期的记录不参与决策
     return (as_of_ts if as_of_ts is not None else time.time()) >= exp_ts
 
 
 def active_records(dimension: str, value: str, as_of_ts: Optional[float] = None,
-                   lists: Optional[tuple] = None) -> List[Dict]:
+                   lists: Optional[tuple] = None, scope: Optional[str] = None) -> List[Dict]:
     """未过期的名单记录(规则引擎口径)。lists 过滤名单颜色,None=全部。"""
     return [r for r in load_blacklist()
             if r["dimension"] == dimension and r["value"] == value
             and not _expired(r, as_of_ts)
+            and (r.get("list") != "white" or (
+                r.get("scope") and r.get("scope") != "*" and r.get("owner") and r.get("reason")
+                and (scope is None or r["scope"] == scope)))
             and (lists is None or r["list"] in lists)]
 
 
