@@ -37,6 +37,8 @@ Decision Plane 接入(P0-2/P0-3,骨架的"治理 -> 判定"打通):
     = 无信号,判定不变。
 """
 import json
+import math
+import copy
 import os
 import threading
 import time
@@ -68,14 +70,25 @@ _RULE_CODES = {
 VALID_ACTIONS = ("pass", "review", "reject")
 
 # closed → 连续失败达阈值 → open → 冷却结束 half_open 探活 → 成功回 closed
-_circuit: Dict[str, Any] = {"failures": 0, "opened_at": 0.0, "state": "closed"}
+_circuit: Dict[str, Any] = {"failures": 0, "opened_at": 0.0, "state": "closed", "generation": object()}
 _circuit_lock = threading.Lock()
+_circuits: Dict[Any, Dict[str, Any]] = {}
+_transport_slots: Dict[Any, Any] = {}
+_transport_lock = threading.Lock()
+
+
+def _circuit_state(key=None):
+    # Caller owns _circuit_lock. Separate online and batch recovery budgets.
+    if key is None:
+        return _circuit
+    return _circuits.setdefault(key, {"failures": 0, "opened_at": 0.0, "state": "closed", "generation": object()})
 
 
 def reset_circuit() -> None:
     """测试/显式恢复:清掉熔断计数。生产靠冷却自动 half-open,不靠这个。"""
     with _circuit_lock:
-        _circuit.update(failures=0, opened_at=0.0, state="closed")
+        _circuit.update(failures=0, opened_at=0.0, state="closed", generation=object())
+        _circuits.clear()
 
 
 def _circuit_threshold() -> int:
@@ -86,28 +99,42 @@ def _circuit_cooldown() -> float:
     return float(os.environ.get(CIRCUIT_COOLDOWN_ENV, "30") or 30)
 
 
-def _circuit_allow_remote() -> bool:
+def _circuit_acquire(key=None):
+    """Return a generation-bound lease, or None. Old completions are inert."""
     with _circuit_lock:
-        if _circuit["state"] == "closed":
-            return True
-        if _circuit["state"] == "open":
-            if time.monotonic() - _circuit["opened_at"] >= _circuit_cooldown():
-                _circuit["state"] = "half_open"
-                return True
-            return False
-        return True
+        state = _circuit_state(key)
+        if state["state"] == "closed":
+            return state["generation"]
+        if state["state"] == "open":
+            if time.monotonic() - state["opened_at"] >= _circuit_cooldown():
+                state.update(state="half_open", generation=object())
+                return state["generation"]
+        return None
 
 
-def _circuit_on_success() -> None:
-    reset_circuit()
+def _circuit_allow_remote(key=None) -> bool:
+    # Compatibility for diagnostic callers; evaluation always carries a lease.
+    return _circuit_acquire(key) is not None
 
 
-def _circuit_on_failure() -> None:
+def _circuit_on_success(key=None, lease=None) -> None:
     with _circuit_lock:
-        _circuit["failures"] = int(_circuit["failures"]) + 1
-        if _circuit["state"] == "half_open" or _circuit["failures"] >= _circuit_threshold():
-            _circuit["state"] = "open"
-            _circuit["opened_at"] = time.monotonic()
+        state = _circuit_state(key)
+        if lease is not None and lease is not state["generation"]:
+            return
+        if state["state"] == "half_open":
+            state["generation"] = object()
+        state.update(failures=0, opened_at=0.0, state="closed")
+
+
+def _circuit_on_failure(key=None, lease=None) -> None:
+    with _circuit_lock:
+        state = _circuit_state(key)
+        if lease is not None and lease is not state["generation"]:
+            return
+        state["failures"] = int(state["failures"]) + 1
+        if state["state"] == "half_open" or state["failures"] >= _circuit_threshold():
+            state.update(state="open", opened_at=time.monotonic(), generation=object())
 
 
 def annotate_decision(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -116,8 +143,8 @@ def annotate_decision(result: Dict[str, Any]) -> Dict[str, Any]:
     由 combine_hits 写入,本函数原样露出,远程缺失时不伪造 worst。
     Agent 只能读这些字段,不能改 action —— 字段本身是契约,dispatch
     没有"改判定"工具。"""
-    codes: List[str] = []
-    seen = set()
+    codes: List[str] = list(result.get("reason_codes") or [])
+    seen = set(codes)
     for h in result.get("hits") or []:
         rid = h.get("rule_id") or "UNKNOWN"
         code = _RULE_CODES.get(rid, rid)
@@ -138,7 +165,8 @@ def annotate_decision(result: Dict[str, Any]) -> Dict[str, Any]:
         codes.append("GRAY_ESCALATION")
     result["reason_codes"] = codes
     result["escalate_to_human"] = bool(
-        result.get("action") in ("review", "reject")
+        result.get("escalate_to_human")
+        or result.get("action") in ("review", "reject")
         or result.get("degraded")
         or "WHITELIST_DOWNGRADE" in codes)
     result["agent_cannot_override"] = True
@@ -166,8 +194,17 @@ def _post_json(url: str, payload: Dict[str, Any],
         method="POST",
     )
     timeout = float(os.environ.get(DRYRUN_TIMEOUT_ENV, "10") or 10)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    lane = "batch" if "events" in payload else "online"
+    with _transport_lock:
+        slots = _transport_slots.setdefault((url, lane), threading.BoundedSemaphore(
+            2 if lane == "batch" else 8))
+    if not slots.acquire(blocking=False):
+        raise RuntimeError("remote_bulkhead_full:" + lane)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    finally:
+        slots.release()
 
 
 def _map_remote(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -204,13 +241,86 @@ def _map_remote(raw: Dict[str, Any]) -> Dict[str, Any]:
             rec.setdefault("reason", "生产引擎 dry-run 判定")
             cleaned.append(rec)
         hits = cleaned
-    return {
+    promoted = {
+        "policy_version", "strategy_version", "model_version", "feature_version",
+        "graph_version", "list_version", "effective_versions", "model_score",
+        "degraded", "degraded_reason", "model_degraded", "components",
+        "reason_codes", "escalate_to_human", "circuit_open", "engine_error",
+        "decision_combine", "combine_score", "combine_fallback", "gray_escalation_hint",
+    }
+    for field in ("degraded", "model_degraded", "escalate_to_human", "circuit_open"):
+        if field in raw and not isinstance(raw[field], bool):
+            raise ValueError("invalid remote boolean: " + field)
+    for field in ("policy_version", "strategy_version", "model_version", "feature_version",
+                  "graph_version", "list_version", "degraded_reason"):
+        if field in raw and raw[field] is not None and not isinstance(raw[field], str):
+            raise ValueError("invalid remote metadata: " + field)
+    if "model_score" in raw:
+        _validate_score(raw["model_score"])
+    codes = raw.get("reason_codes", [])
+    if not isinstance(codes, list) or any(not isinstance(code, str) for code in codes):
+        raise ValueError("invalid remote reason_codes")
+    components = raw.get("components", {})
+    if not isinstance(components, dict):
+        raise ValueError("invalid remote components")
+    for name, component in components.items():
+        if (not isinstance(component, dict)
+                or component.get("status") not in ("ok", "disabled", "invalid", "unavailable")
+                or not isinstance(component.get("required"), bool)
+                or (component.get("reason") is not None and not isinstance(component["reason"], str))):
+            raise ValueError("invalid remote component: " + str(name))
+    mapped = {key: copy.deepcopy(raw[key]) for key in promoted if key in raw}
+    if raw.get("model_degraded") or any(c["status"] in ("invalid", "unavailable") for c in components.values()):
+        mapped["degraded"] = True
+        mapped.setdefault("degraded_reason", "remote_component_degraded")
+    mapped["producer_metadata"] = copy.deepcopy(raw)
+    mapped.update({
         "hits": hits,
         "action": action,
         "rule_count_evaluated": raw.get("rule_count_evaluated"),
         "policy_version": raw.get("policy_version"),
         "source": "remote_engine",
-    }
+    })
+    return mapped
+
+
+_registry_snapshots: Dict[str, Any] = {}
+_registry_lock = threading.Lock()
+
+
+def _read_registry(loader, path, kind):
+    key = str(path.resolve())
+    try:
+        rows = loader()
+        if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+            raise ValueError("registry must be a list of objects")
+        name_key = "strategy_name" if kind == "strategy" else "name"
+        for row in rows:
+            for field in (name_key, "version", "status"):
+                if not isinstance(row.get(field), str) or not row[field]:
+                    raise ValueError("invalid registry field: " + field)
+            if kind == "strategy" and not isinstance(row.get("thresholds", {}), dict):
+                raise ValueError("invalid strategy thresholds")
+        if kind == "model" and sum(r["status"] == "champion" for r in rows) > 1:
+            raise ValueError("multiple champion models")
+        with _registry_lock:
+            _registry_snapshots[key] = copy.deepcopy(rows)
+        return rows, None
+    except Exception as exc:
+        with _registry_lock:
+            rows = copy.deepcopy(_registry_snapshots.get(key, []))
+        return rows, {"status": "invalid", "reason": "registry_invalid",
+                      "required": True, "using_last_known_good": bool(rows),
+                      "error_type": type(exc).__name__}
+
+
+def _component(result, name, status, reason=None, required=False):
+    state = {"status": status, "reason": reason, "required": required}
+    result.setdefault("components", {})[name] = state
+    if status in ("invalid", "unavailable"):
+        result["degraded"] = True
+        result.setdefault("degraded_reason", name + ":" + (reason or status))
+    return state
 
 
 def _active_strategy() -> Dict:
@@ -222,13 +332,11 @@ def _active_strategy() -> Dict:
     远程引擎模式:阈值由生产配置中心下发,本地 registry 是治理镜像 ——
     判定以引擎为准,这里只把版本号带进血缘。
     """
-    from .tools.strategy_registry import _load as _sload  # 惰性:防导入环
-    try:
-        actives = [s for s in _sload() if s.get("status") == "active"]
-    except Exception:  # noqa: BLE001 注册表损坏不掀翻判定路径
-        return {}
+    from .tools.strategy_registry import _load as _sload, _path
+    rows, error = _read_registry(_sload, _path(), "strategy")
+    actives = [s for s in rows if s.get("status") == "active"]
     if not actives:
-        return {}
+        return {"registry_error": error} if error else {}
     # 不同名策略各自允许一个 active;判定只能有一套生效阈值 —— 取部署时间
     # 最新的 active 并显式标注歧义,不静默选第一个(顺序取决于文件写入序,
     # 语义上是随机的)。生产应由配置中心路由到单一策略,这里兜底确定性。
@@ -240,6 +348,8 @@ def _active_strategy() -> Dict:
         "strategy_thresholds": s.get("thresholds") or {},
         "strategy_rules": list(s.get("rules") or []),
     }
+    if error:
+        out["registry_error"] = error
     if len(actives) > 1:
         out["strategy_ambiguity"] = (
             "存在 %d 个 active 策略,取部署时间最新的 %s;其余 %s"
@@ -251,12 +361,21 @@ def _active_strategy() -> Dict:
 
 def _champion() -> Dict:
     """当前 champion 模型(唯一)。无则返回 {}。"""
-    from .tools.model_registry import _load as _mload  # 惰性:防导入环
-    try:
-        ch = [m for m in _mload() if m.get("status") == "champion"]
-    except Exception:  # noqa: BLE001 登记簿损坏不掀翻判定路径
-        return {}
-    return ch[0] if ch else {}
+    from .tools.model_registry import _load as _mload, _path
+    rows, error = _read_registry(_mload, _path(), "model")
+    ch = [m for m in rows if m.get("status") == "champion"]
+    result = dict(ch[0]) if ch else {}
+    if error:
+        result["registry_error"] = error
+    return result
+
+
+def _validate_score(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("invalid_score: expected numeric score")
+    if not 0 <= value <= 1 or not math.isfinite(value):
+        raise ValueError("invalid_score: expected finite score in [0,1]")
+    return float(value)
 
 
 def _model_score_local(uid: str):
@@ -273,26 +392,24 @@ def _model_score_local(uid: str):
     if not isinstance(data, dict):
         return None
     s = data.get(uid)
-    return float(s) if s is not None else None
+    return _validate_score(s) if uid in data else None
 
 
 def _model_score_remote(uid: str, event: Dict[str, Any]):
     """远程模型服务(FK_ENGINE_MODEL_URL):POST {"uid","event"} ->
-    {"score": 0~1}。失败显式返回 None(无模型信号,不静默拦截/放行)。"""
+    {"score": 0~1}。传输或校验失败向调用方抛出,由组件状态公开降级。"""
     url = os.environ.get(MODEL_URL_ENV)
     if not url:
         return None
-    try:
-        raw = _post_json(url, {"uid": uid, "event": event})
-        s = raw.get("score")
-        return float(s) if s is not None else None
-    except Exception:  # noqa: BLE001 模型服务失败 = 模型信号缺失,规则照常
-        return None
+    raw = _post_json(url, {"uid": uid, "event": event})
+    if not isinstance(raw, dict):
+        raise ValueError("invalid_score: model response must be object")
+    return _validate_score(raw.get("score"))
 
 
 def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
                         use_current_policy: bool = False,
-                        strategy_thresholds: Dict = None) -> Dict:
+                        strategy_thresholds: Dict = None, champion_snapshot=None) -> Dict:
     """R007 模型信号(P0-2):champion 模型真正进入判定路径。
 
     - 无 champion -> 判定不变(只可能随 champion 上线才生效);
@@ -307,25 +424,32 @@ def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
     否则 vote/sequential/weight 一碰到 champion 就被盖回 worst)。
     rule_count_evaluated 相应 +1(R007 是引擎级规则,不属 R001-R006
     的静态规则集)。"""
-    ch = _champion()
-    if not ch:
+    ch = _champion() if champion_snapshot is None else champion_snapshot
+    if ch.get("registry_error"):
+        _component(result, "model_registry", "invalid", "registry_invalid", True)
+        result["components"]["model_registry"].update(ch["registry_error"])
+    if not ch.get("name"):
+        _component(result, "model", "disabled", "no_champion", False)
         return result
     result["model_version"] = "%s %s" % (ch["name"], ch["version"])
     uid = event.get("uid", "")
-    if os.environ.get(MODEL_URL_ENV):
-        # 远程模型服务:失败/无分数与本地无分数语义不同,须区分并打降级标
-        score = _model_score_remote(uid, event)
+    try:
+        score = (_model_score_remote(uid, event) if os.environ.get(MODEL_URL_ENV)
+                 else _model_score_local(uid))
         if score is None:
-            result["model_signal"] = ("champion 已上线但模型服务未返回分数"
-                                      "(FK_ENGINE_MODEL_URL 调用失败或无分数)")
+            _component(result, "model", "unavailable", "missing_score", True)
             result["model_degraded"] = True
+            result["model_signal"] = "champion configured but score missing"
             return result
-    else:
-        score = _model_score_local(uid)
-        if score is None:
-            result["model_signal"] = ("champion 已上线但本地无模型分数"
-                                      "(data/model_scores.json 无此 uid)")
-            return result
+    except Exception as exc:
+        reason = ("invalid_score" if isinstance(exc, ValueError) else
+                  "timeout" if isinstance(exc, TimeoutError) else "model_unavailable")
+        _component(result, "model", "invalid" if isinstance(exc, ValueError) else "unavailable",
+                   reason, True)
+        result["model_degraded"] = True
+        result["model_signal"] = reason
+        return result
+    _component(result, "model", "ok", required=True)
     result["model_score"] = score
     from .tools.policy import active_policy
     from .tools.rules import apply_combine, _hit
@@ -352,7 +476,7 @@ def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
 
 
 def _local_eval(event: Dict[str, Any], use_current_policy: bool,
-                strategy: Dict) -> Dict:
+                strategy: Dict, champion_snapshot=None) -> Dict:
     """本地判定 + active strategy 覆盖 + 模型信号,一次打包。
 
     口径纪律:active strategy 阈值覆盖只在当前口径(use_current_policy=True)
@@ -367,7 +491,10 @@ def _local_eval(event: Dict[str, Any], use_current_policy: bool,
     r = _local_rule_eval(event, use_current_policy=use_current_policy,
                          threshold_overrides=overrides,
                          enabled_rules=rules or None)
-    if strategy:
+    if strategy.get("registry_error"):
+        _component(r, "strategy_registry", "invalid", "registry_invalid", True)
+        r["components"]["strategy_registry"].update(strategy["registry_error"])
+    if strategy.get("strategy_version"):
         r["strategy_version"] = strategy["strategy_version"]
         if use_current_policy:
             r["strategy_thresholds"] = strategy["strategy_thresholds"]
@@ -379,7 +506,20 @@ def _local_eval(event: Dict[str, Any], use_current_policy: bool,
         if strategy.get("strategy_ambiguity"):
             r["strategy_ambiguity"] = strategy["strategy_ambiguity"]
     return _apply_model_signal(r, event, use_current_policy=use_current_policy,
-                               strategy_thresholds=strategy.get("strategy_thresholds"))
+                               strategy_thresholds=strategy.get("strategy_thresholds"),
+                               champion_snapshot=champion_snapshot)
+
+
+def _expected_metadata(result, strategy, champion_snapshot=None):
+    if strategy.get("strategy_version"):
+        result["expected_strategy_version"] = strategy["strategy_version"]
+    if strategy.get("registry_error"):
+        _component(result, "strategy_registry", "invalid", "registry_invalid", False)
+    ch = _champion() if champion_snapshot is None else champion_snapshot
+    if ch.get("name"):
+        result["expected_model_version"] = "%s %s" % (ch["name"], ch["version"])
+    if ch.get("registry_error"):
+        _component(result, "model_registry", "invalid", "registry_invalid", False)
 
 
 def evaluate_event(event: Dict[str, Any],
@@ -389,19 +529,22 @@ def evaluate_event(event: Dict[str, Any],
     P0-2/P0-3 起,本地判定自动携带 active strategy 覆盖与 champion
     模型信号(R007,见 _apply_model_signal)。"""
     strategy = _active_strategy()
+    champion_snapshot = copy.deepcopy(_champion())
     if _overridden():
-        r = _local_eval(event, use_current_policy, strategy)
+        r = _local_eval(event, use_current_policy, strategy, champion_snapshot)
         r["source"] = "local_rules"
         r["source_note"] = ("what-if 覆盖生效,强制本地模拟"
                             "(覆盖参数是本地模拟概念,生产 dry-run 不接收)")
         return annotate_decision(r)
     url = os.environ.get(DRYRUN_URL_ENV)
     if not url:
-        r = _local_eval(event, use_current_policy, strategy)
+        r = _local_eval(event, use_current_policy, strategy, champion_snapshot)
         r["source"] = "local_rules"
         return annotate_decision(r)
-    if not _circuit_allow_remote():
-        r = _local_eval(event, use_current_policy, strategy)
+    circuit_key = (url, "online")
+    lease = _circuit_acquire(circuit_key)
+    if lease is None:
+        r = _local_eval(event, use_current_policy, strategy, champion_snapshot)
         r["source"] = "local_rules_fallback"
         r["degraded"] = True
         r["circuit_open"] = True
@@ -413,28 +556,21 @@ def evaluate_event(event: Dict[str, Any],
             "event": event,
             "use_current_policy": bool(use_current_policy),
         }
-        if strategy:
+        if strategy.get("strategy_version"):
             payload["strategy_version"] = strategy["strategy_version"]
         r = _map_remote(_post_json(url, payload))
-        if strategy and not r.get("strategy_version"):
-            r["strategy_version"] = strategy["strategy_version"]
-        if strategy and strategy.get("strategy_ambiguity"):
-            r["strategy_ambiguity"] = strategy["strategy_ambiguity"]
-        # 远程模式:模型融合由生产引擎负责,本地只附 champion 血缘
-        ch = _champion()
-        if ch:
-            r["model_version"] = "%s %s" % (ch["name"], ch["version"])
-        _circuit_on_success()
+        _expected_metadata(r, strategy, champion_snapshot)
+        _circuit_on_success(circuit_key, lease)
         return annotate_decision(r)
     except Exception as e:  # noqa: BLE001
         # 显式降级:结果必须带 degraded/engine_error,让结论可被审计到
-        _circuit_on_failure()
-        r = _local_eval(event, use_current_policy, strategy)
+        _circuit_on_failure(circuit_key, lease)
+        r = _local_eval(event, use_current_policy, strategy, champion_snapshot)
         r["source"] = "local_rules_fallback"
         r["degraded"] = True
         r["engine_error"] = "%s: %s" % (type(e).__name__, e)
         with _circuit_lock:
-            opened = _circuit["state"] == "open"
+            opened = _circuit_state(circuit_key)["state"] == "open"
         if opened:
             r["circuit_open"] = True
             r["degraded_reason"] = "circuit_open"
@@ -450,17 +586,20 @@ def evaluate_batch(events: List[Dict[str, Any]],
     if not events:
         return []
     strategy = _active_strategy()
+    champion_snapshot = copy.deepcopy(_champion())
     if _overridden() or not os.environ.get(DRYRUN_URL_ENV):
         out = []
         for ev in events:
-            r = _local_eval(ev, use_current_policy, strategy)
+            r = _local_eval(ev, use_current_policy, strategy, champion_snapshot)
             r["source"] = "local_rules"
             out.append(annotate_decision(r))
         return out
-    if not _circuit_allow_remote():
+    circuit_key = (os.environ[DRYRUN_URL_ENV], "batch")
+    lease = _circuit_acquire(circuit_key)
+    if lease is None:
         out = []
         for ev in events:
-            r = _local_eval(ev, use_current_policy, strategy)
+            r = _local_eval(ev, use_current_policy, strategy, champion_snapshot)
             r.update({"source": "local_rules_fallback", "degraded": True,
                       "circuit_open": True, "degraded_reason": "circuit_open",
                       "engine_error": "circuit_open: 远程连续失败,冷却期内不打引擎"})
@@ -471,7 +610,7 @@ def evaluate_batch(events: List[Dict[str, Any]],
             "events": events,
             "use_current_policy": bool(use_current_policy),
         }
-        if strategy:
+        if strategy.get("strategy_version"):
             payload["strategy_version"] = strategy["strategy_version"]
         raw = _post_json(os.environ[DRYRUN_URL_ENV], payload)
         decisions = raw.get("decisions")
@@ -479,24 +618,18 @@ def evaluate_batch(events: List[Dict[str, Any]],
             raise ValueError("批量 dry-run 返回与请求不齐(期望 %d 条,得 %r)"
                              % (len(events), type(decisions).__name__))
         out = [_map_remote(d) for d in decisions]
-        ch = _champion()  # 批量远程同样附 champion 血缘(与单事件口径一致)
         for r in out:
-            if strategy and not r.get("strategy_version"):
-                r["strategy_version"] = strategy["strategy_version"]
-            if strategy and strategy.get("strategy_ambiguity"):
-                r["strategy_ambiguity"] = strategy["strategy_ambiguity"]
-            if ch:
-                r["model_version"] = "%s %s" % (ch["name"], ch["version"])
+            _expected_metadata(r, strategy, champion_snapshot)
             annotate_decision(r)
-        _circuit_on_success()
+        _circuit_on_success(circuit_key, lease)
         return out
     except Exception as e:  # noqa: BLE001
-        _circuit_on_failure()
+        _circuit_on_failure(circuit_key, lease)
         out = []
         with _circuit_lock:
-            opened = _circuit["state"] == "open"
+            opened = _circuit_state(circuit_key)["state"] == "open"
         for ev in events:
-            r = _local_eval(ev, use_current_policy, strategy)
+            r = _local_eval(ev, use_current_policy, strategy, champion_snapshot)
             r.update({"source": "local_rules_fallback", "degraded": True,
                       "engine_error": "%s: %s" % (type(e).__name__, e)})
             if opened:
@@ -510,9 +643,11 @@ def engine_status() -> Dict[str, Any]:
     """当前判定通道:远程 dry-run 还是本地实现。agent 下结论前应先知道
     自己的判定来自哪里(唯一引擎纪律,见 system.md)。"""
     url = os.environ.get(DRYRUN_URL_ENV)
+    with _circuit_lock:
+        state = dict(_circuit_state((url, "online") if url else None))
     circuit = {
-        "state": _circuit["state"],
-        "failures": _circuit["failures"],
+        "state": state["state"],
+        "failures": state["failures"],
         "threshold": _circuit_threshold(),
         "cooldown_s": _circuit_cooldown(),
     }
