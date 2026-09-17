@@ -16,6 +16,7 @@
 import json
 import os
 import getpass
+import hashlib
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -50,9 +51,40 @@ def mutate_pending(fn):
     p = pending_actions_path()
     with file_lock(p):
         items = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+        previous = {a["action_id"] for a in items}
+        counter_path = data_dir() / "proposal_sequence.json"
+        counter = json.loads(counter_path.read_text()) if counter_path.exists() else 0
+        counter = max(counter, max(previous, default=0))
+        # Import historical IDs once; never recycle completed proposals.
+        if not counter_path.exists() and audit_log_path().exists():
+            for line in audit_log_path().read_text().splitlines():
+                historical = json.loads(line).get("action", {}).get("action_id", 0)
+                counter = max(counter, historical)
         result = fn(items)
+        for item in items:
+            if item["action_id"] in previous:
+                continue
+            old_id = item["action_id"]
+            counter += 1
+            item["action_id"] = counter
+            item["revision"] = 1
+            item["proposal_digest"] = _proposal_digest(item)
+            if type(result) is int and result == old_id:
+                result = counter
+            if isinstance(result, dict) and result.get("action_id") == old_id:
+                result["action_id"] = counter
+                if "note" in result:
+                    result["note"] = result["note"].replace("/approve %d" % old_id, "/approve %d" % counter)
+        # Advance before pending write: a failed write burns an ID safely.
+        atomic_write_json(counter_path, counter)
         atomic_write_json(p, items)
         return result
+
+
+def _proposal_digest(action):
+    body = {k: v for k, v in action.items() if k != "proposal_digest"}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False,
+                                     allow_nan=False).encode()).hexdigest()
 
 
 def _limit_violations(values: Dict, current: Dict) -> List[str]:
@@ -90,7 +122,7 @@ def _limit_violations(values: Dict, current: Dict) -> List[str]:
         "仅当研究员明确要求加名单/升黑/加白时才调用;调查、日报、团伙排查"
         "只给文字建议。未点名或要求立即生效/不用审批时运行时硬拒,不进队列。"
         "reason 写清证据,进审计日志。"
-        "white 建议必带 expires_days;gray 未带时按默认观察期提交。"
+        "white 必须带 scope/owner/expires_days(1..30);gray 未带时按默认观察期提交。"
         "同值同色已在名单/队列返回现状;不同色允许提交(灰升黑、黑值申诉加白)。"
     ),
     parameters={
@@ -101,8 +133,10 @@ def _limit_violations(values: Dict, current: Dict) -> List[str]:
             "list": {"type": "string", "enum": list(VALID_LISTS),
                      "description": "black(确凿证据)/ gray(嫌疑观察)/ white(误伤抑制)"},
             "reason": {"type": "string", "description": "证据说明,将写入名单与审计日志"},
+            "scope": {"type": "string", "description": "白名单业务事件类型"},
+            "owner": {"type": "string", "description": "白名单责任人"},
             "expires_days": {"type": "integer", "minimum": 1,
-                             "description": "可选:有效期天数,到期自动失效(白名单强烈建议携带)"},
+                             "description": "有效期天数;白名单必填,范围1..30"},
         },
         "required": ["dimension", "value", "list", "reason"],
     },
@@ -111,18 +145,25 @@ def blacklist_add(dimension: str, value: str, reason: str, expires_days: int = 0
     target_list = kw.get("list")
     if dimension not in VALID_DIMENSIONS or target_list not in VALID_LISTS:
         return {"error": "dimension 必须是 %s 之一,list 必须是 %s 之一" % (VALID_DIMENSIONS, VALID_LISTS)}
+    if target_list == "white":
+        if (type(expires_days) is not int or not 1 <= expires_days <= 30
+                or not str(kw.get("scope", "")).strip()
+                or kw.get("scope") == "*"
+                or not str(kw.get("owner", "")).strip() or not reason.strip()):
+            return {"error": "white requires scope, owner, reason and expiry 1..30 days"}
     # 防重按(维度, 值, 同色)比对:不同色是合法诉求(灰升黑 / 黑值申诉加白),
     # 冲突裁决在规则引擎(黑白并存以黑为准)与人工审批,不在提交入口一刀切。
     # 只看未过期记录(active_records):过期记录在规则引擎里"视为不存在",
     # 若还挡新申请,过期后卷土重来的值就永远无法再次拉黑
-    existing = active_records(dimension, value, lists=(target_list,))
+    existing = active_records(dimension, value, lists=(target_list,), scope=kw.get("scope"))
     if existing:
         return {"status": "already_listed", "records": existing}
 
     def _add(pending):
         dup = [a for a in pending if a.get("kind", "blacklist_add") == "blacklist_add"
                and a["dimension"] == dimension and a["value"] == value
-               and a.get("list") == target_list]
+               and a.get("list") == target_list
+               and a.get("scope") == kw.get("scope")]
         if dup:
             return {"status": "already_pending", "action_id": dup[0]["action_id"]}
         action_id = max((a["action_id"] for a in pending), default=0) + 1
@@ -135,6 +176,8 @@ def blacklist_add(dimension: str, value: str, reason: str, expires_days: int = 0
             "reason": reason,
             "requested_at": _now_iso(),
         }
+        if target_list == "white":
+            entry.update(scope=kw["scope"], owner=kw["owner"])
         note = "已提交待审批,需研究员在 CLI 执行 /approve %d 后生效" % action_id
         if expires_days and expires_days > 0:
             entry["expires_days"] = int(expires_days)
@@ -224,6 +267,7 @@ def threshold_propose(values: Dict, reason: str):
     if bad:
         return {"error": "未知阈值参数: %s" % ", ".join(bad)}
     current = policy.active_policy()
+    baseline = policy.baseline_digest()
     bad = _limit_violations(values, current)
     if bad:
         return {"status": "rejected_rate_limit",
@@ -254,6 +298,7 @@ def threshold_propose(values: Dict, reason: str):
             "kind": "threshold_change",
             "values": values,
             "current": {k: current[k] for k in values},
+            "baseline_digest": baseline,
             "reason": reason,
             "requested_at": _now_iso(),
         }
@@ -367,16 +412,25 @@ def decide(action_id: int, approve: bool, operator: Optional[str] = None) -> Opt
         applied_detail = None
         # 先落盘、后出队:apply 抛异常时申请留在队列可重试。
         if approve:
+            if (kind == "threshold_change" or "proposal_digest" in action) and action.get("proposal_digest") != _proposal_digest(action):
+                raise ValueError("proposal digest mismatch; resubmit proposal")
+            if os.environ.get("FK_ENV", "").lower() in ("prod", "production"):
+                raise ValueError("production activation requires external release controller")
             if kind == "threshold_change":
                 bind = action.get("shadow") or {}
                 if bind.get("artifact_id") or bind.get("sha256"):
                     from .shadow_store import verify_threshold_artifact
-                    verify_threshold_artifact(bind)
+                    body = verify_threshold_artifact(bind)
+                    expected = {k: v for k, v in action["values"].items() if k in policy.OVERRIDABLE}
+                    if body["overrides"] != expected:
+                        raise ValueError("shadow overrides do not match approved values")
                 else:
                     exp = bind.get("expires_at")
                     if exp and exp < _now_iso():
                         raise ValueError("影子证据已过期(%s),请重新提案" % exp)
-                applied_version = policy.apply_change(action)["version"]
+                if any(k in policy.OVERRIDABLE for k in action["values"]) and not bind.get("artifact_id"):
+                    raise ValueError("shadow artifact required")
+                applied_version = policy.apply_change(action, decided_by)["version"]
             elif kind == "appeal_resolve":
                 from .feedback import apply_appeal_decision  # 惰性:防导入环
                 applied_detail = apply_appeal_decision(action)
@@ -408,10 +462,15 @@ def decide(action_id: int, approve: bool, operator: Optional[str] = None) -> Opt
                     "added_at": _now_iso()[:10],
                     "source": "agent_proposed+human_approved",
                 }
+                if action["list"] == "white":
+                    if not (action.get("scope") and action.get("owner") and action.get("reason")
+                            and 1 <= action.get("expires_days", 0) <= 30):
+                        raise ValueError("white requires scope/owner/reason/expiry")
+                    rec.update(scope=action["scope"], owner=action["owner"])
                 if action.get("expires_days"):
                     exp = datetime.now(timezone.utc).timestamp() + action["expires_days"] * 86400
                     rec["expires_at"] = datetime.fromtimestamp(
-                        exp, timezone.utc).strftime("%Y-%m-%d")
+                        exp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ" if action["list"] == "white" else "%Y-%m-%d")
                 records.append(rec)
                 _write_blacklist(records)
         leftover = [a for a in pending if a["action_id"] != action_id]

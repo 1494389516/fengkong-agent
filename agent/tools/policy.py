@@ -19,6 +19,8 @@
 - 模块级依赖只允许 stdlib + datasource:rules 每事件热路径经过这里,禁 pandas。
 """
 import contextvars
+import hashlib
+import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -220,9 +222,17 @@ def latest_baseline_snapshot():
     return None, None
 
 
-def apply_change(action: Dict, approved_by: str = "cli") -> Dict:
+def baseline_digest() -> str:
+    """CAS identity of complete persisted threshold history and default policy."""
+    return hashlib.sha256(json.dumps({"defaults": DEFAULTS, "versions": _versions()},
+                                    sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+
+def apply_change(action: Dict, approved_by: str) -> Dict:
     """actions.decide 批准 threshold_change 后调用:追加新版本并落盘。
     顺带记录批准时刻的人群基线快照,作为未来漂移告警的参照。"""
+    if not approved_by or not approved_by.strip() or approved_by == "cli":
+        raise ValueError("explicit approval principal required")
     snap = None
     try:
         from .featurelib import population_baseline  # 惰性:数据缺失不阻塞审批
@@ -231,6 +241,12 @@ def apply_change(action: Dict, approved_by: str = "cli") -> Dict:
         snap = None
     path = thresholds_path()
     with file_lock(path):
+        if action.get("baseline_digest") != baseline_digest():
+            raise ValueError("baseline changed; resubmit and rerun shadow")
+        from .actions import _limit_violations
+        violations = _limit_violations(action["values"], active_policy())
+        if violations:
+            raise ValueError("invalid proposal: %s" % violations)
         versions = _versions()
         entry = {
             "version": max((v["version"] for v in versions), default=0) + 1,
