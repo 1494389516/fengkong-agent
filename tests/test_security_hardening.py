@@ -143,8 +143,10 @@ class IdempotencyTests(unittest.TestCase):
     def test_disk_store_is_bounded(self):
         from agent.tools.idemp_store import complete, idemp_path
         with mock.patch.dict(os.environ, {"FK_IDEMP_MAX_RECORDS": "2"}, clear=False):
-            for i in range(3):
+            for i in range(2):
                 complete("key-%d" % i, {"action": "pass"}, "fp-%d" % i)
+            with self.assertRaisesRegex(RuntimeError, "capacity"):
+                complete("key-2", {"action": "pass"}, "fp-2")
         records = json.loads(idemp_path().read_text(encoding="utf-8"))
         self.assertEqual(len(records), 2)
 

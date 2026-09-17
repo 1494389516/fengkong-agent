@@ -164,6 +164,10 @@ _pop_cache: Dict[str, Tuple] = {}
 
 
 def _dataset_key() -> Tuple[str, int]:
+    from .datasource import event_snapshot_identity
+    identity = event_snapshot_identity()
+    if identity is not None:
+        return identity
     p = data_dir() / "events_sample.json"
     return (str(p), p.stat().st_mtime_ns)
 
