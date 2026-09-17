@@ -14,6 +14,12 @@
 不是注册工具,模型无法触达。
 """
 import sys
+import argparse
+import getpass
+import os
+from pathlib import Path
+import time
+from contextlib import contextmanager
 
 from agent.core import Agent
 from agent.tools import actions, schemas
@@ -32,8 +38,50 @@ def _fmt_session_usage(agent):
         s["api_calls"], s["prompt"], s["completion"], s["total"], 100.0 * agent.cache_hit_rate())
 
 
-def main():
-    if actions.recover_approval_transaction():
+@contextmanager
+def cli_scope(tenant, dataset, capabilities):
+    """Trusted launcher context; model arguments cannot select authorization."""
+    from agent.tools.capability import RequestScope, request_scope
+    if os.environ.get('FK_ENV', '').lower() in ('prod', 'production'):
+        from agent.tenancy import authenticate, data_context
+        ctx = authenticate('Bearer ' + os.environ.get('FK_AGENT_TOKEN', ''))
+        ctx.require('agent.run')
+        allowed = ctx.attributes.get('capabilities', ['read'])
+        if not isinstance(allowed, list) or any(c not in ('read','simulate','propose','execute') for c in allowed):
+            raise PermissionError('invalid agent capability grant')
+        scope = RequestScope(ctx.principal, ctx.tenant, ctx.dataset, tuple(allowed), ctx.expires_at)
+        with data_context(ctx), request_scope(scope):
+            yield scope
+    else:
+        if not tenant or not dataset or any(c not in ('read','simulate','propose','execute') for c in capabilities):
+            raise ValueError('explicit local tenant, dataset and agent capabilities required')
+        scope = RequestScope('os:%s:%s' % (os.getuid(), getpass.getuser()), tenant,
+                             str(Path(dataset).resolve()), tuple(capabilities), time.time()+3600)
+        previous = {key: os.environ.get(key) for key in ('FK_DATA_DIR','FK_SCOPE_TENANT')}
+        os.environ['FK_DATA_DIR'] = scope.dataset
+        os.environ['FK_SCOPE_TENANT'] = scope.tenant
+        try:
+            with request_scope(scope):
+                yield scope
+        finally:
+            for key, value in previous.items():
+                if value is None: os.environ.pop(key, None)
+                else: os.environ[key] = value
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--tenant', default='local')
+    parser.add_argument('--dataset', default=os.environ.get('FK_DATA_DIR', 'data'))
+    parser.add_argument('--capabilities', default='read,simulate')
+    args = parser.parse_args(argv)
+    with cli_scope(args.tenant, args.dataset, args.capabilities.split(',')):
+        return _session()
+
+
+def _session():
+    production = os.environ.get('FK_ENV', '').lower() in ('prod', 'production')
+    if not production and actions.recover_approval_transaction():
         print("[恢复] 检测到未完成审批事务,已回滚到审批前状态。")
     agent = Agent()
     print("风控分析 agent(模型: %s%s)。" % (
@@ -111,6 +159,9 @@ def main():
                         a["action_id"], kind, a.get("reason", a)))
             continue
         if low.startswith("/approve") or low.startswith("/deny"):
+            if production:
+                print("  [拒绝] 生产审批须通过独立 release controller，Agent 会话不持发布权限。")
+                continue
             approve = low.startswith("/approve")
             parts = user_input.split()
             if len(parts) != 2 or not parts[1].isdigit():

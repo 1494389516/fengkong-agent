@@ -12,10 +12,14 @@ request_fingerprint(参数指纹)/progress/result_path/error。
 测试钩子:FK_JOB_TEST_GATE=1 时执行线程在开始前等待该 job 自己的 Event
 (job_cancel 只释放对应 job) —— 仅 eval 使用,不影响正常路径。
 """
+import fcntl
+from contextvars import ContextVar
 import hashlib
 import json
 import os
 import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,9 +28,140 @@ from typing import Any, Dict, List
 from . import tool
 from .datasource import atomic_write_json, file_lock
 
-JOBS_DIR = Path(__file__).resolve().parent.parent.parent / "out" / "jobs"
+# Optional explicit override for tests; production paths follow the trusted request.
+JOBS_DIR = None
+_worker_jobs_dir = ContextVar("worker_jobs_dir", default=None)
+
+def _jobs_dir():
+    from .datasource import data_dir
+    return JOBS_DIR or _worker_jobs_dir.get() or data_dir() / "out" / "jobs"
+
 JOB_TYPES = ("backtest", "scan", "replay", "model_eval", "dataset_build")
 STATUSES = ("queued", "running", "success", "failed", "cancelled")
+
+MAX_WORKERS = 4
+MAX_PENDING = 64
+LEASE_SECONDS = 60
+MAX_ATTEMPTS = 3
+_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="fk-job")
+_schedule_mu = threading.Lock()
+_scheduled = set()
+_CHILD = {"backtest": "rule_backtest", "scan": "scan_all",
+          "replay": "strategy_replay", "model_eval": "model_eval",
+          "dataset_build": "build_dataset"}
+
+
+def _job_lock(job_id):
+    return file_lock(_jobs_dir() / ("job_%06d.lock" % job_id))
+
+
+def _authorized(job):
+    from .capability import get_scope
+    scope = get_scope()
+    owner = job.get("authorization", {})
+    return (scope is not None and scope.expires_at > time.time()
+            and all(getattr(scope, k) == owner.get(k)
+                    for k in ("principal", "tenant", "dataset")))
+
+
+def recover_jobs():
+    """Claim persisted work with fencing; invoke at worker startup or poll.
+
+    Interrupted mutations are dead-lettered, never blindly retried.
+    """
+    with _schedule_mu, file_lock(_jobs_dir() / ".workers"):
+        active = sum(1 for path in _jobs_dir().glob("job_*.json")
+                     if ".result." not in path.name and
+                     (lambda j: j.get("status") == "running" and j.get("lease_until", 0) > time.time())(json.loads(path.read_text())))
+        for path in sorted(_jobs_dir().glob("job_*.json")):
+            if ".result." in path.name:
+                continue
+            job = json.loads(path.read_text(encoding="utf-8"))
+            jid = job["job_id"]
+            if (str(_jobs_dir()), jid) in _scheduled or len(_scheduled) >= MAX_WORKERS:
+                continue
+            if job.get("status") not in ("queued", "running"):
+                continue
+            with _job_lock(jid):
+                job = _load_job(jid)
+                if job.get("status") == "running" and job.get("lease_until", 0) > time.time():
+                    continue
+                if job.get("status") not in ("queued", "running"):
+                    continue
+                if (job.get("attempts", 0) >= MAX_ATTEMPTS or
+                        (job.get("status") == "running" and job["type"] in ("model_eval", "dataset_build"))):
+                    job.update(status="failed", dead_letter=True,
+                               error="interrupted mutation or retry budget exhausted", finished_at=_now_iso())
+                    _save_job(job)
+                    continue
+                if active >= MAX_WORKERS:
+                    continue
+                token = uuid.uuid4().hex
+                job.update(status="running", lease_token=token,
+                           lease_until=time.time() + LEASE_SECONDS,
+                           attempts=job.get("attempts", 0) + 1)
+                _save_job(job)
+            active += 1
+            _scheduled.add((str(_jobs_dir()), jid))
+            _pool.submit(_run_claim, jid, job, token, _jobs_dir())
+
+
+def _run_claim(jid, job, token, directory=None):
+    directory_token = _worker_jobs_dir.set(directory)
+    from .capability import RequestScope, request_scope
+    from .packs import request_pack
+    stop = threading.Event()
+    def heartbeat():
+        _worker_jobs_dir.set(directory)
+        while not stop.wait(LEASE_SECONDS / 3):
+            with _job_lock(jid):
+                current = _load_job(jid)
+                if current.get("lease_token") != token or current.get("status") != "running":
+                    return
+                current["lease_until"] = time.time() + LEASE_SECONDS
+                _save_job(current)
+    heart = threading.Thread(target=heartbeat, daemon=True)
+    heart.start()
+    slot = None
+    try:
+        # OS locks survive stale leases and release on process death. Even a hung
+        # worker cannot allow replacement processes to exceed the shared quota.
+        while slot is None:
+            current = _load_job(jid)
+            if current.get("status") != "running" or current.get("lease_token") != token:
+                return
+            for index in range(MAX_WORKERS):
+                handle = open(_jobs_dir() / (".worker_slot_%d" % index), "a+")
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    slot = handle
+                    break
+                except BlockingIOError:
+                    handle.close()
+            if slot is None:
+                stop.wait(0.1)
+        scope = RequestScope(**job["authorization"])
+        with request_scope(scope, job.get("user_text", "")), request_pack(job.get("pack", "full")):
+            _execute(jid, job["type"], job["params"], token)
+    except Exception as exc:
+        with _job_lock(jid):
+            current = _load_job(jid)
+            if current.get("lease_token") == token and current.get("status") == "running":
+                current.update(status="failed", error=str(exc), finished_at=_now_iso())
+                _save_job(current)
+    finally:
+        stop.set()
+        heart.join(timeout=1)
+        if slot is not None:
+            fcntl.flock(slot.fileno(), fcntl.LOCK_UN)
+            slot.close()
+        with _schedule_mu:
+            _scheduled.discard((str(_jobs_dir()), jid))
+        try:
+            recover_jobs()
+        finally:
+            _worker_jobs_dir.reset(directory_token)
+
 
 _gates: Dict[int, threading.Event] = {}
 _gates_mu = threading.Lock()
@@ -44,11 +179,11 @@ def _gate_for(job_id: int) -> threading.Event:
 def _next_job_id() -> int:
     """跨进程/重启安全:job id 从既有文件推导。分配时立刻占位文件,
     避免并发扫目录得到同一个 id。"""
-    JOBS_DIR.mkdir(parents=True, exist_ok=True)
-    lockp = JOBS_DIR / ".id.lock"
+    _jobs_dir().mkdir(parents=True, exist_ok=True)
+    lockp = _jobs_dir() / ".id.lock"
     with file_lock(lockp):
         ids = []
-        for p in JOBS_DIR.glob("job_*.json"):
+        for p in _jobs_dir().glob("job_*.json"):
             try:
                 ids.append(int(p.stem.split("_")[1]))
             except (ValueError, IndexError):
@@ -63,7 +198,7 @@ def _now_iso() -> str:
 
 
 def _job_path(job_id: int) -> Path:
-    return JOBS_DIR / ("job_%06d.json" % job_id)
+    return _jobs_dir() / ("job_%06d.json" % job_id)
 
 
 def _request_fingerprint(params: Dict) -> str:
@@ -80,60 +215,48 @@ def _save_job(job: Dict) -> None:
     atomic_write_json(_job_path(job["job_id"]), job)
 
 
-def _execute(job_id: int, job_type: str, params: Dict) -> None:
-    """在线程里执行任务,更新状态与产物路径。"""
-    job = _load_job(job_id)
-    job["status"] = "running"
-    job["started_at"] = _now_iso()
-    job["progress"] = 0
-    _save_job(job)
+def _execute(job_id: int, job_type: str, params: Dict, lease_token=None) -> None:
+    """Persist the full result and fence stale workers from committing."""
+    with _job_lock(job_id):
+        job = _load_job(job_id)
+        if job.get("status") == "cancelled" or (lease_token and job.get("lease_token") != lease_token):
+            return
+        job.update(status="running", started_at=_now_iso(), progress=0)
+        _save_job(job)
     if os.environ.get("FK_JOB_TEST_GATE") == "1":
         _gate_for(job_id).wait(timeout=30)
-    job = _load_job(job_id)
-    if job.get("status") == "cancelled":  # cancel 在启动前标记
-        job["finished_at"] = _now_iso()
-        _save_job(job)
-        return
     try:
-        if job_type == "backtest":
-            result = __import__("agent.tools", fromlist=["dispatch"]).dispatch(
-                "rule_backtest", params)
-        elif job_type == "scan":
-            result = __import__("agent.tools", fromlist=["dispatch"]).dispatch(
-                "scan_all", params)
-        elif job_type == "replay":
+        from . import dispatch
+        if _load_job(job_id).get("status") == "cancelled":
+            return
+        if job_type == "replay":
+            from .capability import enforce
+            denied = enforce(_CHILD[job_type], True)
+            if denied:
+                raise PermissionError(denied)
             from ..replay import replay_batch
             from .datasource import load_events
-            events = load_events()
-            result = replay_batch(events, **params)
-            result = {"records": len(result),
-                      "first": result[0] if result else None}
-        elif job_type == "model_eval":
-            result = __import__("agent.tools", fromlist=["dispatch"]).dispatch(
-                "model_eval", params)
-        elif job_type == "dataset_build":
-            result = __import__("agent.tools", fromlist=["dispatch"]).dispatch(
-                "build_dataset", params)
+            result = replay_batch(load_events(), **params)
         else:
-            raise ValueError("未知任务类型: %s" % job_type)
-        job = _load_job(job_id)
-        if job.get("status") == "cancelled":
-            # 运行中收到取消:不落结果,取消优先(竞态防护)
-            job["finished_at"] = _now_iso()
+            result = dispatch(_CHILD[job_type], params, projection=False)
+        if isinstance(result, dict) and (result.get("error") or result.get("status") in ("failed", "error")):
+            raise RuntimeError(result.get("error") or "tool failed")
+        with _job_lock(job_id):
+            job = _load_job(job_id)
+            if job.get("status") == "cancelled" or (lease_token and job.get("lease_token") != lease_token):
+                return
+            path = _jobs_dir() / ("job_%06d.result.json" % job_id)
+            atomic_write_json(path, result)
+            job.update(status="success", progress=1, result_path=str(path),
+                       result_status="success", finished_at=_now_iso())
             _save_job(job)
-            return
-        job["status"] = "success"
-        job["progress"] = 1
-        job["result_path"] = str(JOBS_DIR / ("job_%06d.result.json" % job_id))
-        atomic_write_json(JOBS_DIR / ("job_%06d.result.json" % job_id), result)
-    except Exception as e:  # noqa: BLE001 任务失败落 error,不中断其他 job
-        job = _load_job(job_id)
-        if job.get("status") != "cancelled":  # 已取消的 job 不写 failed
-            job["status"] = "failed"
-            job["error"] = "%s: %s" % (type(e).__name__, e)
-    finally:
-        job["finished_at"] = _now_iso()
-        _save_job(job)
+    except Exception as exc:
+        with _job_lock(job_id):
+            job = _load_job(job_id)
+            if job.get("status") != "cancelled" and (not lease_token or job.get("lease_token") == lease_token):
+                job.update(status="failed", result_status="error",
+                           error="%s: %s" % (type(exc).__name__, exc), finished_at=_now_iso())
+                _save_job(job)
 
 
 @tool(
@@ -157,25 +280,47 @@ def _execute(job_id: int, job_type: str, params: Dict) -> None:
 def job_submit(type: str, params: Dict = None):
     if type not in JOB_TYPES:
         return {"error": "未知任务类型: %s(可用 %s)" % (type, JOB_TYPES)}
+    from .capability import enforce, get_scope, get_user_text
+    from .packs import current, allows
+    denied = enforce("job_submit", True) or enforce(_CHILD[type], True)
+    if denied or not allows(_CHILD[type]):
+        return {"error": denied or "child tool pack denied"}
+    scope = get_scope()
+    if scope is None:
+        return {"error": "missing authorization"}
     params = params or {}
-    job_id = _next_job_id()
-    job = {
-        "job_id": job_id,
-        "type": type,
-        "params": params,
-        "status": "queued",
-        "created_at": _now_iso(),
-        "started_at": None,
-        "finished_at": None,
-        "request_fingerprint": _request_fingerprint(params),
-        "progress": 0,
-        "result_path": None,
-        "error": None,
-    }
-    _save_job(job)
-    t = threading.Thread(target=_execute, args=(job_id, type, params),
-                         daemon=True)
-    t.start()
+    _jobs_dir().mkdir(parents=True, exist_ok=True)
+    with file_lock(_jobs_dir() / ".budget.lock"):
+        for reservation in _jobs_dir().glob("job_*.json"):
+            if ".result." not in reservation.name:
+                rec = json.loads(reservation.read_text())
+                if rec.get("status") == "allocating":
+                    rec.update(status="failed", dead_letter=True, error="interrupted allocation")
+                    _save_job(rec)
+        pending = sum(1 for p in _jobs_dir().glob("job_*.json")
+                      if ".result." not in p.name and
+                      json.loads(p.read_text()).get("status") in ("allocating", "queued", "running"))
+        if pending >= MAX_PENDING:
+            return {"error": "job backlog budget exhausted"}
+        job_id = _next_job_id()
+        job = {
+            "job_id": job_id,
+            "type": type,
+            "authorization": scope.snapshot(),
+            "user_text": get_user_text(),
+            "pack": current(),
+            "params": params,
+            "status": "queued",
+            "created_at": _now_iso(),
+            "started_at": None,
+            "finished_at": None,
+            "request_fingerprint": _request_fingerprint(params),
+            "progress": 0,
+            "result_path": None,
+            "error": None,
+        }
+        _save_job(job)
+    recover_jobs()
     return {"status": "queued", "job_id": job_id, "type": type}
 
 
@@ -195,9 +340,11 @@ def job_submit(type: str, params: Dict = None):
 )
 def job_status(job_id: int):
     job = _load_job(job_id)
-    if not job:
-        return {"error": "任务不存在: #%d" % job_id}
-    return job
+    if not job or not _authorized(job):
+        return {"error": "任务不存在或无权限: #%d" % job_id}
+    recover_jobs()
+    job = _load_job(job_id)
+    return {k: v for k, v in job.items() if k not in ("authorization", "user_text")}
 
 
 @tool(
@@ -215,8 +362,8 @@ def job_status(job_id: int):
 )
 def job_result(job_id: int):
     job = _load_job(job_id)
-    if not job:
-        return {"error": "任务不存在: #%d" % job_id}
+    if not job or not _authorized(job):
+        return {"error": "任务不存在或无权限: #%d" % job_id}
     if job["status"] != "success":
         return {"status": job["status"], "error": job.get("error"),
                 "note": "任务未成功,无产物"}
@@ -240,9 +387,14 @@ def job_result(job_id: int):
     },
 )
 def job_cancel(job_id: int):
+    with _job_lock(job_id):
+        return _cancel_locked(job_id)
+
+
+def _cancel_locked(job_id):
     job = _load_job(job_id)
-    if not job:
-        return {"error": "任务不存在: #%d" % job_id}
+    if not job or not _authorized(job):
+        return {"error": "任务不存在或无权限: #%d" % job_id}
     if job["status"] in ("success", "failed"):
         return {"error": "任务已终态(%s),不可取消" % job["status"]}
     if job["status"] == "cancelled":

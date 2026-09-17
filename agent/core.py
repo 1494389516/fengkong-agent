@@ -17,6 +17,7 @@ MAX_TOOL_ROUNDS 防止模型陷入无限调工具的循环。
 """
 import json
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,6 +74,7 @@ def _extract_usage(resp) -> Dict[str, int]:
 
 class Agent:
     def __init__(self):
+        self._ask_lock = threading.Lock()
         # 惰性导入:离线评估要单测 ⑤/⑥ 压缩逻辑(Agent.__new__ 构造),
         # 不能让"导入 core"就强依赖 openai 包
         from .llm import load_config, make_client
@@ -103,7 +105,6 @@ class Agent:
         from .versioning import snapshot as _ver_snapshot
         # 默认 analyst:日常 Copilot 不把治理/Job/实验 schema 随行
         self.tool_pack = _packs.env_default()
-        _packs.set_active_pack(self.tool_pack)
         self._versions = _ver_snapshot()
 
     # ③ 案例隔离:清空对话历史只留 system,让下一个案例在干净上下文里跑。
@@ -111,12 +112,15 @@ class Agent:
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": self._system}]
         self._asks_since_ckpt = 0
+        if getattr(self, "_privacy", False):
+            self._tok = Tokenizer()
 
     def set_pack(self, pack: str) -> dict:
         """切换工具包并 reset:schema 前缀变了,不 reset 会把旧工具结果留在历史上。"""
         from .tools import packs as _packs
         from .versioning import snapshot as _ver_snapshot
-        info = _packs.set_active_pack(pack)
+        name = _packs.normalize(pack)
+        info = {"pack": name, "tool_count": len(_packs.tool_names(name))}
         self.tool_pack = info["pack"]
         self._versions = _ver_snapshot()
         self.reset()
@@ -167,6 +171,9 @@ class Agent:
         user_pos = [i for i, m in enumerate(self.messages) if m["role"] == "user"]
         cut = user_pos[-1] if user_pos else len(self.messages)
         body = self.messages[1:cut]
+        from .tools.capability import investigation_state
+        if investigation_state() is not None:
+            return False  # Task LLM calls must all pass the explicit token budget.
         if len(body) < 2:  # 没什么可压的,别浪费一次 LLM 调用
             return False
         convo = "\n".join(
@@ -235,16 +242,31 @@ class Agent:
                 "tool_latency_ms": [[n, round(t, 1)] for n, t in tool_times],
                 "budget_compacted": compacted,
             }
+            from .tools.datasource import output_dir
+            from .tools.capability import get_scope
+            from .tenancy import current_context
+            if get_scope() is not None or current_context() is not None or os.environ.get("FK_AUTH_CONFIG"):
+                self._run_log_path = output_dir() / "agent_runs.jsonl"
+            elif not getattr(self, "_run_log_path", None):
+                self._run_log_path = output_dir() / "agent_runs.jsonl"
             self._run_log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._run_log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except Exception:  # noqa: BLE001
             pass
 
-    def ask(self, user_input: str,
+    def ask(self, user_input: str, on_tool=None, on_usage=None, on_notice=None, *, scope=None) -> str:
+        if not self._ask_lock.acquire(blocking=False):
+            raise RuntimeError("concurrent asks on one Agent are forbidden; use separate instances")
+        try:
+            return self._ask_scoped(user_input, on_tool, on_usage, on_notice, scope=scope)
+        finally:
+            self._ask_lock.release()
+
+    def _ask_scoped(self, user_input: str,
             on_tool: Optional[Callable] = None,
             on_usage: Optional[Callable] = None,
-            on_notice: Optional[Callable] = None) -> str:
+            on_notice: Optional[Callable] = None, *, scope=None) -> str:
         """发送一轮用户输入,返回最终文本回答。
 
         on_tool(name, args)  —— CLI 实时展示工具调用。
@@ -253,13 +275,42 @@ class Agent:
         """
         # propose 硬门看的是用户原话,必须在进 LLM / 脱敏之前挂上。
         from .tools import ask_state, capability as _cap_mod
-        _cap_mod.set_user_text(user_input)
-        ask_state.begin_ask()
-        try:
-            return self._ask_loop(user_input, on_tool, on_usage, on_notice)
-        finally:
-            ask_state.end_ask()
-            _cap_mod.clear_user_text()
+        from .tools.packs import request_pack
+        # Validate before exposing any previous conversation to the model.
+        if scope is not None:
+            import math
+            valid = (isinstance(scope, _cap_mod.RequestScope)
+                     and all(isinstance(v, str) and v.strip()
+                             for v in (scope.principal, scope.tenant, scope.dataset))
+                     and isinstance(scope.expires_at, (int, float))
+                     and not isinstance(scope.expires_at, bool)
+                     and math.isfinite(scope.expires_at)
+                     and scope.expires_at > time.time()
+                     and isinstance(scope.capabilities, (tuple, list, frozenset))
+                     and all(isinstance(name, str) for name in scope.capabilities))
+            if not valid:
+                self.reset()
+                self._scope_identity = None
+                raise PermissionError("missing or expired request scope identity")
+        identity = (scope.principal, scope.tenant, scope.dataset,
+                    tuple(sorted(scope.capabilities)), scope.expires_at) if scope else None
+        with _cap_mod.request_scope(scope, user_input), request_pack(getattr(self, "tool_pack", "analyst")):
+            if scope is not None:
+                from .tools.datasource import data_dir
+                try:
+                    data_dir()  # Enforce the deployment tenant and dataset binding now.
+                except PermissionError:
+                    self.reset()
+                    self._scope_identity = None
+                    raise
+            if getattr(self, "_scope_identity", None) != identity:
+                self.reset()
+            self._scope_identity = identity
+            ask_state.begin_ask()
+            try:
+                return self._ask_loop(user_input, on_tool, on_usage, on_notice)
+            finally:
+                ask_state.end_ask()
 
     def _ask_loop(self, user_input: str,
                   on_tool: Optional[Callable],
@@ -276,7 +327,7 @@ class Agent:
         tool_times: List[tuple] = []
         latency = {"total_ms": 0.0, "llm_ms": 0.0, "tool_ms": 0.0}
         _t0 = time.monotonic()  # P1-7:延迟预算的计量起点
-        for _ in range(MAX_TOOL_ROUNDS):
+        for _ in range(min(MAX_TOOL_ROUNDS, getattr(self, "max_rounds", MAX_TOOL_ROUNDS))):
             self._trim_tool_messages()  # ④ 发送前裁剪
             if (CONTEXT_EST_TOKEN_BUDGET > 0 and not compacted_this_ask
                     and self._estimate_context_tokens() > CONTEXT_EST_TOKEN_BUDGET):
@@ -288,13 +339,28 @@ class Agent:
                     on_notice("上下文估算超 %d tokens,已强制压缩(⑥ 兜底)"
                               % CONTEXT_EST_TOKEN_BUDGET)
             _llm_t0 = time.monotonic()
+            from .tools.capability import investigation_state
+            task = investigation_state()
+            request_tools = tools.schemas(strict=self.strict_mode, pack=getattr(self, "tool_pack", "full"))
+            extra = {}
+            if task is not None:
+                # UTF-8 bytes plus envelope overhead upper-bounds ordinary BPE
+                # input tokens without depending on a provider-specific tokenizer.
+                encoded = json.dumps({"messages": self.messages, "tools": request_tools}, ensure_ascii=False).encode("utf-8")
+                prompt_bound = len(encoded) + 128 * (len(self.messages) + len(request_tools) + 1)
+                remaining = task['snapshot']['budget']['max_tokens'] - task['tokens']
+                if remaining <= prompt_bound:
+                    raise PermissionError("investigation token budget exhausted before LLM request")
+                extra['max_tokens'] = min(2048, remaining - prompt_bound)
             resp = self.client.chat.completions.create(
-                model=self.model,
-                messages=self.messages,
-                tools=tools.schemas(
-                    strict=self.strict_mode,
-                    pack=getattr(self, "tool_pack", "full")),
-            )
+                model=self.model, messages=self.messages, tools=request_tools, **extra)
+            if task is not None:
+                actual = _extract_usage(resp)
+                charged = actual['prompt'] + actual['completion']
+                # Missing usage cannot create free requests.
+                task['tokens'] += max(charged, prompt_bound + extra['max_tokens'])
+                if task['tokens'] > task['snapshot']['budget']['max_tokens']:
+                    raise PermissionError("investigation token budget exceeded")
             latency["llm_ms"] += (time.monotonic() - _llm_t0) * 1000
             usage = _extract_usage(resp)  # ①
             self._accumulate(usage)
@@ -338,7 +404,7 @@ class Agent:
                 tools_used.append(name)
                 # ⑦ 工具结果先按 JSON 字段结构化脱敏,再用正则扫自由文本。
                 # 只做后一层会漏掉邮箱/UUID/公司自定义 uid 等未知格式。
-                safe_result = self._tok.tokenize_data(result) if self._privacy else result
+                safe_result = self._tok.project_tool_result(name, result) if self._privacy else result
                 content = json.dumps(safe_result, ensure_ascii=False, default=str)
                 if self._privacy:
                     content = self._tok.tokenize(content)

@@ -1,0 +1,12 @@
+{
+  "replace-with-64-hex-sha256-of-an-expiring-random-token": {
+    "principal": "replace-with-authenticated-subject",
+    "tenant": "a",
+    "app": "app",
+    "data_dir": "/tenant",
+    "source_kind": "operator",
+    "permissions": ["agent.run"],
+    "capabilities": ["read"],
+    "expires_at": 0
+  }
+}

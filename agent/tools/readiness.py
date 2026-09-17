@@ -33,7 +33,8 @@ def _git_commit() -> str:
 
 def _evaluation_status() -> Tuple[str, str]:
     """评估报告必须对应当前 commit/数据/标签/特征指纹,失败与过期都不能当 ok。"""
-    report = ROOT / "out" / "eval_report.md"
+    from .datasource import output_dir
+    report = output_dir() / "eval_report.md"
     if not report.exists():
         return "warn", "report=缺(out/eval_report.md)"
     try:

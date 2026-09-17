@@ -97,7 +97,8 @@ def decision_drift():
     parameters={"type": "object", "properties": {}},
 )
 def agent_behavior_drift():
-    p = ROOT / "out" / "agent_runs.jsonl"
+    from .datasource import output_dir
+    p = output_dir() / "agent_runs.jsonl"
     if not p.exists():
         return {"available": False, "note": "无运行日志(FK_AGENT_RUN_LOG=1 跑几轮)"}
     records = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines()

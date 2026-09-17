@@ -20,6 +20,7 @@ ID 规范(uid 位数/设备指纹格式/内网段豁免等)。边界断言用 lo
 IP 尾断言只排除数字、不排除点号:排除点号时句尾 IP("...203.0.113.66.")
 会整段失配泄漏。宁可多脱敏(把版本号误当 IP)也不能漏。
 """
+import ipaddress
 import hashlib
 import hmac
 import os
@@ -38,11 +39,12 @@ _PATTERNS: List[Tuple[str, "re.Pattern"]] = [
     ("PHONE", re.compile(r"(?<!\d)(?:\+\d{1,3}[- ]?)?\d{3}[- ]?\d{4}[- ]?\d{4}(?!\d)")),
 ]
 
-_TOKEN_RE = re.compile(r"(?:UID|IP|DEV|EMAIL|PHONE|UUID)_[0-9a-f]{8,16}")
+_TOKEN_RE = re.compile(r"(?:UID|IP|DEV|EMAIL|PHONE|UUID|TEXT)_[0-9a-f]{8,16}")
 
 # 结构化工具结果优先按字段名脱敏。正则只能覆盖自由文本,不能把公司的
 # 所有账号格式猜全;字段级处理保证 UUID/邮箱/手机号等未知形态也不出边界。
 _SENSITIVE_KEY_PREFIX = {
+    "accounts": "UID", "ips": "IP", "weak_ips": "IP", "devices": "DEV",
     "uid": "UID", "uids": "UID", "user_id": "UID", "account_id": "UID",
     "reported_uid": "UID", "reporter": "UID", "member_uids": "UID",
     "ip": "IP", "ip_address": "IP", "ip_addresses": "IP",
@@ -80,6 +82,14 @@ class Tokenizer:
         return self._fwd[value]
 
     def tokenize(self, text: str) -> str:
+        def ipv6(match):
+            value = match.group(0)
+            try:
+                ipaddress.IPv6Address(value)
+            except ValueError:
+                return value
+            return self._token("IP", value)
+        text = re.sub(r"(?<![\w:])[0-9a-fA-F:]*:[0-9a-fA-F:.]+(?:%[\w]+)?(?![\w:])", ipv6, text)
         for prefix, pattern in _PATTERNS:
             text = pattern.sub(lambda m, p=prefix: self._token(p, m.group(0)), text)
         return text
@@ -97,15 +107,37 @@ class Tokenizer:
             prefix = "DEV"
         elif prefix is None and normalized.endswith(("_ip", "_ip_address")):
             prefix = "IP"
+        if normalized in ("source", "target") and isinstance(obj, (list, tuple)) and len(obj) == 2:
+            dimension, value = obj
+            if dimension in ("uid", "device_id", "ip"):
+                return [dimension, self._token(_SENSITIVE_KEY_PREFIX[dimension], str(value))]
+        if normalized == "blacklist_hits" and isinstance(obj, str):
+            match = re.fullmatch(r"(uid|device_id|ip)=(.*)\((black|gray|white)\)", obj)
+            if match:
+                dimension, value, label = match.groups()
+                return "%s=%s(%s)" % (dimension, self._token(_SENSITIVE_KEY_PREFIX[dimension], value), label)
+            return "[unrecognized list evidence withheld]"
         if prefix and isinstance(obj, (str, int, float)) and not isinstance(obj, bool):
             return self._token(prefix, str(obj))
         if isinstance(obj, dict):
-            return {k: self.tokenize_data(v, str(k)) for k, v in obj.items()}
+            if obj.get("dimension") in ("uid", "device_id", "ip") and "value" in obj:
+                obj = dict(obj)
+                obj["value"] = self._token(_SENSITIVE_KEY_PREFIX[obj["dimension"]], str(obj["value"]))
+            mapping_prefix = {"known_labels": "UID", "per_account": "UID",
+                              "device_flags": "DEV"}.get(normalized)
+            return {(self._token(mapping_prefix, str(k)) if mapping_prefix else self.tokenize(str(k))):
+                    self.tokenize_data(v, str(k)) for k, v in obj.items()}
         if isinstance(obj, list):
             return [self.tokenize_data(v, key) for v in obj]
         if isinstance(obj, tuple):
             return [self.tokenize_data(v, key) for v in obj]
-        return obj
+        return self.tokenize(obj) if isinstance(obj, str) else obj
+
+
+    def project_tool_result(self, name, obj):
+        """Project through the closed, reviewed output contract for every tool."""
+        from .result_schemas import project
+        return project(self, name, obj)
 
 
 def privacy_enabled() -> bool:

@@ -135,8 +135,10 @@ def feature_rows(uids: List[str]) -> tuple:
 
 def _export(rows: List[Dict], fp: str, side: str) -> Dict:
     """落盘一侧数据集(CSV + manifest),返回路径与摘要。"""
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = OUT_DIR / ("%s_features_%s.csv" % (side, fp))
+    from .datasource import output_dir
+    out_dir = output_dir() / "datasets"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / ("%s_features_%s.csv" % (side, fp))
     with open(csv_path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=["uid", "label"] + list(MODELING_COLUMNS))
         writer.writeheader()
@@ -154,7 +156,7 @@ def _export(rows: List[Dict], fp: str, side: str) -> Dict:
         "point_in_time": "as_of = 账号最后事件 ts(只用当时已知行为)",
         "feature_source": "featurelib.account_features(与规则评估同源)",
     }
-    manifest_path = OUT_DIR / ("%s_features_%s.manifest.json" % (side, fp))
+    manifest_path = out_dir / ("%s_features_%s.manifest.json" % (side, fp))
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1),
                              encoding="utf-8")
     return {"csv_path": str(csv_path), "manifest_path": str(manifest_path),

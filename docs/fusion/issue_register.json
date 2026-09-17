@@ -1,0 +1,1114 @@
+[
+  {
+    "id": "C01",
+    "priority": "P0",
+    "kind": "C",
+    "title": "上报适配器丢失硬件证明与签名上下文字段",
+    "sources": [
+      "transport",
+      "envelope",
+      "proto"
+    ],
+    "observation": "信封含 attestationKeyId/assertion、trustLevel、reAttestationAssertion 等；GrpcReportPayload 及其转换、JSON 输出未传出这些字段。实际 proto 明确声明 attestation 字段。",
+    "impact": "非空 attestationKeyId 被签名绑定时，仅凭该 DTO 服务端无法重建对应签名域；硬件证明无法验证。v3 也依赖被丢弃字段。不是所有 legacy 无证明报告都必然失败。",
+    "remediation": "契约生成 DTO；补齐字段并明确版本兼容；禁止证明要求在转码阶段消失。",
+    "acceptance_test": "Swift create→实际网络字节→服务端验证，全签名版本/有无证明/混淆映射 golden vectors。",
+    "owner": "SDK + contract + collector",
+    "source_urls": [
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Risk/GrpcReportPayload.swift",
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Risk/ReportEnvelope.swift",
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Proto/risk_report.proto"
+    ],
+    "implementation": {
+      "status": "implemented_native_ci_pending",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C02",
+    "priority": "P0",
+    "kind": "C",
+    "title": "两份 Proto 与手写 JSON 不是同一契约",
+    "sources": [
+      "proto",
+      "docproto",
+      "transport",
+      "serve"
+    ],
+    "observation": "实际协议是 flat upload、int64 ts、cloudphone.risk.v1；文档协议是嵌套 envelope、Timestamp、cprisk.v1，且信封缺 session_token；Agent 只接受另一套业务事件和 pass/review/reject。",
+    "impact": "接一个 HTTP 转发无法消除字段、时间、状态及动作语义差异。",
+    "remediation": "独立 risk-contract；ReportUpload、BusinessRiskEvent、DecisionRequest 分型，冻结旧版只读兼容。",
+    "acceptance_test": "消费者契约测试；未知枚举保留；毫秒/秒误用拒绝；challenge 不映射成 review。",
+    "owner": "contract",
+    "source_urls": [
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Proto/risk_report.proto",
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/CloudPhoneRiskKit_%E6%96%87%E6%A1%A3/api/risk_service.proto",
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Risk/GrpcReportPayload.swift",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/serve.py"
+    ],
+    "implementation": {
+      "status": "implemented_native_ci_pending",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C03",
+    "priority": "P1",
+    "kind": "C",
+    "title": "硬件证明强制开关的注释与传输实现不一致",
+    "sources": [
+      "envelope",
+      "transport"
+    ],
+    "observation": "Config 文档称 toGrpcRequestBytes 会拒绝缺硬件证明；所读实现仅重算摘要并序列化，create 强制模式只检查 key ID。",
+    "impact": "调用者以为启用开关就能阻止无 assertion 发送，实际需要额外检查。",
+    "remediation": "保存并传递明确 transport requirements；发送前完整性检查，服务端独立强制策略。",
+    "acceptance_test": "requireHardwareAttestation=true 且 assertion=nil 必须返回结构化错误。",
+    "owner": "SDK",
+    "source_urls": [
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Risk/ReportEnvelope.swift",
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Risk/GrpcReportPayload.swift"
+    ],
+    "implementation": {
+      "status": "implemented_native_ci_pending",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C04",
+    "priority": "P2",
+    "kind": "C",
+    "title": "v3 的 withAttestation/withTrustLevel 静默 no-op",
+    "sources": [
+      "envelope"
+    ],
+    "observation": "这些修改方法遇到 v3 返回 self，调用者无法从返回值直接知道修改被忽略。",
+    "impact": "迁移时误以为已附证明或改信任等级，产生难排查的证明不完整。",
+    "remediation": "不可变 builder 在签名前完成全部字段；旧 API 对 v3 抛出明确错误或废弃。",
+    "acceptance_test": "所有不兼容修改方法有拒绝行为断言。",
+    "owner": "SDK",
+    "source_urls": [
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Risk/ReportEnvelope.swift"
+    ],
+    "implementation": {
+      "status": "not_in_first_batch",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "acceptance_note": "Implementation status is not production closure; see domain evidence and FINAL_VALIDATION.md."
+    }
+  },
+  {
+    "id": "C05",
+    "priority": "P1",
+    "kind": "C",
+    "title": "图标识的隐私声明超出代码保证",
+    "sources": [
+      "graphcollect",
+      "localcluster"
+    ],
+    "observation": "IP、ASN、accountId 使用原值 SHA256；hw salt 是公开固定域标签而非实际租户密钥；local cluster evidence.key 可直接是公网 IP。",
+    "impact": "不是租户隔离的假名化；可枚举输入存在字典反查风险，原始 IP 还可能从证据旁路返回。",
+    "remediation": "服务端受控身份解析，按 tenant/app/domain/keyVersion 做 HMAC 假名化；权限与留存独立治理。",
+    "acceptance_test": "跨租户同输入不同标识；IPv4/IPv6/账号/证据字段出口检测。",
+    "owner": "SDK + identity + privacy",
+    "source_urls": [
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Graph/GraphFeatureCollector.swift",
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Graph/LocalDeviceClusterDetector.swift"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C06",
+    "priority": "P1",
+    "kind": "C",
+    "title": "端侧 local_device_cluster 并没有观察跨设备集合",
+    "sources": [
+      "evaluation",
+      "localcluster"
+    ],
+    "observation": "当前集成每次传入本机 snapshot 的 hwProfileHash；缓存是单进程的最近评估，统计历史不同 hash。",
+    "impact": "distinct_devices 不能据此解释为同 IP 下实际多台设备；更像本机身份漂移。",
+    "remediation": "改名 local_identity_churn；真实跨设备计数放服务端去重实体状态。",
+    "acceptance_test": "一台机多次变化不得报告多台独立设备；多设备聚合由服务端案例验证。",
+    "owner": "SDK + feature plane",
+    "source_urls": [
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Core/CPRiskKitEvaluation.swift",
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Graph/LocalDeviceClusterDetector.swift"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C07",
+    "priority": "P1",
+    "kind": "C",
+    "title": "远端决策实际版本与降级原因被映射丢弃",
+    "sources": [
+      "engine",
+      "serve"
+    ],
+    "observation": "_map_remote 仅保留 hits/action/rule_count/policy_version/source；之后用本地 strategy/champion 版本补齐。",
+    "impact": "远端实际执行版本被本地登记状态替代；远端 pass+degraded 可能成为无降级 pass。",
+    "remediation": "严格保留 authoritative producer metadata；expected_version 与 effective_version 分开；缺字段不能编造。",
+    "acceptance_test": "R01；远端模型版本不同于本地时仍保留远端值。",
+    "owner": "decision adapter",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/engine.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/serve.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C08",
+    "priority": "P0",
+    "kind": "C",
+    "title": "模型服务降级没有进入公共决策降级字段",
+    "sources": [
+      "engine",
+      "serve"
+    ],
+    "observation": "_apply_model_signal 设置 model_degraded；annotate_decision 检查 degraded，serve 只输出 degraded。",
+    "impact": "模型失效被上层当作完整评估；依赖模型的场景可能在保护缺失时继续 pass。",
+    "remediation": "按组件维护 status/reason/required；业务 fallback 显式且经批准。",
+    "acceptance_test": "R02；模型 timeout/invalid_score 与可选模型关闭必须区分。",
+    "owner": "decision runtime",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/engine.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/serve.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C09",
+    "priority": "P1",
+    "kind": "C",
+    "title": "模型分数缺少有限性和范围校验",
+    "sources": [
+      "engine"
+    ],
+    "observation": "float(s) 后直接与阈值比较；NaN 不命中任何阈值；bool、负值、超 1 值没有统一拒绝。",
+    "impact": "非法分数可被解释为低风险或极高风险，而不是数据错误。",
+    "remediation": "严格数值类型、finite、[0,1] 与模型输出 schema 校验；不合法返回 INVALID。",
+    "acceptance_test": "R03；null/NaN/Infinity/字符串/bool/-1/1.1 测试矩阵。",
+    "owner": "model adapter",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/engine.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C10",
+    "priority": "P1",
+    "kind": "C",
+    "title": "历史回放并未固定当时完整模型与策略快照",
+    "sources": [
+      "engine"
+    ],
+    "observation": "_champion 总是当前 champion；本地分数以 uid 查当前文件；历史模式不应用当前 strategy 覆盖但仍附当前 strategy_version。",
+    "impact": "不能声称复现当时真实业务决策；容易污染回测、对账及审批证据。",
+    "remediation": "区分 forensic replay 和 counterfactual；固定 decision_time、model/policy/list/feature/graph snapshots。",
+    "acceptance_test": "切换当前 champion 后，旧 decision_id 复现结果不变。",
+    "owner": "replay + registry",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/engine.py"
+    ],
+    "implementation": {
+      "status": "not_in_first_batch",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "acceptance_note": "Implementation status is not production closure; see domain evidence and FINAL_VALIDATION.md."
+    }
+  },
+  {
+    "id": "C11",
+    "priority": "P1",
+    "kind": "C",
+    "title": "熔断 half-open 未限制试探请求数",
+    "sources": [
+      "engine"
+    ],
+    "observation": "进入 half_open 后分支末尾直接 return True。",
+    "impact": "下游刚进入恢复期时所有并发请求均获准，无法保护恢复。",
+    "remediation": "每 endpoint 试探配额、bulkhead、deadline；批量调查与在线引擎隔离。",
+    "acceptance_test": "R04：32 次申请在未返回探测结果前只放 N 次。",
+    "owner": "runtime resilience",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/engine.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C12",
+    "priority": "P1",
+    "kind": "C",
+    "title": "注册表损坏静默变成无策略/无 champion",
+    "sources": [
+      "engine"
+    ],
+    "observation": "_active_strategy/_champion 捕获读取异常返回空对象；不附配置损坏状态。",
+    "impact": "配置错误被解释为正常无配置，模型保护或策略覆盖可能消失。",
+    "remediation": "读已验证 last-known-good snapshot；错误独立告警，必需依赖失败走明确降级。",
+    "acceptance_test": "损坏 JSON 不得产生 indistinguishable healthy result。",
+    "owner": "registry + runtime",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/engine.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C13",
+    "priority": "P0",
+    "kind": "C",
+    "title": "决策、血缘日志与幂等完成记录不是原子提交",
+    "sources": [
+      "serve",
+      "idemp"
+    ],
+    "observation": "_compute 先写 lineage 与 serve_decisions；_decide 随后 complete 幂等记录。",
+    "impact": "两者之间进程崩溃后重试可重算、重复写审计，甚至用新策略得到不同结果；flock 只能防并发不能封闭这个 crash window。",
+    "remediation": "唯一 request key + decision/event/outbox 同事务；外部动作消费也要幂等。",
+    "acceptance_test": "每个提交边界故障注入；同 request 返回同 decision_id；审计保留唯一执行事实。",
+    "owner": "storage + decision",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/serve.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/idemp_store.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C14",
+    "priority": "P1",
+    "kind": "C",
+    "title": "幂等存储损坏与容量淘汰削弱去重保证",
+    "sources": [
+      "idemp"
+    ],
+    "observation": "_load 将解析失败按空 store 处理；TTL 内也可能因 max records 被淘汰。",
+    "impact": "重试被视为新事件；仅配 TTL 不等于在整个 TTL 内保证去重。",
+    "remediation": "损坏隔离告警；数据库唯一键；明示保留窗口与容量保障。",
+    "acceptance_test": "损坏文件不能静默重算；容量上限下的重复事件行为有契约。",
+    "owner": "storage",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/idemp_store.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C15",
+    "priority": "P1",
+    "kind": "C",
+    "title": "HTTP 参数校验仍存在未捕获异常",
+    "sources": [
+      "serve"
+    ],
+    "observation": "type 是 list/dict 时集合成员判断抛 TypeError；极大整数转 float 抛 OverflowError；校验在 _decide 异常捕获之外。",
+    "impact": "已认证的坏请求可造成连接异常而非 400；这是健壮性问题，不声称无认证远程代码执行。",
+    "remediation": "先类型后范围；统一错误边界；限制整数字面量大小。",
+    "acceptance_test": "R06/R07；所有 JSON 类型与边界值返回稳定 4xx。",
+    "owner": "API",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/serve.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C16",
+    "priority": "P0",
+    "kind": "C",
+    "title": "异步 Job 丢失用户授权上下文，空上下文默认放行",
+    "sources": [
+      "jobs",
+      "capability"
+    ],
+    "observation": "job_submit 创建新 Thread；权限使用 ContextVar user_text；enforce 的条件是 if uttered and not requested。",
+    "impact": "在本次 CPython 3.13.5 复现中，generic submit 的工作线程变空并绕过 export intent gate；实际可达还要求工具包允许 job_submit 和子工具（full）。",
+    "remediation": "任务显式绑定 principal、scope、tenant、dataset 和 expiry；缺身份拒绝；提交权限不推出任意子操作权限。",
+    "acceptance_test": "R05；full 包内仅要求提交任务不得自动取得数据集导出权限。",
+    "owner": "agent security + jobs",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/jobs.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/capability.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C17",
+    "priority": "P0",
+    "kind": "C",
+    "title": "工具包是进程级全局状态，不能隔离多个 Agent",
+    "sources": [
+      "packs",
+      "dispatch"
+    ],
+    "observation": "_active_pack 是全局字符串，set_active_pack 改变全进程；dispatch 读取该当前包。",
+    "impact": "同进程不同会话/子代理切包互相影响；为一个研究任务开 full 可能影响另一个受限任务。",
+    "remediation": "工具包仅 UI 投影；实际授权用请求级显式 capabilities，不使用全局开关。",
+    "acceptance_test": "两个 Agent 并发切换 graph/full，各自权限始终不变。",
+    "owner": "agent runtime",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/packs.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/__init__.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C18",
+    "priority": "P1",
+    "kind": "C",
+    "title": "异步任务是逐任务 daemon thread，不是可恢复队列",
+    "sources": [
+      "jobs"
+    ],
+    "observation": "每次提交启动一个 daemon Thread；文件存状态，但执行没有 lease、重启恢复或固定并发池。",
+    "impact": "突发创建无界线程；进程退出可留下 running 但无人执行的任务。",
+    "remediation": "有界 worker + 持久队列 + lease/heartbeat/retry/DLQ + 任务快照。",
+    "acceptance_test": "杀 worker 后可重新领取；并发和积压受预算约束。",
+    "owner": "jobs",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/jobs.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C19",
+    "priority": "P1",
+    "kind": "C",
+    "title": "工具 error 返回仍可能被 Job 标 success",
+    "sources": [
+      "dispatch",
+      "jobs"
+    ],
+    "observation": "dispatch 捕获异常返回 {error:...}；_execute 收到返回对象就设置 success。",
+    "impact": "任务失败被报成功，后续自动工作流可基于错误产物继续。",
+    "remediation": "ToolResult 显式 status/error/result；任务状态根据 status 转移。",
+    "acceptance_test": "子工具权限拒绝或运行错误必须令 Job failed。",
+    "owner": "jobs + tool gateway",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/__init__.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/jobs.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C20",
+    "priority": "P1",
+    "kind": "C",
+    "title": "LLM 限幅污染了非 LLM 的任务结果产物",
+    "sources": [
+      "dispatch",
+      "jobs"
+    ],
+    "observation": "dispatch 全局 _cap：列表20、字典30、字符串800；jobs 将 dispatch 的结果落盘。",
+    "impact": "完整离线产物可能被截断；这不应成为 evidence store 或 backtest 的数据契约。",
+    "remediation": "分离完整 typed result 与 LLM projection；仅提示上下文限幅，完整产物通过 artifact_id 引用。",
+    "acceptance_test": "1000账号结果落盘1000，LLM可只见摘要20且明确截断。",
+    "owner": "tool gateway + artifacts",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/__init__.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/jobs.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C21",
+    "priority": "P1",
+    "kind": "C",
+    "title": "结构化隐私覆盖不包含全部实际工具形状",
+    "sources": [
+      "privacy",
+      "graph"
+    ],
+    "observation": "accounts/ips/devices 等复数键和 known_labels 的字典键未完整处理；自由文本正则不覆盖任意账号及 IPv6。",
+    "impact": "图工具与真实账号体系接入后可能把原标识发往 LLM；默认开启脱敏不代表所有出口均安全。",
+    "remediation": "按工具 schema 生成 allowlist 投影；字典键改结构化 records；覆盖 IPv6，按 case/tenant 隔离 token。",
+    "acceptance_test": "R09；每个工具出站 payload 做 PII fixtures 测试。",
+    "owner": "privacy + tools",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/privacy.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/graph.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C22",
+    "priority": "P1",
+    "kind": "C",
+    "title": "提案 action_id 会随着 pending 清空而复用",
+    "sources": [
+      "actions"
+    ],
+    "observation": "新编号=max(pending.action_id,default=0)+1；完成后从 pending 删除。",
+    "impact": "旧 /approve 1 命令可能指向后来另一份 #1，产生 ABA 和审计歧义。",
+    "remediation": "全局不可复用 UUID/序列；审批绑定 proposal_id+revision+digest。",
+    "acceptance_test": "R08；延迟旧审批无法批准新提案。",
+    "owner": "governance",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/actions.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C23",
+    "priority": "P1",
+    "kind": "C",
+    "title": "影子产物验真但未强绑定实际获批 values",
+    "sources": [
+      "actions",
+      "shadow"
+    ],
+    "observation": "verify_threshold_artifact 返回含 overrides 的 body；decide 未比较 action.values 与 body.overrides 就 apply_change；代码版本写进 artifact 但核验 loop 不含 git_commit。",
+    "impact": "完整产物哈希不等于“当前获批变更与测试变更相同”；代码语义改变也可能未过期。此处是绑定缺口，不声称攻击者无文件权限即可修改。",
+    "remediation": "签 proposal digest（变更、base bundle、数据、代码、特征、模型、有效期）；审批 CAS 比较；分离签名服务。",
+    "acceptance_test": "改 values/代码版本/基线 policy 任一项必须拒绝旧证据。",
+    "owner": "governance + verification",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/actions.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/shadow_store.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C24",
+    "priority": "P1",
+    "kind": "C",
+    "title": "阈值提案审批缺少基线版本 CAS 与重新校验",
+    "sources": [
+      "actions",
+      "policy",
+      "shadow"
+    ],
+    "observation": "提案时检查当前值与变幅；审批 apply_change 直接追加 action.values；未核对提案依赖的当前策略版本仍相同。",
+    "impact": "两个不冲突参数的提案也可能共同改变策略语义；旧影子不是新组合的安全证据。",
+    "remediation": "基于完整不可变 PolicyBundle 的 compare-and-swap；过期提案重新回测。",
+    "acceptance_test": "审批等待期间基础策略更新，旧提案不得直接发布。",
+    "owner": "governance",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/actions.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/policy.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/shadow_store.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C25",
+    "priority": "P2",
+    "kind": "C",
+    "title": "阈值版本表审批人仍可记录为 cli",
+    "sources": [
+      "actions",
+      "policy"
+    ],
+    "observation": "decide 取得 decided_by，但调用 policy.apply_change(action) 没传 approved_by；其默认值为 cli。",
+    "impact": "审计日志有真实操作者，版本表却显示 cli，两个视图归因不一致。",
+    "remediation": "强制 principal 参数，去掉默认通用身份；由认证通道提供。",
+    "acceptance_test": "策略历史 approved_by 与 approval audit 完全一致。",
+    "owner": "governance",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/actions.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/policy.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C26",
+    "priority": "P1",
+    "kind": "C",
+    "title": "白名单有效期只是建议而非必选",
+    "sources": [
+      "actions",
+      "rules"
+    ],
+    "observation": "expires_days 默认0，white 不强制 TTL；白名单会将 reject 降 review、review 降 pass（并非无条件放行）。",
+    "impact": "永久误伤豁免可能长期存在；缺少业务场景和粒度限制。",
+    "remediation": "白名单强制 scope/reason/owner/expiry，保留硬证据最高限制与冲突规则。",
+    "acceptance_test": "white 无 expiry 或超上限拒绝；过期后所有视图口径一致。",
+    "owner": "policy",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/actions.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/rules.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C27",
+    "priority": "P1",
+    "kind": "C",
+    "title": "图强边与全历史连通分量过度解释关联",
+    "sources": [
+      "graph"
+    ],
+    "observation": "mobile/residential IP 作为强边；_build_graph 不带 as_of 或 window；连通分量解释为疑似团伙。",
+    "impact": "共享公网出口、历史关系和超级节点桥接可能把无关账号并组；cc 不等于欺诈共同体。",
+    "remediation": "弱化 IP 边、按时间/资源度/身份可信度加权；限制高阶扩张；输出关联证据而非直接黑标签。",
+    "acceptance_test": "CGNAT/宿舍/企业/家庭/设备重装反例；as-of 图回放；超大分量预算。",
+    "owner": "graph science",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/graph.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C28",
+    "priority": "P1",
+    "kind": "C",
+    "title": "图名单命中未复用有效期过滤",
+    "sources": [
+      "graph",
+      "rules"
+    ],
+    "observation": "graph 直接 load_blacklist 后筛 black/gray；规则走 active_records。",
+    "impact": "已过期名单可能继续呈现为图风险证据，调查结果和在线规则矛盾。",
+    "remediation": "统一按 as_of 的名单查询服务，展示命中时间和有效期。",
+    "acceptance_test": "同一已过期名单在 rule_eval 和 graph_relations 均不作为有效命中。",
+    "owner": "graph + list service",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/graph.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/rules.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "C29",
+    "priority": "P2",
+    "kind": "C",
+    "title": "SDK 决策适配器重建引擎并丢弃部分输入能力",
+    "sources": [
+      "adapter"
+    ],
+    "observation": "decide 创建新 RiskDetectionEngine(customProviders:[:])，snapshot 转换只带 device/deviceID/network/behavior/jailbreak，extraSignals=[]。",
+    "impact": "注入引擎的自定义 Provider 或快照额外上下文无法经此适配器等价传递；与主 evaluateImpl 路径不一致。",
+    "remediation": "在保留 legacy 期间显式 capability contract；后续移除业务裁决职责，仅保留采集。",
+    "acceptance_test": "同一全量证据经主路径和适配器保留相同观测，或明确声明不支持。",
+    "owner": "SDK",
+    "source_urls": [
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Decision/DecisionEngineAdapter.swift"
+    ],
+    "implementation": {
+      "status": "not_in_first_batch",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "acceptance_note": "Implementation status is not production closure; see domain evidence and FINAL_VALIDATION.md."
+    }
+  },
+  {
+    "id": "G01",
+    "priority": "P0",
+    "kind": "G",
+    "title": "实时 HTTP 输入没有接入在线特征状态",
+    "sources": [
+      "serve",
+      "features",
+      "datasource"
+    ],
+    "observation": "所读 serve 路径评估后只记血缘与决策；featurelib 从 events_sample.json 构建历史索引。",
+    "impact": "独立运行该骨架不代表本次接入的真实行为能影响下一次速度规则；不能把会返回 HTTP 判定等同于事件闭环。",
+    "remediation": "真实业务事件入库/状态更新，定义同键顺序、幂等与 read-your-writes；分离端侧报告与业务事件。",
+    "acceptance_test": "连续真实 coupon_claim 后，下一请求窗口计数正确变化且重复事件不重复计数。",
+    "owner": "feature plane",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/serve.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/featurelib.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/datasource.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "G02",
+    "priority": "P0",
+    "kind": "G",
+    "title": "多租户身份、实体和请求域尚未成为契约",
+    "sources": [
+      "serve",
+      "idemp",
+      "features",
+      "graph",
+      "packs"
+    ],
+    "observation": "当前按单数据目录/全局工具包运行；事件 key 只依赖 event_id，图按 uid/device/ip。",
+    "impact": "不能原样扩为多租户；不能把尚不存在的多租户部署问题说成已发生数据泄漏。",
+    "remediation": "认证上下文导出 tenant/app；所有 ID/缓存/事件/图/任务/工件分区；行级授权查询。",
+    "acceptance_test": "不同租户同 uid/event_id 互不影响；跨域工具查询拒绝。",
+    "owner": "identity + platform",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/serve.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/idemp_store.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/featurelib.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/graph.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/packs.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md",
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log"
+    }
+  },
+  {
+    "id": "G03",
+    "priority": "P0",
+    "kind": "G",
+    "title": "SDK 与 Agent 都包含裁决实现，需要明确业务裁决权",
+    "sources": [
+      "evaluation",
+      "adapter",
+      "engine",
+      "serve"
+    ],
+    "observation": "SDK 实际生成 internalAction 与 final score；Agent 包含规则、模型融合与在线 serve。",
+    "impact": "直接拼接会形成多个动作语义与治理中心，不等于已有漏洞但阻塞统一平台。",
+    "remediation": "SDK LocalAssessment 仅观测/本地自保护；服务端 Decision Plane 唯一业务裁决；Agent 只读/模拟/提案。",
+    "acceptance_test": "修改 LLM 输出或 SDK finalAction 不能改变服务端已签发的业务决策。",
+    "owner": "architecture",
+    "source_urls": [
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Core/CPRiskKitEvaluation.swift",
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Decision/DecisionEngineAdapter.swift",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/engine.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/serve.py"
+    ],
+    "implementation": {
+      "status": "not_in_first_batch",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "acceptance_note": "Implementation status is not production closure; see domain evidence and FINAL_VALIDATION.md."
+    }
+  },
+  {
+    "id": "G04",
+    "priority": "P1",
+    "kind": "G",
+    "title": "事件时间语义必须区分受信业务时间与端侧报告时间",
+    "sources": [
+      "serve",
+      "features"
+    ],
+    "observation": "serve 防回拨把 ts 替为 received_at，并将原值放 source_ts。",
+    "impact": "对端侧不可信时间合理；若直接用于可信业务队列的延迟回放，会把发生时间与到达时间混淆。",
+    "remediation": "observed_at/occurred_at/received_at/decision_at 分开；按来源验证业务时间，point-in-time 另含 recorded_at。",
+    "acceptance_test": "可信迟到事件与恶意端侧回拨分别处理，历史窗口不穿越。",
+    "owner": "contracts + features",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/serve.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/featurelib.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "G05",
+    "priority": "P1",
+    "kind": "G",
+    "title": "端侧身份 hash 与硬件相似性是两个不同用途",
+    "sources": [
+      "graphcollect"
+    ],
+    "observation": "hwProfileHash 的原像含 deviceID，最终 SHA256；相同机型不同 deviceID 仍得到不同摘要。",
+    "impact": "可用作精确键，但不能据 hash 距离做设备相似性/流形/社区检测。",
+    "remediation": "分离安装实例键、服务端解析设备实体、非唯一硬件属性向量、关系边及置信度。",
+    "acceptance_test": "同机型不同设备不合并身份；相似性算法读取可解释属性向量。",
+    "owner": "identity + algorithms",
+    "source_urls": [
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Graph/GraphFeatureCollector.swift"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "G06",
+    "priority": "P1",
+    "kind": "G",
+    "title": "生产级发布需要完整 bundle 状态机而非只审批文件变更",
+    "sources": [
+      "actions",
+      "policy",
+      "engine"
+    ],
+    "observation": "已有审批、影子产物、策略/模型登记，是可复用资产；阈值审批路径仍直接 apply_change。",
+    "impact": "缺少一个覆盖端云特征版本、模型、规则、挑战、fallback 的统一发布对象和强制发布门禁。",
+    "remediation": "Proposal→Validated→Shadow→Approved→Canary→Active；rollback 生成新的激活事件；KMS 发布主体与 Agent 隔离。",
+    "acceptance_test": "Agent 无生产写凭据；审批失败、影子失败、canary 误伤上升不得激活。",
+    "owner": "control plane",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/actions.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/tools/policy.py",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/agent/engine.py"
+    ],
+    "implementation": {
+      "status": "implemented_automated_acceptance_pass",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "tests": "tests/test_completion_* + original regressions; evidence/agent-pytest.log and agent-offline-eval.log",
+      "acceptance_note": "Code acceptance is distinct from production/device acceptance. See current completion evidence; previous partial notes are historical.",
+      "continuation_agent_sha": "d034f021d7a24b906e68aee9af50a71c63ea0c09",
+      "continuation_sdk_sha": "336cc689740c84a2d506d8b6dba50e3b484ad010",
+      "evidence": "docs/fusion/COMPLETION_VALIDATION.md"
+    }
+  },
+  {
+    "id": "G07",
+    "priority": "P1",
+    "kind": "G",
+    "title": "工程验收不能依赖 README 的测试描述",
+    "sources": [
+      "tests",
+      "package",
+      "requirements",
+      "readme"
+    ],
+    "observation": "已有回归测试、Swift package、平台 profile；requirements 是开放下界依赖；本次未在 Xcode 跑构建/真机，也未执行全仓 pytest/eval。",
+    "impact": "不能确认版本可重复构建、实际耗电/延迟/误报和原生安全；不应标成已安全。",
+    "remediation": "锁依赖/制品摘要/SBOM；跨语言契约测试、Release profile、native sanitizers/fuzz、真机矩阵和性能基线。",
+    "acceptance_test": "干净环境可重建同一bundle；SDK包正常被外部consumer引入；CI产物可核验。",
+    "owner": "build + verification",
+    "source_urls": [
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/tests/test_security_hardening.py",
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Package.swift",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/requirements.txt",
+      "https://github.com/1494389516/fengkong-agent/blob/1548785eccd5500545e5850d7399ba4b64158c4c/README.md"
+    ],
+    "implementation": {
+      "status": "not_in_first_batch",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "acceptance_note": "Implementation status is not production closure; see domain evidence and FINAL_VALIDATION.md."
+    }
+  },
+  {
+    "id": "V01",
+    "priority": "P1",
+    "kind": "V",
+    "title": "高风险信号消失直接升为 tampered 可能误报",
+    "sources": [
+      "evaluation"
+    ],
+    "observation": "前后 highRiskSignalIds 的集合差触发 signal_suppression_detected/.tampered。",
+    "impact": "需排除 Provider 可用性变化、配置变更、合法环境恢复和样本不足；尚未做真机验证，不能断言一定误伤。",
+    "remediation": "信号必须带测量状态/覆盖率/配置版本，区分未测、转阴、主动抑制。",
+    "acceptance_test": "合法环境恢复与检测覆盖变化不直接等价篡改。",
+    "owner": "SDK + evaluation",
+    "source_urls": [
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Core/CPRiskKitEvaluation.swift"
+    ],
+    "implementation": {
+      "status": "not_in_first_batch",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "acceptance_note": "Implementation status is not production closure; see domain evidence and FINAL_VALIDATION.md."
+    }
+  },
+  {
+    "id": "V02",
+    "priority": "P1",
+    "kind": "V",
+    "title": "原生反调试/加固/压缩裁决的完整正确性仍需专项验证",
+    "sources": [
+      "evaluation",
+      "package"
+    ],
+    "observation": "已看调用链、目录与包依赖，未逐行审计全部 CRiskCore/cprisk-armor，也未测试 Mach-O 变换、异常处理、锁、Keychain 和 App Store profile。",
+    "impact": "不能把架构审查推成原生漏洞已清零；加固出错也可能导致线上崩溃或错误高风险。",
+    "remediation": "独立 native review：ASan/UBSan/TSan适用目标、Mach-O fuzz、签名前后校验、真机性能和 profile 断言。",
+    "acceptance_test": "每项有真实日志、设备/OS/编译器、代码SHA、失败复现；拒绝只凭安全注释验收。",
+    "owner": "native security",
+    "source_urls": [
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Sources/CloudPhoneRiskKit/Core/CPRiskKitEvaluation.swift",
+      "https://github.com/1494389516/cloudphone-risk-detector/blob/6aeaf6783247258eba3f516efebd006561d4471c/RiskDetectorApp/Package.swift"
+    ],
+    "implementation": {
+      "status": "not_in_first_batch",
+      "source_agent_sha": "1548785eccd5500545e5850d7399ba4b64158c4c",
+      "source_sdk_sha": "6aeaf6783247258eba3f516efebd006561d4471c",
+      "closed": false,
+      "acceptance_note": "Implementation status is not production closure; see domain evidence and FINAL_VALIDATION.md."
+    }
+  }
+]
