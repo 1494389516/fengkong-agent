@@ -12,6 +12,7 @@
 落盘纪律(骨架期):JSON 状态文件必须 os.replace 原子写,跨线程/进程用 flock。
 崩溃或磁盘满时旧文件仍是合法 JSON,不能半截覆盖。
 """
+from contextvars import ContextVar
 import fcntl
 import json
 import os
@@ -23,6 +24,23 @@ from typing import Any, Dict, Iterator, List, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 
+_event_snapshot = ContextVar("online_event_snapshot", default=None)
+
+
+@contextmanager
+def event_snapshot(events, identity):
+    token = _event_snapshot.set((identity, events))
+    try:
+        yield
+    finally:
+        _event_snapshot.reset(token)
+
+
+def event_snapshot_identity():
+    snapshot = _event_snapshot.get()
+    return snapshot[0] if snapshot is not None else None
+
+
 _cache: Dict[Path, Tuple[int, Any]] = {}
 _cache_lock = threading.RLock()
 _io_lock = threading.RLock()
@@ -30,11 +48,17 @@ _io_lock = threading.RLock()
 
 def data_dir() -> Path:
     override = os.environ.get("FK_DATA_DIR")
-    if override:
-        return Path(override)
-    if os.environ.get("FK_DATASET") == "gen":
-        return ROOT / "data" / "gen"
-    return ROOT / "data"
+    path = Path(override) if override else ROOT / "data" / "gen" if os.environ.get("FK_DATASET") == "gen" else ROOT / "data"
+    path = path.resolve()
+    # Single-deployment binding: a task may not redirect storage via arguments.
+    import sys
+    capability = sys.modules.get("agent.tools.capability")
+    scope = capability.get_scope() if capability and hasattr(capability, "get_scope") else None
+    if scope is not None:
+        if (scope.dataset != str(path) or not os.environ.get("FK_SCOPE_TENANT")
+                or scope.tenant != os.environ["FK_SCOPE_TENANT"]):
+            raise PermissionError("request scope does not match deployment dataset/tenant")
+    return path
 
 
 def _load_json(path: Path):
@@ -153,6 +177,9 @@ def append_jsonl(path: Path, rec: Any) -> None:
 
 
 def load_events() -> List[Dict]:
+    snapshot = _event_snapshot.get()
+    if snapshot is not None:
+        return [dict(e) for e in snapshot[1]]
     return _load_json(data_dir() / "events_sample.json")
 
 

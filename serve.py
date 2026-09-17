@@ -56,7 +56,11 @@ def _public_view(decision: dict, replay: bool) -> dict:
     public = {k: decision.get(k) for k in (
         "action", "rules", "policy_version", "latency_ms",
         "reason_codes", "escalate_to_human", "degraded",
-        "agent_cannot_override", "decision_combine")}
+        "agent_cannot_override", "decision_combine", "decision_id",
+        "business_event_id", "tenant_id", "app_id", "feature_snapshot_id",
+        "strategy_version", "model_version", "component_status", "components",
+        "degraded_reason", "producer_metadata", "effective_versions",
+        "expected_strategy_version", "expected_model_version")}
     public["idempotent_replay"] = replay
     return public
 
@@ -100,43 +104,31 @@ def _compute(event: dict, operator: str) -> dict:
         "combine_score": r.get("combine_score"),
         "latency_ms": round(1000 * (time.time() - t0), 1),
     }
-    write_lineage(logged_event, decision, approver=operator or "serve")
-    append_jsonl(_log_path(), decision)
-    return _public_view(decision, False)
+    for key in ("component_status", "components", "degraded_reason", "producer_metadata",
+                "effective_versions", "expected_strategy_version", "expected_model_version"):
+        if key in r:
+            decision[key] = r[key]
+    return decision
 
 
-def _decide(event: dict, operator: str = "serve", received_at: float = None) -> dict:
-    from agent.tools.idemp_store import claim, complete, event_key, lookup, ttl_seconds
-    from agent.tools.lineage import event_fingerprint
-    key = event_key(event["event_id"])
-    input_fp = event_fingerprint(event)
-    with _mu:
-        cached = _idemp.get(key)
-        if cached is not None:
-            if time.time() - cached["completed_at"] > ttl_seconds():
-                _idemp.pop(key, None)
-                cached = None
-        if cached is not None:
-            if cached["input_fingerprint"] != input_fp:
-                from agent.tools.idemp_store import IdempotencyConflict
-                raise IdempotencyConflict("event_id 已用于不同请求体")
-            _idemp.move_to_end(key)
-            return _replay(cached["public"])
-    # 同键的跨线程/跨进程请求在计算全周期内串行。flock 由内核
-    # 在进程崩溃时释放,比“等 15s 后直接重算”的租约更可靠。
-    with claim(key):
-        public = lookup(key, input_fp)
-        if public is not None:
-            _remember(key, input_fp, public)
-            return _replay(public)
-        evaluation_event = dict(event)
-        if received_at is not None:
-            evaluation_event["_source_ts"] = event["ts"]
-            evaluation_event["ts"] = received_at
-        public = _compute(evaluation_event, operator)
-        complete(key, public, input_fp)
-        _remember(key, input_fp, public)
-        return public
+def _decide(event: dict, operator: str = "serve", received_at: float = None,
+            *, scope=None, source_kind="legacy_client") -> dict:
+    from agent.tools import online_store
+    scope = scope or (os.environ.get("FK_SERVE_TENANT", "local"),
+                      os.environ.get("FK_SERVE_APP", "default"))
+    # Legacy direct Python callers retain their historical timestamp behavior.
+    if received_at is None:
+        received_at = event["ts"]
+    record, replay = online_store.decide(event, operator, _compute, scope=scope,
+        source_kind=source_kind, received_at=received_at)
+    try:
+        online_store.export_outbox(_log_path())
+        projection_status = "current"
+    except (OSError, ValueError, __import__("sqlite3").Error):
+        projection_status = "pending"
+    public = _public_view(record, replay)
+    public["audit_projection_status"] = projection_status
+    return public
 
 
 def _remember(key: str, input_fp: str, public: dict) -> None:
@@ -185,8 +177,11 @@ def _signed_operator(headers, method: str, path: str):
 
 
 def _finite_number(value) -> bool:
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(float(value)))
+    try:
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(float(value)))
+    except (ValueError, TypeError, OverflowError):
+        return False
 
 
 def _nonnegative_env_float(name: str, default: float) -> float:
@@ -202,6 +197,8 @@ def _validate_json_value(value, depth=0):
         return "JSON 嵌套层数超过 8"
     if isinstance(value, str) and len(value) > MAX_STRING_LEN:
         return "字符串字段超过 %d 字符" % MAX_STRING_LEN
+    if isinstance(value, int) and value.bit_length() > 1024:
+        return "JSON integer exceeds supported range"
     if isinstance(value, float) and not math.isfinite(value):
         return "JSON 含 NaN/Infinity"
     if isinstance(value, dict):
@@ -221,9 +218,15 @@ def _validate_json_value(value, depth=0):
     return ""
 
 
-def _validate_event(event, now: float = None):
+def _validate_event(event, now: float = None, *, source_kind="legacy_client"):
     if not isinstance(event, dict):
         return "body 必须是 JSON object"
+    reserved = {"tenant_id", "app_id", "source_kind", "server_aggregates", "server_verified_attestation",
+                "received_at", "decision_id", "_source_ts"}
+    if reserved.intersection(event):
+        return "客户端不得提供服务端身份、证明或聚合字段"
+    if source_kind not in ("legacy_client", "business"):
+        return "不支持的认证事件源"
     shape_error = _validate_json_value(event)
     if shape_error:
         return shape_error
@@ -232,7 +235,7 @@ def _validate_event(event, now: float = None):
         if not isinstance(value, str) or not value.strip() or len(value) > limit:
             return "%s 必须是 1~%d 字符串" % (key, limit)
     kind = event.get("type")
-    if kind not in EVENT_TYPES:
+    if not isinstance(kind, str) or kind not in EVENT_TYPES:
         return "type 必须是 %s" % "/".join(sorted(EVENT_TYPES))
     if not _finite_number(event.get("ts")) or event["ts"] <= 0:
         return "ts 必须是正的有限数值"
@@ -241,7 +244,7 @@ def _validate_event(event, now: float = None):
                                      EVENT_MAX_AGE_SECONDS)
     max_future = _nonnegative_env_float("FK_EVENT_MAX_FUTURE_SECONDS",
                                         EVENT_MAX_FUTURE_SECONDS)
-    if event["ts"] < now - max_age:
+    if source_kind == "legacy_client" and event["ts"] < now - max_age:
         return "ts 过旧(最多允许 %.0f 秒延迟)" % max_age
     if event["ts"] > now + max_future:
         return "ts 超前(最多允许 %.0f 秒时钟偏差)" % max_future
@@ -349,7 +352,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "body 必须是 JSON 事件"})
             return
         received_at = time.time()
-        invalid = _validate_event(event, now=received_at)
+        # Source trust is bound to this authenticated service deployment, never body fields.
+        source_kind = os.environ.get("FK_SERVE_SOURCE_KIND", "legacy_client")
+        invalid = _validate_event(event, now=received_at, source_kind=source_kind)
         if invalid:
             self._json(400, {"error": invalid})
             return
@@ -359,7 +364,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             self._json(200, _decide(event, operator=operator,
-                                    received_at=received_at))
+                                    received_at=received_at, source_kind=source_kind))
         except Exception as exc:
             from agent.tools.idemp_store import IdempotencyConflict
             if isinstance(exc, IdempotencyConflict):
