@@ -1,0 +1,34 @@
+{
+  "knowledge_id": "sdk_debugger",
+  "type": "detector_doc",
+  "title": "调试器与断点检测",
+  "status": "reviewed",
+  "platform": "ios",
+  "detector_ids": [
+    "DebuggerDetector"
+  ],
+  "source": "https://github.com/1494389516/cloudphone-risk-detector/blob/c481b109df31f950cb07c11297dd7f92756cd972/RiskDetectorApp/Sources/CloudPhoneRiskKit/Detection/AntiTampering/DebuggerDetector.swift",
+  "known_at": "2026-09-18T00:30:37.177352+00:00",
+  "reviewed_at": "2026-09-18T00:30:37.177352+00:00",
+  "review_basis": "AI-assisted source inspection at pinned commit; not human field validation or measured detection performance.",
+  "simulated": false,
+  "export_policy": "public_reference",
+  "sdk_version_min": null,
+  "sdk_version_max": null,
+  "applicability": "仅解释iOS源码提交 c481b109df31f950cb07c11297dd7f92756cd972；SDK发布版本适用范围未知，需匹配实际构建。",
+  "caveats": "这些是调试或运行环境信号，不等同于云手机或欺诈。合法开发调试也可能命中；开发者磁盘、线程数量、端口等单项需结合构建和运行场景复核。未提供实测误报率。",
+  "sections": [
+    {
+      "heading": "实现与信号含义",
+      "text": "detect 检查调试附加状态、父进程、环境变量、端口、csops、硬件/软件断点以及看门狗异常等，累计 score 并封顶100；模拟器编译分支返回 unavailable_simulator。"
+    },
+    {
+      "heading": "误报与能力边界",
+      "text": "这些是调试或运行环境信号，不等同于云手机或欺诈。合法开发调试也可能命中；开发者磁盘、线程数量、端口等单项需结合构建和运行场景复核。未提供实测误报率。"
+    },
+    {
+      "heading": "补充验证",
+      "text": "补查构建渠道、是否为授权测试设备、具体 methods、系统版本及独立业务行为证据。unavailable_simulator 表示未执行该检测，不能解释为已经验证安全。"
+    }
+  ]
+}

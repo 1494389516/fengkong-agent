@@ -96,6 +96,21 @@ RESULT_SCHEMAS = {
     'threshold_propose': frozenset(('_speak', '_truncated', 'action', 'action_id', 'action_kind', 'added_at', 'applied_detail', 'applied_policy_version', 'applied_version', 'approve', 'artifact_id', 'baseline_digest', 'content', 'count', 'current', 'decided_by', 'decision', 'description', 'detail', 'device_id', 'dimension', 'enum', 'error', 'exists', 'expires_at', 'expires_days', 'found', 'graylist_observe_days', 'ip', 'kind', 'list', 'minimum', 'next_action', 'note', 'operator', 'overrides', 'owner', 'prepared_at', 'properties', 'proposal_digest', 'reason', 'records', 'requested_at', 'required', 'result', 'revision', 'schema_omitted', 'scope', 'shadow', 'snapshots', 'source', 'status', 'stop_reason', 'ts', 'type', 'uid', 'value', 'values', 'version')),
 }
 
+# RAG text is exported only from documents explicitly classified by an operator
+# as public_reference. Private/customer prose retains the closed opaque contract.
+RAG_FIELDS = frozenset(('count', 'hits', 'knowledge_id', 'chunk_id', 'title', 'type', 'status',
+    'platform', 'source', 'known_at', 'reviewed_at', 'review_basis', 'caveats',
+    'applicability', 'simulated', 'detector_ids', 'sdk_version_min', 'sdk_version_max',
+    'section', 'text', 'content_hash', 'citation', 'relevance', 'export_policy',
+    'index_digest', 'as_of', 'mode', 'warning', 'interpretation', 'error'))
+FIELD_NAMES = FIELD_NAMES | RAG_FIELDS | frozenset(('recorded_decision', 'sdk_observations',
+    'missing_evidence_refs', 'omitted_evidence_count', 'limitations', 'evidence_id',
+    'report_id', 'observed_at', 'recorded_at', 'verification', 'measurement_status',
+    'source_kind', 'identity_trust', 'server_attestation'))
+TOOL_NAMES = TOOL_NAMES + ('search_risk_knowledge', 'get_event_evidence')
+RESULT_SCHEMAS['search_risk_knowledge'] = RAG_FIELDS
+RESULT_SCHEMAS['get_event_evidence'] = FIELD_NAMES
+
 # These tools return shared feature and engine contract dictionaries.
 RESULT_SCHEMAS["feature_stats"] = FIELD_NAMES
 RESULT_SCHEMAS["engine_status"] = FIELD_NAMES
@@ -171,4 +186,22 @@ def project(tokenizer, name, value):
                 return obj
             return tokenizer._token("TEXT", str(obj))
         return "[invalid result type withheld]"
+    if name == 'search_risk_knowledge' and isinstance(value, dict):
+        output = walk(value, allowed=RAG_FIELDS)
+        safe_hits = []
+        hits = value.get('hits', [])
+        for hit in (hits[:10] if isinstance(hits, list) else []):
+            if (isinstance(hit, dict) and hit.get('export_policy') == 'public_reference'
+                    and hit.get('status') == 'reviewed' and hit.get('simulated') is False):
+                # Explicit publication classification, never inferred from contents.
+                # tokenize_data still masks recognized/previously-seen identifiers.
+                safe_hits.append(tokenizer.tokenize_data({k: v for k, v in hit.items() if k in RAG_FIELDS}))
+            else:
+                safe_hits.append(walk(hit, allowed=RAG_FIELDS))
+        output['hits'] = safe_hits
+        if value.get('status') in ('ok', 'no_match'):
+            output['status'] = value['status']
+        if value.get('mode') in ('bm25', 'bm25+vector'):
+            output['mode'] = value['mode']
+        return output
     return walk(value, allowed=GRAPH_TOP if name == "graph_relations" else RESULT_SCHEMAS[name])

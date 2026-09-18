@@ -1,0 +1,35 @@
+{
+  "knowledge_id": "sdk_emulator_behavior",
+  "type": "detector_doc",
+  "title": "仿真进程行为线索",
+  "status": "reviewed",
+  "platform": "ios",
+  "detector_ids": [
+    "EmulatorBehaviorDetector",
+    "emulator_behavior"
+  ],
+  "source": "https://github.com/1494389516/cloudphone-risk-detector/blob/c481b109df31f950cb07c11297dd7f92756cd972/RiskDetectorApp/Sources/CloudPhoneRiskKit/Detection/AntiTampering/EmulatorBehaviorDetector.swift",
+  "known_at": "2026-09-18T00:30:37.177352+00:00",
+  "reviewed_at": "2026-09-18T00:30:37.177352+00:00",
+  "review_basis": "AI-assisted source inspection at pinned commit; not human field validation or measured detection performance.",
+  "simulated": false,
+  "export_policy": "public_reference",
+  "sdk_version_min": null,
+  "sdk_version_max": null,
+  "applicability": "仅解释iOS源码提交 c481b109df31f950cb07c11297dd7f92756cd972；SDK发布版本适用范围未知，需匹配实际构建。",
+  "caveats": "这是代码中的启发式设计，并无真机与攻击样本验证结果证明其检测效果。线程少、计时异常本身不能确认云手机，当前Swift检测器的真实运行环境与注释描述的仿真环境也需验证。",
+  "sections": [
+    {
+      "heading": "实现与信号含义",
+      "text": "代码检查进程名、活动线程数、JVM环境变量、kern.ostype及进程CPU时钟推进情况，合成分封顶40。模拟器编译分支返回 emulator_behavior:unavailable_simulator。"
+    },
+    {
+      "heading": "误报与能力边界",
+      "text": "这是代码中的启发式设计，并无真机与攻击样本验证结果证明其检测效果。线程少、计时异常本身不能确认云手机，当前Swift检测器的真实运行环境与注释描述的仿真环境也需验证。"
+    },
+    {
+      "heading": "补充验证",
+      "text": "补查具体子项、探针错误、运行时版本及负载，关联其他独立证据。不要把名字中的unidbg或Unicorn直接当成已经观测到该工具。"
+    }
+  ]
+}

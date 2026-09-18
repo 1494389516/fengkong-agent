@@ -151,6 +151,7 @@ LEVELS = ("read", "simulate", "propose", "execute", "approve", "admin")
 # 不再 fail-open 成 read。生产状态与敏感导出属 execute;可复现仿真属
 # simulate(允许写非生产实验产物);propose 只能写 pending。
 READ_TOOLS = frozenset({
+    "search_risk_knowledge", "get_event_evidence",
     "account_monitor", "account_profile", "adversary_watch",
     "agent_behavior_drift", "appeal_review", "audit_query",
     "blacklist_query", "capability_registry", "consistency_check",
@@ -442,6 +443,14 @@ def constrain_investigation_tool(name, arguments):
         arguments['uid'] = entity
         if name in ('feature_stats', 'graph_relations'):
             arguments['as_of_ts'] = as_of
+    elif name == 'search_risk_knowledge':
+        from datetime import datetime, timezone
+        arguments['as_of'] = datetime.fromtimestamp(as_of, timezone.utc).isoformat()
+    elif name == 'get_event_evidence':
+        event = snapshot['decision']['event']
+        expected = snapshot['decision'].get('business_event_id') or event.get('event_id')
+        if arguments.get('event_id') != expected:
+            raise PermissionError('event outside investigation snapshot')
     elif name == 'rule_eval':
         event = dict(snapshot['decision']['event'])
         arguments = {'event': event, 'use_current_policy': False}

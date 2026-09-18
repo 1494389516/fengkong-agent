@@ -1,0 +1,34 @@
+{
+  "knowledge_id": "sdk_frida_thread",
+  "type": "detector_doc",
+  "title": "Frida线程与异常端口线索",
+  "status": "reviewed",
+  "platform": "ios",
+  "detector_ids": [
+    "FridaThreadDetector"
+  ],
+  "source": "https://github.com/1494389516/cloudphone-risk-detector/blob/c481b109df31f950cb07c11297dd7f92756cd972/RiskDetectorApp/Sources/CloudPhoneRiskKit/Detection/AntiTampering/FridaThreadDetector.swift",
+  "known_at": "2026-09-18T00:30:37.177352+00:00",
+  "reviewed_at": "2026-09-18T00:30:37.177352+00:00",
+  "review_basis": "AI-assisted source inspection at pinned commit; not human field validation or measured detection performance.",
+  "simulated": false,
+  "export_policy": "public_reference",
+  "sdk_version_min": null,
+  "sdk_version_max": null,
+  "applicability": "仅解释iOS源码提交 c481b109df31f950cb07c11297dd7f92756cd972；SDK发布版本适用范围未知，需匹配实际构建。",
+  "caveats": "异常端口也可能由调试和崩溃处理组件使用；线程数量取决于应用负载。客户端将状态标为tampered不等于服务端已确认攻击，更不能仅据此确认云手机。",
+  "sections": [
+    {
+      "heading": "实现与信号含义",
+      "text": "检测器枚举线程、匹配可疑线程名、观察线程执行位置及Mach异常端口。asSignals 会分别整理线程异常和异常端口证据；具体信号ID来自 ObfuscatedConstants。"
+    },
+    {
+      "heading": "误报与能力边界",
+      "text": "异常端口也可能由调试和崩溃处理组件使用；线程数量取决于应用负载。客户端将状态标为tampered不等于服务端已确认攻击，更不能仅据此确认云手机。"
+    },
+    {
+      "heading": "补充验证",
+      "text": "补查具体线程方法、foreign_exec证据、加载映像、崩溃SDK与授权调试场景；区分线程名命中和非映像执行地址线索。先排除正常解释再提出风险假设。"
+    }
+  ]
+}

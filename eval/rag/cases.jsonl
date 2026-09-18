@@ -1,0 +1,30 @@
+{"query": "DebuggerDetector", "expected_knowledge_id": "sdk_debugger", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "调试器 硬件断点 软件断点", "expected_knowledge_id": "sdk_debugger", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "调试附加 csops 看门狗", "expected_knowledge_id": "sdk_debugger", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "授权调试 开发者磁盘", "expected_knowledge_id": "sdk_debugger", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "unavailable_simulator 调试器", "expected_knowledge_id": "sdk_debugger", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "EmulatorBehaviorDetector", "expected_knowledge_id": "sdk_emulator_behavior", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "JVM环境变量 kern.ostype", "expected_knowledge_id": "sdk_emulator_behavior", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "仿真进程 CPU时钟", "expected_knowledge_id": "sdk_emulator_behavior", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "emulator_behavior:unavailable_simulator", "expected_knowledge_id": "sdk_emulator_behavior", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "unidbg Unicorn 进程名", "expected_knowledge_id": "sdk_emulator_behavior", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "FridaThreadDetector", "expected_knowledge_id": "sdk_frida_thread", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "Frida线程 异常端口", "expected_knowledge_id": "sdk_frida_thread", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "foreign_exec 线程执行位置", "expected_knowledge_id": "sdk_frida_thread", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "Mach异常端口 崩溃处理", "expected_knowledge_id": "sdk_frida_thread", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "线程名 非映像执行地址", "expected_knowledge_id": "sdk_frida_thread", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "AppSigningIdentityDetector", "expected_knowledge_id": "sdk_signing_identity", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "app_team_identifier_mismatch", "expected_knowledge_id": "sdk_signing_identity", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "签名身份 bundle identifier", "expected_knowledge_id": "sdk_signing_identity", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "企业分发 签名基线", "expected_knowledge_id": "sdk_signing_identity", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "application identifier team identifier", "expected_knowledge_id": "sdk_signing_identity", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "SensorReplayDetector", "expected_knowledge_id": "sdk_sensor_replay", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "sensor_replay_detected", "expected_knowledge_id": "sdk_sensor_replay", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "传感器回放 计时代理", "expected_knowledge_id": "sdk_sensor_replay", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "CoreMotion 加速度计 陀螺仪", "expected_knowledge_id": "sdk_sensor_replay", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "usleep mach_absolute_time 低位熵", "expected_knowledge_id": "sdk_sensor_replay", "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "zzzz_unknown_signal_7821", "expected_knowledge_id": null, "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "quantum_fraud_flux_capacitor", "expected_knowledge_id": null, "platform": "ios", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "sensor_replay_detected", "expected_knowledge_id": null, "platform": "android", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "DebuggerDetector", "expected_knowledge_id": null, "platform": "android", "fixture_kind": "synthetic_retrieval_query"}
+{"query": "AppSigningIdentityDetector", "expected_knowledge_id": null, "platform": "android", "fixture_kind": "synthetic_retrieval_query"}

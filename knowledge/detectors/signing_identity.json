@@ -1,0 +1,36 @@
+{
+  "knowledge_id": "sdk_signing_identity",
+  "type": "detector_doc",
+  "title": "应用签名身份一致性",
+  "status": "reviewed",
+  "platform": "ios",
+  "detector_ids": [
+    "AppSigningIdentityDetector",
+    "app_team_identifier_mismatch",
+    "app_identifier_bundle_mismatch"
+  ],
+  "source": "https://github.com/1494389516/cloudphone-risk-detector/blob/c481b109df31f950cb07c11297dd7f92756cd972/RiskDetectorApp/Sources/CloudPhoneRiskKit/Detection/AntiTampering/AppSigningIdentityDetector.swift",
+  "known_at": "2026-09-18T00:30:37.177352+00:00",
+  "reviewed_at": "2026-09-18T00:30:37.177352+00:00",
+  "review_basis": "AI-assisted source inspection at pinned commit; not human field validation or measured detection performance.",
+  "simulated": false,
+  "export_policy": "public_reference",
+  "sdk_version_min": null,
+  "sdk_version_max": null,
+  "applicability": "仅解释iOS源码提交 c481b109df31f950cb07c11297dd7f92756cd972；SDK发布版本适用范围未知，需匹配实际构建。",
+  "caveats": "签名身份异常描述应用构建/身份一致性，不直接描述用户恶意。开发签名、企业分发、重签或迁移需要结合预期发布身份确认；未验证SDK发布版本范围。",
+  "sections": [
+    {
+      "heading": "实现与信号含义",
+      "text": "实现比较application identifier、team identifier、运行时/Info.plist bundle identifier，并处理缺失、格式异常及本地基线变化。不同finding具有不同信号状态与poison条件，不能概括为所有异常均为硬证据。"
+    },
+    {
+      "heading": "误报与能力边界",
+      "text": "签名身份异常描述应用构建/身份一致性，不直接描述用户恶意。开发签名、企业分发、重签或迁移需要结合预期发布身份确认；未验证SDK发布版本范围。"
+    },
+    {
+      "heading": "补充验证",
+      "text": "补查服务端认可的发布渠道、预期team与bundle身份、具体finding、基线来源及版本迁移记录。缺失字段与明确不一致应分开报告。"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "knowledge_id": "sdk_sensor_replay",
+  "type": "detector_doc",
+  "title": "传感器回放命名与计时代理信号",
+  "status": "reviewed",
+  "platform": "ios",
+  "detector_ids": [
+    "SensorReplayDetector",
+    "sensor_replay_detected"
+  ],
+  "source": "https://github.com/1494389516/cloudphone-risk-detector/blob/c481b109df31f950cb07c11297dd7f92756cd972/RiskDetectorApp/Sources/CloudPhoneRiskKit/Detection/AntiTampering/SensorReplayDetector.swift",
+  "known_at": "2026-09-18T00:30:37.177352+00:00",
+  "reviewed_at": "2026-09-18T00:30:37.177352+00:00",
+  "review_basis": "AI-assisted source inspection at pinned commit; not human field validation or measured detection performance.",
+  "simulated": false,
+  "export_policy": "public_reference",
+  "sdk_version_min": null,
+  "sdk_version_max": null,
+  "applicability": "仅解释iOS源码提交 c481b109df31f950cb07c11297dd7f92756cd972；SDK发布版本适用范围未知，需匹配实际构建。",
+  "caveats": "不能把这个信号写成已经发现传感器录制回放。它是计时与调度代理特征，系统负载、计时器分辨率等正常因素需要实验排除。注释中的物理耦合验证不代表代码已实现。",
+  "sections": [
+    {
+      "heading": "实现与信号含义",
+      "text": "实现实际使用systemUptime、usleep、mach_absolute_time检查时间间隔规律、请求延时比例及计时器低位熵。虽有CoreMotion条件导入，当前方法没有采集加速度计或陀螺仪原始流。输出sensor_replay_detected为soft状态。"
+    },
+    {
+      "heading": "误报与能力边界",
+      "text": "不能把这个信号写成已经发现传感器录制回放。它是计时与调度代理特征，系统负载、计时器分辨率等正常因素需要实验排除。注释中的物理耦合验证不代表代码已实现。"
+    },
+    {
+      "heading": "补充验证",
+      "text": "补查具体timing methods、系统版本、负载与重复采样；若要确认传感器回放，需额外采集真实运动传感器数据并建立正常设备基线。模拟器分支返回unavailable_simulator。"
+    }
+  ]
+}
