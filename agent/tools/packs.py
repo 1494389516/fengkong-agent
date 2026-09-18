@@ -33,6 +33,7 @@ _ALWAYS = frozenset({
 })
 
 _INVESTIGATE = frozenset({
+    "search_risk_knowledge", "get_event_evidence",
     "account_profile", "account_monitor", "feature_stats", "rule_eval",
     "blacklist_query", "blacklist_add", "blacklist_remove",
     "device_intel", "ip_intel", "report_query",

@@ -22,7 +22,7 @@ MAX_STR_LEN = 800     # 超长字符串截断
 # 这是显式登记表而非按内容猜:举报正文 text 与申诉 claim 都来自外部用户。
 # 新增任何回传用户提交内容的工具,必须把其字段名登记到这里,否则该字段会
 # 绕过注入防线。长期应由数据源携带 provenance,这里先把现有入口全部封住。
-UGC_KEYS = {"text", "claim"}
+UGC_KEYS = {"text", "claim", "caveats", "applicability", "review_basis", "title", "section"}
 UGC_OPEN, UGC_CLOSE = "⟦用户内容⟧", "⟦/用户内容⟧"
 
 
@@ -159,7 +159,7 @@ def dispatch(name: str, arguments: Dict[str, Any], *, projection: bool = True) -
 # 只依赖 datasource 或 engine;dataset 依赖 featurelib;model_registry 依赖
 # dataset;strategy_registry 依赖 policy/featurelib/rules/model_registry
 # —— 三者放最后,顺序无关)
-from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, drift, calibrate, risk, adversary, draft, reports, feedback, ops, brief, profile, reconcile, graylist, audit, health, engine_status, dataset, rule_mining, model_registry, strategy_registry, jobs, capability, feature_health, lineage, incidents, label_lifecycle, agent_drift, feedback_pipeline, experiments, readiness, feature_parity  # noqa: E402,F401
+from . import blacklist, features, rules, backtest, monitor, charts, scan, graph, actions, drift, calibrate, risk, adversary, draft, reports, feedback, ops, brief, profile, reconcile, graylist, audit, health, engine_status, dataset, rule_mining, model_registry, strategy_registry, jobs, capability, feature_health, lineage, incidents, label_lifecycle, agent_drift, feedback_pipeline, experiments, readiness, feature_parity, risk_knowledge  # noqa: E402,F401
 # intel 由 monitor/profile 传递导入即完成注册,无需在上一行重复列出
 
 # fail-closed:工具增删时 capability 清单必须同步,否则导入阶段失败。

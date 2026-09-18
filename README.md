@@ -297,3 +297,9 @@ FK_PRIVACY=0 python3 main.py
 - 在线特征、数仓、身份认证和审批系统需要按实际环境接入。
 
 生产部署、数据源替换和外部系统接入参见 [DEPLOY.md](DEPLOY.md)。
+
+## 风控调查 RAG
+
+异步调查现支持事件证据查询与带来源的知识检索，默认离线BM25，可选真实embedding混合检索。
+先执行 `python -m agent.rag ingest knowledge`，再用 `python -m agent.rag search 'sensor_replay_detected' --platform ios` 验证。
+租户权限、公开资料边界、任务时间限制及评估步骤见 [RAG 使用文档](docs/rag/README.md)。
