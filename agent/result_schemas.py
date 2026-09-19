@@ -204,4 +204,17 @@ def project(tokenizer, name, value):
         if value.get('mode') in ('bm25', 'bm25+vector'):
             output['mode'] = value['mode']
         return output
+    if name == 'get_event_evidence' and isinstance(value, dict):
+        from .sdk_projection import project_detection
+        output = walk(value, allowed=RESULT_SCHEMAS[name])
+        observations = value.get('sdk_observations', [])
+        if isinstance(observations, list):
+            output['sdk_observations'] = []
+            for observation in observations[:10]:
+                if not isinstance(observation, dict):
+                    continue
+                safe = walk(observation)
+                safe['sdk_detection'] = project_detection(tokenizer, observation.get('sdk_detection'))
+                output['sdk_observations'].append(safe)
+        return output
     return walk(value, allowed=GRAPH_TOP if name == "graph_relations" else RESULT_SCHEMAS[name])

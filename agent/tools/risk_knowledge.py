@@ -81,7 +81,10 @@ def get_event_evidence(event_id):
     event = record['event']
     observations, missing = [], []
     refs = event.get('evidence_refs', [])
-    if refs and ctx and path.exists():
+    if state and 'sdk_observations' in state['snapshot']:
+        observations = state['snapshot']['sdk_observations']
+        missing = state['snapshot']['missing_evidence_refs']
+    elif refs and ctx and path.exists():
         with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
             exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='evidence'").fetchone()
             for ref in refs[:10]:
@@ -98,5 +101,7 @@ def get_event_evidence(event_id):
                 ('action', 'reason', 'reasons', 'strategy_version', 'model_version', 'evaluated_at', 'degraded') if k in record},
             'sdk_observations': observations, 'missing_evidence_refs': missing,
             'omitted_evidence_count': max(0, len(refs) - 10),
-            'limitations': ['SDK observations describe provenance and hardware; raw detection payload is not decoded by this tool.',
+            'limitations': ['SDK detection projections are decoded at ingestion; decoded is not independent verification. Missing sdk_detection means legacy evidence was not decoded.',
+                            'Only explicitly supported SDK payload versions are decoded. Unknown, unavailable and serverRequired are not negative detections.',
+                            'Signal evidence text remains local; only reviewed signal identifiers and typed measurements are projected to the model.',
                             'Recorded decisions and client measurements are not confirmed fraud labels.']}

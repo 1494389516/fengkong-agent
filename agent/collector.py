@@ -83,17 +83,6 @@ def ingest(upload, context, *, wire_bytes=None, remote_ip=None, now=None):
     _finite_payload(payload)
     mapping=value.get('field_mapping_version','')
     mappings=attrs.get('field_mappings',{})
-    if mapping:
-        table=mappings.get(mapping)
-        if not isinstance(table,dict) or not table or any(not isinstance(k,str) or not isinstance(v,str) for k,v in table.items()):
-            raise ContractError('unsupported field mapping version')
-        if len(set(table.values()))!=len(table): raise ContractError('invalid field mapping configuration')
-        decoded={}
-        for name,item in payload.items():
-            canonical=table.get(name,name)
-            if canonical in decoded: raise ContractError('field mapping collision')
-            decoded[canonical]=item
-        payload=decoded
     digest=_digest(value)
     # Server-owned namespace key never leaves Collector.
     identity_key=Path(os.environ['FK_IDENTITY_KEY_FILE']).read_bytes()
@@ -148,9 +137,17 @@ def ingest(upload, context, *, wire_bytes=None, remote_ip=None, now=None):
                            (context.tenant,context.app,att_id,count))
                 verdict='verified_assertion'
             if required and verdict!='verified_assertion': raise ContractError('required hardware verification missing')
+            from .sdk_payload import restore_fields, decode_detection, decoder_provenance
+            payload=restore_fields(payload,mapping,mappings,value['ts'])
+            detection=decode_detection(payload,value)
             # Whitelist observation fields. In particular payload server/sr/aggregate
             # claims and self-reported trust never enter server feature state.
             hardware=payload.get('hardware_attributes',{})
+            if detection['status']=='decoded':
+                device=payload.get('dv',{})
+                hardware={target:device[key] for key,target in
+                    (('m','model'),('sv','os_version'),('sw','screen_width'),('sh','screen_height'))
+                    if key in device} if isinstance(device,dict) else {}
             hardware={k:v for k,v in hardware.items() if k in ('model','os_version','cpu_count','memory_gb','screen_width','screen_height')
                       and isinstance(v,(str,int,float)) and not isinstance(v,bool)} if isinstance(hardware,dict) else {}
             evidence_id=hashlib.sha256((context.tenant+'\0'+context.app+'\0'+digest).encode()).hexdigest()
@@ -159,6 +156,7 @@ def ingest(upload, context, *, wire_bytes=None, remote_ip=None, now=None):
                 'device_id':entity,'entity_generation':generation,'identity_trust':'server_bound',
                 'hardware_attributes':hardware,'observed_at':value['ts']/1000,'recorded_at':now,
                 'source_kind':'sdk_observation','verification':'verified_mac','server_attestation':verdict,
+                'sdk_detection':detection,'decode_provenance':decoder_provenance(mapping,mappings),
                 'measurement_status':'observed','evidence_digest':hashlib.sha256(raw_payload).hexdigest()}
             if remote_ip: observation['ip']=remote_ip
             receipt={'report_id':value['report_id'],'evidence_id':evidence_id,'verification':'verified_mac',
