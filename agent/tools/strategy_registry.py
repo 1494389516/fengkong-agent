@@ -75,6 +75,12 @@ def _submit_pending(entry: Dict) -> int:
 def validate_strategy(entry: Dict) -> Dict:
     """校验门禁:规则/阈值键/特征依赖/模型依赖四类检查,返回问题清单。"""
     problems = []
+    from ..compute_admission import DEFAULT_CONTRACT, validate_contract, validate_dependencies
+    try:
+        validate_contract(entry.get('compute_contract', DEFAULT_CONTRACT))
+        validate_dependencies(entry.get('feature_dependencies', []))
+    except ValueError as exc:
+        problems.append(str(exc))
     rules = entry.get("rules") or []
     unknown_rules = [r for r in rules if r not in _KNOWN_RULES]
     if unknown_rules:
@@ -135,6 +141,7 @@ def _load_model_registry() -> List[Dict]:
                                      "description": "依赖的特征键(见 feature_catalog)"},
             "model_dependencies": {"type": "array", "items": {"type": "string"},
                                    "description": "依赖的模型 \"name:version\""},
+            "compute_contract": {"type": "object", "description": "内置有界特征计算契约；只能收紧平台上限"},
             "note": {"type": "string", "description": "策略意图/背景说明"},
         },
         "required": ["strategy_name", "version"],
@@ -142,12 +149,15 @@ def _load_model_registry() -> List[Dict]:
 )
 def strategy_register(strategy_name: str, version: str, rules: List[str] = None,
                       thresholds: Dict = None, feature_dependencies: List[str] = None,
-                      model_dependencies: List[str] = None, note: str = ""):
+                      model_dependencies: List[str] = None, note: str = "", compute_contract: Dict = None):
     items = _load()
     if _find(items, strategy_name, version):
         return {"status": "already_registered",
                 "strategy_name": strategy_name, "version": version}
+    from ..compute_admission import DEFAULT_CONTRACT, validate_contract
+    contract = validate_contract(DEFAULT_CONTRACT if compute_contract is None else compute_contract)
     entry = {
+        "compute_contract": contract,
         "strategy_name": strategy_name,
         "version": version,
         "rules": rules or [],
@@ -280,6 +290,9 @@ def strategy_promote(strategy_name: str, version: str, to: str, reason: str = ""
     entry = _find(items, strategy_name, version)
     if entry is None:
         return {"error": "策略未登记: %s %s" % (strategy_name, version)}
+    vr = validate_strategy(entry)
+    if not vr['valid']:
+        return {'error': 'compute/strategy admission failed: ' + '; '.join(vr['problems'])}
     cur = entry["status"]
     allowed = {"draft": ("validated",), "validated": ("shadow",),
                "shadow": ("active",)}
@@ -315,6 +328,9 @@ def apply_active(action: Dict, decided_by: str) -> Dict:
     if entry["status"] != "shadow":
         raise ValueError("状态机拒绝: %s 当前为 %s,非 shadow"
                          % (entry["strategy_name"], entry["status"]))
+    vr = validate_strategy(entry)
+    if not vr['valid']:
+        raise ValueError('compute/strategy admission failed: ' + '; '.join(vr['problems']))
     for s in items:
         if s["strategy_name"] == entry["strategy_name"] and s["status"] == "active":
             s["status"] = "deprecated"
@@ -386,12 +402,27 @@ def apply_strategy_rollback(action: Dict, decided_by: str) -> Dict:
 # ---------------------------------------------------------------------------
 
 def _replay_against(entry: Dict, uids: List[str]) -> Dict:
+    from ..compute_admission import DEFAULT_CONTRACT
+    from ..compute_budget import simulation_contract, ComputeBudgetExceeded
+    vr = validate_strategy(entry)
+    if not vr['valid']:
+        return {'error': 'compute/strategy admission failed: ' + '; '.join(vr['problems'])}
+    try:
+        with simulation_contract(entry.get('compute_contract', DEFAULT_CONTRACT)):
+            return _replay_admitted(entry, uids)
+    except ComputeBudgetExceeded as exc:
+        return {'error': str(exc), 'status': 'rejected_compute_budget'}
+
+
+def _replay_admitted(entry: Dict, uids: List[str]) -> Dict:
     """在 entry 的阈值覆盖下重放全部事件,返回与当前策略的对比。"""
     from . import policy
     from .backtest import account_verdicts
     from .datasource import load_events, load_labels
 
-    events = load_events()
+    from ..compute_budget import feature_budget
+    with feature_budget():
+        events = load_events()
     labels = load_labels()
     target = uids or sorted(labels.keys())
     prev = policy.set_overrides(entry["thresholds"])
@@ -483,6 +514,8 @@ def strategy_replay(strategy_name: str, version: str,
                 not in {(m["name"], m["version"]) for m in items}:
             return {"error": "model_version 未登记: %s" % model_version}
     out = _replay_against(entry, list(uids) if uids else [])
+    if 'error' in out:
+        return out
     out["strategy"] = "%s %s" % (strategy_name, version)
     out["model_version"] = model_version or None
     return out
@@ -513,6 +546,8 @@ def strategy_shadow(strategy_name: str, version: str,
     if "error" in entry:
         return entry
     out = _replay_against(entry, list(uids) if uids else [])
+    if 'error' in out:
+        return out
     out["strategy"] = "%s %s" % (strategy_name, version)
     out["model_version"] = model_version or None
     out["created_at"] = _now_iso()

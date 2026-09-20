@@ -35,7 +35,9 @@ class ReleaseController:
     REQUIRED = {'rules', 'model', 'features', 'sdk_contract', 'challenge', 'fallback',
                 'code_digest', 'data_digest', 'canary_max_false_positive_delta'}
 
-    def __init__(self, path, credentials, strict=False, scope=None):
+    def __init__(self, path, credentials, strict=False, scope=None, compute_capacity=None):
+        from .compute_admission import validate_capacity
+        self.compute_capacity = validate_capacity(compute_capacity)
         self.strict = strict
         self.scope = scope
         self.path = Path(path)
@@ -105,9 +107,13 @@ class ReleaseController:
                 if not isinstance(bundle.get(field), dict):
                     raise ValueError('runtime component mapping required: ' + field)
         bundle = copy.deepcopy(bundle)
+        from .compute_admission import admit_bundle, validate_capacity
+        admission = admit_bundle(bundle)
+        capacity = validate_capacity(self.compute_capacity)
         with self._transaction() as state:
             record = {'id': uuid.uuid4().hex, 'digest': digest(bundle), 'bundle': bundle,
                       'state': 'Proposal', 'proposed_by': principal,
+                      'compute_admission': admission, 'compute_capacity': capacity,
                       'baseline_activation': state['active'], 'history': [], 'scope': self.scope, 'strict': self.strict}
             state['bundles'][record['id']] = record
             return copy.deepcopy(record)
@@ -125,6 +131,10 @@ class ReleaseController:
                 raise ValueError('release gate cannot be skipped')
             if record['digest'] != digest(record['bundle']):
                 raise ValueError('immutable bundle digest mismatch')
+            from .compute_admission import verify_record, verify_performance
+            admission = verify_record(record, self.compute_capacity)
+            if target in ('Validated', 'Shadow', 'Active'):
+                verify_performance(proof, admission, record['compute_capacity'])
             if target == 'Approved' and principal == record['proposed_by']:
                 raise PermissionError('proposer cannot approve own bundle')
             if proof.get('bundle_digest') != record['digest'] or proof.get('passed') is not True:
@@ -166,6 +176,8 @@ class ReleaseController:
                 raise PermissionError('bundle belongs to another scope')
             if record['state'] != 'Active' or record['digest'] != digest(record['bundle']):
                 raise ValueError('rollback requires previously activated immutable bundle')
+            from .compute_admission import verify_record
+            verify_record(record, self.compute_capacity)
             return copy.deepcopy(self._activate(state, record, principal, 'rollback', reason))
 
     @staticmethod
@@ -188,8 +200,10 @@ def main():
     parser.add_argument('--store', required=True)
     parser.add_argument('--credentials', required=True)
     parser.add_argument('--scope', required=True)
+    parser.add_argument('--compute-capacity', required=True, help='operator-owned capacity JSON; never supplied by Agent')
     args = parser.parse_args()
-    controller = ReleaseController(args.store, json.loads(Path(args.credentials).read_text()), strict=True, scope=args.scope)
+    controller = ReleaseController(args.store, json.loads(Path(args.credentials).read_text()), strict=True, scope=args.scope,
+        compute_capacity=json.loads(Path(args.compute_capacity).read_text()))
     request = json.load(sys.stdin)
     operation = request.pop('operation')
     if operation not in ('propose', 'transition', 'rollback'):

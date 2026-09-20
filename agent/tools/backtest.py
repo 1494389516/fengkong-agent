@@ -89,7 +89,8 @@ def account_verdicts(uids: Iterable[str], events: List[Dict],
     uids = sorted(uids)
     # 缓存键必须含引擎模式:引擎 URL 切换会改变判定来源,数据没动但
     # 结论源变了,陈旧缓存会吐与当前通道不符的判定。
-    cache_key = (_dataset_fingerprint(), policy.overrides_key(), use_current_policy,
+    from ..compute_budget import simulation_key
+    cache_key = (_dataset_fingerprint(), policy.overrides_key(), use_current_policy, simulation_key(), policy.enabled_rules(),
                  len(events), events[0]["ts"] if events else None,
                  events[-1]["ts"] if events else None, tuple(uids),
                  "engine:" + (_os.environ.get("FK_ENGINE_DRYRUN_URL") or "local"))
@@ -99,6 +100,9 @@ def account_verdicts(uids: Iterable[str], events: List[Dict],
     from ..engine import evaluate_batch
     ordered = [e for e in events if e["uid"] in set(uids)]
     results = evaluate_batch(ordered, use_current_policy=use_current_policy)
+    from ..compute_budget import ComputeBudgetExceeded
+    if any('FEATURE_COMPUTE_BUDGET_EXCEEDED' in r.get('reason_codes', []) for r in results):
+        raise ComputeBudgetExceeded('replay feature budget exhausted; cannot certify fallback as strategy success')
     by_uid_results: Dict[str, list] = {}
     for e, r in zip(ordered, results):
         by_uid_results.setdefault(e["uid"], []).append(r)
@@ -159,7 +163,9 @@ def backtest(overrides: Optional[Dict] = None, uids: Optional[List[str]] = None)
         if bad_labels:
             return {"error": "标签只允许 %s,以下账号标签非法(先清洗再回测): %s" % (
                 "/".join(VALID_LABELS), ", ".join(bad_labels[:10]))}
-        events = load_events()
+        from ..compute_budget import feature_budget
+        with feature_budget():
+            events = load_events()
         verdicts = account_verdicts(labels.keys(), events)
         per_account = {
             uid: {"label": labels[uid]["label"], "predicted": v["predicted"], "rules": v["rules"]}
@@ -255,8 +261,14 @@ def backtest(overrides: Optional[Dict] = None, uids: Optional[List[str]] = None)
 def shadow_compare(overrides: Dict):
     """影子对比:当前策略 vs 候选阈值,对同一批标注账号各跑一次回测。
     切换阈值前的必经步骤 —— 不看差异直接切换,就是拿反馈回路赌运气。"""
-    base = backtest()
-    cand = backtest(overrides)
+    from ..compute_budget import ComputeBudgetExceeded
+    try:
+        base = backtest()
+        cand = backtest(overrides)
+    except ComputeBudgetExceeded as exc:
+        return {'error': str(exc), 'status': 'rejected_compute_budget'}
+    if 'error' in base:
+        return base
     if "error" in cand:
         return cand
     flagged = lambda r, uid: r["per_account"][uid]["predicted"] != "pass"  # noqa: E731

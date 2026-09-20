@@ -116,6 +116,15 @@ RESULT_SCHEMAS['get_event_evidence'] = FIELD_NAMES
 RESULT_SCHEMAS["feature_stats"] = FIELD_NAMES
 RESULT_SCHEMAS["engine_status"] = FIELD_NAMES
 
+
+# Public, non-identifying compute limits in strategy metadata.
+COMPUTE_FIELDS = frozenset(('compute_contract', 'operator', 'fallback',
+    'max_history_events', 'max_account_events', 'max_history_bytes',
+    'max_event_bytes', 'max_feature_calls', 'deadline_ms', 'max_sql_steps'))
+FIELD_NAMES = FIELD_NAMES | COMPUTE_FIELDS
+for _name in ('strategy_register', 'strategy_list', 'strategy_validate', 'strategy_promote'):
+    RESULT_SCHEMAS[_name] = RESULT_SCHEMAS[_name] | COMPUTE_FIELDS
+
 SENSITIVE = {
  "uid":"UID", "uids":"UID", "accounts":"UID", "user_id":"UID",
  "account_id":"UID", "reported_uid":"UID", "reporter":"UID", "member_uids":"UID",
@@ -147,6 +156,8 @@ PUBLIC_NUMBERS = frozenset((
  "tp", "fp", "tn", "fn", "sample_count", "missing_count", "missing_rate", "mean", "min", "max", "median", "std",
  "p50", "p90", "p95", "p99", "rate", "ratio", "coverage", "latency_ms", "duration_ms", "version",
 ))
+
+PUBLIC_NUMBERS = PUBLIC_NUMBERS | (COMPUTE_FIELDS - {'compute_contract', 'operator', 'fallback'})
 
 GRAPH_TOP = frozenset(("components", "component_count", "next_action", "stop_reason",
  "as_of_ts", "window_seconds", "truncated", "interpretation", "uid", "device_id", "found", "error", "chart_note", "_truncated"))
