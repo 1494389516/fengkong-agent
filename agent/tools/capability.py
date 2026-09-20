@@ -414,7 +414,9 @@ def investigation_constraints(snapshot):
     for key in ('max_tool_calls', 'max_tokens', 'max_graph_nodes'):
         if type(budget.get(key)) is not int or budget[key] <= 0:
             raise ValueError('invalid investigation budget: ' + key)
-    state = {'snapshot': snapshot, 'calls': 0, 'tokens': 0}
+    state = {'snapshot': snapshot, 'calls': 0, 'tokens': 0,
+             'event_evidence_loaded': False, 'event_evidence_registry': {},
+             'retrieval_trace': [], 'knowledge_citations': {}}
     token = _investigation.set(state)
     try:
         yield state
@@ -446,6 +448,8 @@ def constrain_investigation_tool(name, arguments):
     elif name == 'search_risk_knowledge':
         from datetime import datetime, timezone
         arguments['as_of'] = datetime.fromtimestamp(as_of, timezone.utc).isoformat()
+        from agent.rag.workflow import begin_search
+        begin_search(state, arguments)
     elif name == 'get_event_evidence':
         event = snapshot['decision']['event']
         expected = snapshot['decision'].get('business_event_id') or event.get('event_id')

@@ -11,6 +11,7 @@
 - 检索过滤草稿、撤回、模拟资料、未来知识、自身案件复盘以及不适用的版本。版本限定文档在请求版本未知时不返回。
 - 新调查任务绑定索引内容指纹和事件时间；检索时间由服务端覆盖，不能由模型向未来移动。
 - 调查结果保存引用来源及未检索到的引用ID。引用存在检查不等于语义蕴含检查，不宣称已验证结论。
+- 调查采用有界纠错检索：先读事件事实，再按用途检索；无匹配可改写，最多3次，知识参与结论时检查反证检索。最终报告逐条绑定事件证据和知识引用。详见 [有界纠错检索](AGENTIC_WORKFLOW.md)。
 
 ## 快速运行：离线检索
 
@@ -33,7 +34,8 @@ python -m eval.rag_eval
 1. 在目标租户的数据目录运行入库，随后再创建新调查任务。
 2. 在**服务端认证配置**的调查worker记录中保留`cases.run`权限，并按需向`tools`追加`get_event_evidence`、`search_risk_knowledge`。这些不是模型可授予自己的权限。
 3. 照常运行`agent.investigations.run_task(task_id, context)`。worker授权工具与任务快照的allowed_tools取交集。
-4. 读取结果中的`summary`、`knowledge_citation_audit`、`knowledge_index_digest`、`budget_used`。
+4. 读取结果中的`investigation_report`、`claim_evidence_audit`、`retrieval_audit`、
+   `knowledge_citation_audit`、`knowledge_index_digest`和`budget_used`。`summary`保留模型原始输出供审计。
 
 交互Agent的`investigate`和默认`analyst`工具包也包含新工具。调用`get_event_evidence`需要已有认证租户/app上下文；它不回退到无认证全表查询。
 
@@ -78,8 +80,6 @@ python -m eval.rag_eval --hybrid
 ## 评估与边界
 
 ```bash
-python -m pip install pytest
-python -m pytest -q
 python -m eval.rag_eval
 ```
 
@@ -91,5 +91,5 @@ python -m eval.rag_eval
 - 未接入reranker、历史索引版本服务、自动审核或GraphRAG。
 - 未调用真实LLM/embedding服务验证质量；混合检索路径用明确标记的测试向量验证契约、缓存及失败处理。
 - 现有collector观测接口不包含解码后的检测信号正文。新证据工具返回业务事件与SDK来源/硬件观测，不擅自解码可能混淆的原始载荷；这会作为调查缺口提示。
-- 报告保留现有Agent文本格式，加引用审计，不是已实现结构化结论逐句验证。
+- 报告使用结构化 claim 合同，检查事件证据和知识引用是否来自本任务；仍未验证文字结论与来源之间的语义蕴含。
 - 后续真实效果验收需要有复核标签的历史事件，对比无RAG、BM25和混合检索，排除未来资料与自身复盘。

@@ -19,9 +19,15 @@ from agent.rag.store import search
           'detector_ids': {'type': 'array', 'items': {'type': 'string'}},
           'sdk_version': {'type': 'string', 'description': '已确认的major.minor.patch，未知留空'},
           'as_of': {'type': 'string', 'description': '带时区ISO时间；任务中由服务端覆盖'},
+          'purpose': {'type': 'string', 'enum': ['interpretation', 'support', 'counterevidence'],
+                      'description': '本次检索在调查中的用途'},
+          'attempt_reason': {'type': 'string', 'enum': ['initial', 'no_match', 'low_relevance',
+                              'missing_counterevidence', 'broaden_terms'],
+                             'description': '首次检索或改写查询的原因'},
           'top_k': {'type': 'integer', 'minimum': 1, 'maximum': 10}},
        'required': ['query']})
-def search_risk_knowledge(query, platform='', detector_ids=None, sdk_version='', as_of='', top_k=5):
+def search_risk_knowledge(query, platform='', detector_ids=None, sdk_version='', as_of='',
+                          purpose='interpretation', attempt_reason='initial', top_k=5):
     from agent.rag.embeddings import configured_embedder
     state = investigation_state()
     extra = {}
@@ -39,15 +45,33 @@ def search_risk_knowledge(query, platform='', detector_ids=None, sdk_version='',
     except Exception:
         embedder = None
         config_warning = 'embedding configuration invalid; lexical retrieval only'
-    result = search(query, platform=platform, detector_ids=detector_ids, sdk_version=sdk_version,
-                    as_of=as_of, top_k=top_k, embedder=embedder, public_only=True, **extra)
+    try:
+        result = search(query, platform=platform, detector_ids=detector_ids, sdk_version=sdk_version,
+                        as_of=as_of, top_k=top_k, embedder=embedder, public_only=True, **extra)
+    except Exception as exc:
+        if state:
+            from agent.rag.workflow import finish_search
+            finish_search(state, error=type(exc).__name__)
+        raise
     if config_warning:
         result['warning'] = config_warning
     if state:
+        from agent.rag.workflow import finish_search
+        finish_search(state, result=result)
+        trace = state['retrieval_trace'][-1]
+        result.update(purpose=purpose, attempt=trace['attempt'], attempt_reason=attempt_reason,
+                      remaining_attempts=max(0, state['snapshot']['budget'].get('max_knowledge_searches', 3)
+                                             - sum(r.get('status') != 'rejected_duplicate'
+                                                   for r in state['retrieval_trace'])))
+        result['next_action'] = ('review_hits_and_check_counterevidence' if result['hits']
+                                 else 'rewrite_query_or_report_knowledge_gap')
         citations = state.setdefault('knowledge_citations', {})
         for hit in result['hits']:
-            citations[hit['chunk_id']] = {k: hit[k] for k in
+            entry = {k: hit[k] for k in
                 ('chunk_id', 'source', 'section', 'content_hash', 'known_at', 'reviewed_at', 'applicability')}
+            old = citations.get(hit['chunk_id'], {})
+            entry['retrieval_purposes'] = sorted(set(old.get('retrieval_purposes', [])) | {purpose})
+            citations[hit['chunk_id']] = entry
     return result
 
 
@@ -93,10 +117,14 @@ def get_event_evidence(event_id):
                     missing.append(ref)
     else:
         missing = refs[:10]
-    return {'status': 'ok', 'event_id': event_id, 'decision_id': record.get('decision_id'),
+    result = {'status': 'ok', 'event_id': event_id, 'decision_id': record.get('decision_id'),
             'event': event, 'recorded_decision': {k: record[k] for k in
                 ('action', 'reason', 'reasons', 'strategy_version', 'model_version', 'evaluated_at', 'degraded') if k in record},
             'sdk_observations': observations, 'missing_evidence_refs': missing,
             'omitted_evidence_count': max(0, len(refs) - 10),
             'limitations': ['SDK observations describe provenance and hardware; raw detection payload is not decoded by this tool.',
                             'Recorded decisions and client measurements are not confirmed fraud labels.']}
+    if state:
+        from agent.rag.workflow import record_event_evidence
+        result['evidence_registry'] = record_event_evidence(state, result)
+    return result
