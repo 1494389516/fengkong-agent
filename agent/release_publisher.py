@@ -63,6 +63,9 @@ class SignedBundleReader:
                 raise ValueError('invalid runtime component: ' + component)
         if not isinstance(manifest['bundle']['list'].get('records'), list):
             raise ValueError('explicit list records snapshot required')
+        from .compute_admission import admit_bundle
+        if manifest.get('compute_admission') != admit_bundle(manifest['bundle']):
+            raise ValueError('runtime compute admission mismatch')
         return manifest
 
     def read_activation(self, activation_id):
@@ -76,6 +79,9 @@ class SignedBundleReader:
                 raise ValueError('invalid runtime component: ' + component)
         if not isinstance(manifest['bundle']['list'].get('records'), list):
             raise ValueError('explicit list records snapshot required')
+        from .compute_admission import admit_bundle
+        if manifest.get('compute_admission') != admit_bundle(manifest['bundle']):
+            raise ValueError('runtime compute admission mismatch')
         return manifest
 
 
@@ -99,12 +105,16 @@ def publish(store, output, private_key):
                     raise ValueError('publish requires runtime mapping: ' + component)
             if not isinstance(record['bundle']['list'].get('records'), list):
                 raise ValueError('explicit list records snapshot required')
+            from .compute_admission import verify_record, verify_performance
+            admission = verify_record(record, require_current_implementation=event['id'] == state['active'])
             history = record['history']
             if event.get('history_digest') != digest(history):
                 raise ValueError('approval history changed after activation')
             if [h['state'] for h in history] != ['Validated','Shadow','Approved','Canary','Active']:
                 raise ValueError('release gate history incomplete')
             for h in history:
+                if h['state'] in ('Validated', 'Shadow', 'Active'):
+                    verify_performance(h['proof'], admission, record['compute_capacity'])
                 if h['proof'].get('bundle_digest') != record['digest'] or h['proof'].get('passed') is not True:
                     raise ValueError('evidence binding failed')
                 if record.get('strict'):
@@ -121,7 +131,7 @@ def publish(store, output, private_key):
             delta = history[-1]['proof'].get('false_positive_delta')
             if type(delta) not in (float,int) or not -1 <= delta <= record['bundle']['canary_max_false_positive_delta']:
                 raise ValueError('canary gate failed')
-            manifest = {'version': 1, 'activation':event, 'bundle':record['bundle'], 'history_digest':digest(history)}
+            manifest = {'version': 1, 'activation':event, 'bundle':record['bundle'], 'history_digest':digest(history), 'compute_admission': admission}
             payload = signed(manifest); path=root/'bundles'/(event['id']+'.json')
             if path.exists():
                 if path.read_bytes() != payload: raise ValueError('immutable activation changed')

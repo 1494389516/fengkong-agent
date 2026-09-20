@@ -43,7 +43,9 @@ def _events_by_uid() -> Dict[str, List[Dict]]:
     _validate_runtime_catalog()
     key = _dataset_key()
     hit = _uid_index_cache.get("idx")
-    if hit and hit[0] == key:
+    from ..compute_budget import current_budget
+    # A cache warmed under looser limits must not bypass current input admission.
+    if hit and hit[0] == key and current_budget() is None:
         return hit[1]
     idx: Dict[str, List[Dict]] = {}
     for e in load_events():
@@ -64,6 +66,10 @@ def _visible_at(event, as_of_ts):
 
 def _account_events(uid: str, as_of_ts: Optional[float] = None) -> List[Dict]:
     evs = _events_by_uid().get(uid, ())
+    from ..compute_budget import current_budget
+    budget = current_budget()
+    if budget is not None:
+        budget.account(evs)
     return [e for e in evs if _visible_at(e, as_of_ts)]
 
 

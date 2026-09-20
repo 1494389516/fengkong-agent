@@ -230,14 +230,31 @@ def load_events(*, limit=None, as_of_ts=None, window_seconds=None) -> List[Dict]
                 where.extend(["occurred_at<?","recorded_at<=?"]);params.extend([as_of_ts,as_of_ts])
                 if window_seconds is not None:
                     where.append("occurred_at>=?");params.append(as_of_ts-window_seconds)
-            query="SELECT body FROM events"+(" WHERE "+" AND ".join(where) if where else "")+" ORDER BY occurred_at,event_id"
+            from ..compute_budget import sql_body_expression
+            query="SELECT " + sql_body_expression() + " FROM events"+(" WHERE "+" AND ".join(where) if where else "")+" ORDER BY occurred_at,event_id"
             if limit is not None:
                 query+=" LIMIT ?";params.append(limit)
-            return [json.loads(r[0]) for r in db.execute(query,params)]
+            from ..compute_budget import bounded_history, sql_budget
+            with sql_budget(db):
+                return bounded_history((r[0] for r in db.execute(query,params)), encoded=True)
         finally:
             db.close()
     else:
-        rows = _load_json(data_dir() / "events_sample.json")
+        path = data_dir() / "events_sample.json"
+        from ..compute_budget import current_budget, ComputeBudgetExceeded
+        budget = current_budget()
+        if budget is not None:
+            # Bound raw bytes before JSON allocation, including cold-cache reads.
+            with path.open('rb') as handle:
+                raw = handle.read(budget.contract['max_history_bytes'] + 1)
+            if len(raw) > budget.contract['max_history_bytes']:
+                raise ComputeBudgetExceeded('history_byte_limit')
+            budget.check()
+            rows = json.loads(raw)
+        else:
+            rows = _load_json(path)
+    from ..compute_budget import bounded_history
+    rows = bounded_history(rows)
     result=[]
     for e in rows:
         ts=e.get("ts",0)

@@ -38,6 +38,7 @@ def connect(*, _migration=False):
             tenant TEXT, app TEXT, event_id TEXT, occurred_at REAL,
             recorded_at REAL, body TEXT NOT NULL,
             PRIMARY KEY(tenant, app, event_id));
+        CREATE INDEX IF NOT EXISTS events_scope_order ON events(tenant, app, occurred_at, event_id);
         CREATE TABLE IF NOT EXISTS outbox (
             decision_id TEXT PRIMARY KEY, body TEXT NOT NULL, exported INTEGER DEFAULT 0);
     ''')
@@ -73,12 +74,24 @@ def decide(event, operator, compute, *, scope, source_kind, received_at, prepare
         if source_kind == "legacy_client":
             evaluation["_source_ts"] = event["ts"]
             evaluation["ts"] = received_at
-        history = [json.loads(r[0]) for r in db.execute(
-            "SELECT body FROM events WHERE tenant=? AND app=? AND recorded_at<=? ORDER BY occurred_at, event_id",
-            (tenant, app, received_at))]
-        snapshot_id = hashlib.sha256(json.dumps(history, sort_keys=True).encode()).hexdigest()
-        with event_snapshot(history, (str(data_dir()), tenant, app, snapshot_id)):
-            record = dict(compute(evaluation, operator))
+        from ..runtime_bundle import request_bundle
+        from ..compute_budget import (feature_budget, bounded_history, sql_budget,
+                                      ComputeBudgetExceeded, fallback_result, sql_body_expression)
+        snapshot_id = None  # Missing evidence must not look like an empty snapshot.
+        with request_bundle():
+            from ..runtime_bundle import current_bundle
+            from ..engine import _active_strategy
+            contract = None if current_bundle() else _active_strategy().get('compute_contract')
+            try:
+                with feature_budget(contract), sql_budget(db):
+                    history = bounded_history((r[0] for r in db.execute(
+                        "SELECT " + sql_body_expression() + " FROM events INDEXED BY events_scope_order WHERE tenant=? AND app=? AND recorded_at<=? ORDER BY occurred_at, event_id",
+                        (tenant, app, received_at))), encoded=True)
+                    snapshot_id = hashlib.sha256(json.dumps(history, sort_keys=True).encode()).hexdigest()
+                    with event_snapshot(history, (str(data_dir()), tenant, app, snapshot_id)):
+                        record = dict(compute(evaluation, operator))
+            except ComputeBudgetExceeded as exc:
+                record = fallback_result(evaluation, exc)
         record.update(decision_id=str(uuid.uuid4()), tenant_id=tenant, app_id=app,
                       business_event_id=event["event_id"], feature_snapshot_id=snapshot_id,
                       event=evaluation, approver=operator, evaluated_at=time.time())

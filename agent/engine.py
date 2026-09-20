@@ -197,6 +197,11 @@ def _post_json(url: str, payload: Dict[str, Any],
         method="POST",
     )
     timeout = float(os.environ.get(DRYRUN_TIMEOUT_ENV, "10") or 10)
+    from .compute_budget import current_budget
+    budget = current_budget()
+    if budget is not None:
+        budget.check()
+        timeout = min(timeout, max(0.001, budget.deadline - time.monotonic()))
     lane = "batch" if "events" in payload else "online"
     with _transport_lock:
         slots = _transport_slots.setdefault((url, lane), threading.BoundedSemaphore(
@@ -366,6 +371,7 @@ def _active_strategy() -> Dict:
         "strategy_version": "%s %s" % (s["strategy_name"], s["version"]),
         "strategy_thresholds": s.get("thresholds") or {},
         "strategy_rules": list(s.get("rules") or []),
+        "compute_contract": s.get("compute_contract"),
     }
     if error:
         out["registry_error"] = error
@@ -503,7 +509,7 @@ def _apply_model_signal(result: Dict[str, Any], event: Dict[str, Any],
     return result
 
 
-def _local_eval(event: Dict[str, Any], use_current_policy: bool,
+def _local_eval_unbudgeted(event: Dict[str, Any], use_current_policy: bool,
                 strategy: Dict, champion_snapshot=None) -> Dict:
     """本地判定 + active strategy 覆盖 + 模型信号,一次打包。
 
@@ -536,6 +542,15 @@ def _local_eval(event: Dict[str, Any], use_current_policy: bool,
     return _apply_model_signal(r, event, use_current_policy=use_current_policy,
                                strategy_thresholds=strategy.get("strategy_thresholds"),
                                champion_snapshot=champion_snapshot)
+
+
+def _local_eval(event, use_current_policy, strategy, champion_snapshot=None):
+    from .compute_budget import feature_budget, ComputeBudgetExceeded, fallback_result
+    try:
+        with feature_budget(strategy.get('compute_contract')):
+            return _local_eval_unbudgeted(event, use_current_policy, strategy, champion_snapshot)
+    except ComputeBudgetExceeded as exc:
+        return fallback_result(event, exc)
 
 
 def _expected_metadata(result, strategy, champion_snapshot=None):
