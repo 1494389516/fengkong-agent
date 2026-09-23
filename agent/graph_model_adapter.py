@@ -33,7 +33,7 @@ class StructuralFeatureAdapter(GraphModelAdapter):
     def score(self,snapshot,target_device,target_generation):
         result=self.algorithm.compute(
             list(snapshot.rows),target_device,target_generation,
-            truncated=snapshot.truncated)
+            truncated=snapshot.truncated,as_of=snapshot.knowledge_cutoff)
         score=float(result.get("community_risk_density",0.0))
         return GraphModelOutput(
             self.model_name,self.model_version,score,result,
