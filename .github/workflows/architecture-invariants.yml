@@ -18,3 +18,5 @@ jobs:
         run: python eval/architecture_invariants.py
       - name: Graph pipeline smoke
         run: python -m eval.graph_pipeline_smoke
+      - name: Graph PIT and model adapter smoke
+        run: python -m eval.graph_pit_model_smoke
