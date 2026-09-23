@@ -192,6 +192,37 @@ class LocalEventBus:
         finally:
             db.close()
 
+    def stats(self, *, topic=None, now=None):
+        anchor=time.time() if now is None else float(now)
+        db=connect()
+        try:
+            self._ensure(db)
+            where=""
+            params=[]
+            if topic is not None:
+                if not isinstance(topic,str) or not topic:
+                    raise ValueError("topic must be a non-empty string")
+                where=" WHERE topic=?";params.append(topic)
+            rows=db.execute("""SELECT published,lease_until,created_at,attempts
+                               FROM integration_events"""+where,params).fetchall()
+            pending=[r for r in rows if r[0]==0]
+            leased=sum(1 for r in pending if r[1] is not None and r[1]>anchor)
+            ready=len(pending)-leased
+            dead=sum(1 for r in rows if r[0]==-1)
+            oldest=min((r[2] for r in pending),default=None)
+            return {
+                "topic":topic,
+                "pending":len(pending),
+                "ready":ready,
+                "leased":leased,
+                "dead_letters":dead,
+                "oldest_pending_age_seconds":
+                    (max(0.0,anchor-oldest) if oldest is not None else 0.0),
+                "max_attempts":max((int(r[3] or 0) for r in pending),default=0),
+            }
+        finally:
+            db.close()
+
     def dead_letters(self, *, limit=100, topic=None):
         self._validate_limit(limit)
         db=connect()
