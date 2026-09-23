@@ -146,8 +146,8 @@ class LocalEventBus:
             self._ensure(db)
             changed=db.execute("""UPDATE integration_events
                 SET published=1,lease_token=NULL,lease_until=NULL,last_error=NULL
-                WHERE event_id=? AND published=0 AND lease_token=?""",
-                (event_id,lease_token)).rowcount
+                WHERE event_id=? AND published=0 AND lease_token=? AND lease_until>?""",
+                (event_id,lease_token,time.time())).rowcount
             db.commit()
             return changed==1
         finally:
@@ -160,17 +160,17 @@ class LocalEventBus:
         try:
             self._ensure(db)
             row=db.execute("""SELECT attempts FROM integration_events
-                WHERE event_id=? AND published=0 AND lease_token=?""",
-                (event_id,lease_token)).fetchone()
+                WHERE event_id=? AND published=0 AND lease_token=? AND lease_until>?""",
+                (event_id,lease_token,time.time())).fetchone()
             if row is None:
                 return False
             exhausted=int(row[0])>=max_attempts
-            db.execute("""UPDATE integration_events
+            changed=db.execute("""UPDATE integration_events
                 SET published=?,lease_token=NULL,lease_until=NULL,last_error=?
-                WHERE event_id=? AND published=0 AND lease_token=?""",
-                (-1 if exhausted else 0,str(error)[:1000],event_id,lease_token))
+                WHERE event_id=? AND published=0 AND lease_token=? AND lease_until>?""",
+                (-1 if exhausted else 0,str(error)[:1000],event_id,lease_token,time.time())).rowcount
             db.commit()
-            return True
+            return changed==1
         finally:
             db.close()
 
@@ -202,23 +202,25 @@ class LocalEventBus:
             if topic is not None:
                 if not isinstance(topic,str) or not topic:
                     raise ValueError("topic must be a non-empty string")
-                where=" WHERE topic=?";params.append(topic)
-            rows=db.execute("""SELECT published,lease_until,created_at,attempts
-                               FROM integration_events"""+where,params).fetchall()
-            pending=[r for r in rows if r[0]==0]
-            leased=sum(1 for r in pending if r[1] is not None and r[1]>anchor)
-            ready=len(pending)-leased
-            dead=sum(1 for r in rows if r[0]==-1)
-            oldest=min((r[2] for r in pending),default=None)
+                where=" AND topic=?";params.append(topic)
+            pending,leased,oldest,max_attempts=db.execute("""
+                SELECT COUNT(*),
+                       COALESCE(SUM(CASE WHEN lease_until>? THEN 1 ELSE 0 END),0),
+                       MIN(created_at),COALESCE(MAX(attempts),0)
+                FROM integration_events WHERE published=0"""+where,
+                [anchor,*params]).fetchone()
+            dead=db.execute("SELECT COUNT(*) FROM integration_events WHERE published=-1"+where,
+                            params).fetchone()[0]
+            ready=pending-leased
             return {
                 "topic":topic,
-                "pending":len(pending),
+                "pending":pending,
                 "ready":ready,
                 "leased":leased,
                 "dead_letters":dead,
                 "oldest_pending_age_seconds":
                     (max(0.0,anchor-oldest) if oldest is not None else 0.0),
-                "max_attempts":max((int(r[3] or 0) for r in pending),default=0),
+                "max_attempts":max_attempts,
             }
         finally:
             db.close()

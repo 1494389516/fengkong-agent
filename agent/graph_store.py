@@ -24,6 +24,12 @@ class SQLiteGraphStore:
           ON observations(tenant,app,device_id,entity_generation,observed_at);
         CREATE INDEX IF NOT EXISTS graph_uid_time
           ON observations(tenant,app,uid,observed_at);
+        CREATE INDEX IF NOT EXISTS graph_scope_recorded
+          ON observations(tenant,app,recorded_at DESC,evidence_id DESC);
+        CREATE TABLE IF NOT EXISTS dirty_devices (
+          tenant TEXT NOT NULL, app TEXT NOT NULL, device_id TEXT NOT NULL,
+          entity_generation TEXT NOT NULL,
+          PRIMARY KEY(tenant,app,device_id,entity_generation));
         """)
         return db
 
@@ -45,6 +51,49 @@ class SQLiteGraphStore:
               ORDER BY recorded_at DESC,evidence_id DESC LIMIT ?""",(tenant,app,as_of,limit+1)).fetchall()
             truncated=len(rows)>limit
             return rows[:limit],truncated
+        finally: db.close()
+
+    def latest_recorded_at(self,tenant,app):
+        db=self.connect()
+        try:
+            row=db.execute("SELECT MAX(recorded_at) FROM observations WHERE tenant=? AND app=?",
+                           (tenant,app)).fetchone()
+            return row[0]
+        finally: db.close()
+
+    def devices_for_uid(self,tenant,app,uid):
+        if not uid:
+            return []
+        db=self.connect()
+        try:
+            return db.execute("""SELECT DISTINCT device_id,entity_generation FROM observations
+                WHERE tenant=? AND app=? AND uid=?""",(tenant,app,uid)).fetchall()
+        finally: db.close()
+
+    def mark_dirty(self,tenant,app,devices):
+        if not devices:
+            return
+        db=self.connect()
+        try:
+            db.executemany("""INSERT OR IGNORE INTO dirty_devices VALUES (?,?,?,?)""",
+                           ((tenant,app,device,generation) for device,generation in devices))
+            db.commit()
+        finally: db.close()
+
+    def dirty_devices(self,limit):
+        db=self.connect()
+        try:
+            return db.execute("""SELECT tenant,app,device_id,entity_generation
+                FROM dirty_devices ORDER BY tenant,app,device_id,entity_generation LIMIT ?""",
+                (limit,)).fetchall()
+        finally: db.close()
+
+    def clear_dirty(self,tenant,app,device,generation):
+        db=self.connect()
+        try:
+            db.execute("""DELETE FROM dirty_devices WHERE tenant=? AND app=?
+                AND device_id=? AND entity_generation=?""",(tenant,app,device,generation))
+            db.commit()
         finally: db.close()
 
 

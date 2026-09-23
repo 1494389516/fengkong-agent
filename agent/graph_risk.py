@@ -11,6 +11,7 @@ import time
 from .graph_algorithms import graph_algorithm, MAX_ROWS
 from .graph_store import graph_store
 from .online_feature_store import online_feature_store
+from .tools.datasource import data_dir, file_lock
 
 FEATURE_SET="graph_risk_v1"
 SHADOW_FEATURE_SET="graph_risk_shadow_v1"
@@ -29,15 +30,35 @@ def ingest_observation(observation):
         raise ValueError("graph projection accepts server-bound identity only")
     if not _finite(observation.get("observed_at")) or not _finite(observation.get("recorded_at")):
         raise ValueError("finite graph timestamps required")
-    store=graph_store()
-    store.append(observation)
-    return recompute_device(observation["tenant_id"],observation["app_id"],
-                            observation["device_id"],observation["entity_generation"],
-                            as_of=observation["recorded_at"])
+    tenant,app=observation["tenant_id"],observation["app_id"]
+    device=(observation["device_id"],observation["entity_generation"])
+    # Serialize graph writes and projections across local workers. Invalidate first:
+    # a crash can leave a feature pending, but cannot expose an obsolete one as fresh.
+    with file_lock(data_dir()/".graph_projection"):
+        store=graph_store()
+        affected=set(store.devices_for_uid(tenant,app,observation.get("uid")))
+        affected.add(device)
+        online_feature_store().invalidate_devices(tenant,app,affected)
+        try:
+            store.append(observation)
+            store.mark_dirty(tenant,app,affected-{device})
+            result=_recompute_device(tenant,app,*device)
+            store.clear_dirty(tenant,app,*device)
+            return result
+        except BaseException:
+            online_feature_store().invalidate_devices(tenant,app,affected)
+            raise
 
 
 def recompute_device(tenant,app,device_id,generation,*,as_of=None):
-    anchor=time.time() if as_of is None else as_of
+    with file_lock(data_dir()/".graph_projection"):
+        return _recompute_device(tenant,app,device_id,generation,as_of=as_of)
+
+
+def _recompute_device(tenant,app,device_id,generation,*,as_of=None):
+    latest=graph_store().latest_recorded_at(tenant,app)
+    anchor=max((latest if latest is not None else time.time()),
+               (as_of if as_of is not None else float("-inf")))
     rows,truncated=graph_store().scope_rows(tenant,app,anchor,limit=MAX_ROWS)
     primary_name=os.environ.get("FK_GRAPH_ALGORITHM","community_v1")
     algorithm=graph_algorithm(primary_name)
@@ -62,11 +83,32 @@ def recompute_device(tenant,app,device_id,generation,*,as_of=None):
     return result
 
 
+def refresh_dirty_devices(*,limit=100):
+    if type(limit) is not int or not 1<=limit<=1000:
+        raise ValueError("limit must be 1..1000")
+    refreshed=0;failed=[]
+    with file_lock(data_dir()/".graph_projection"):
+        store=graph_store()
+        for tenant,app,device,generation in store.dirty_devices(limit):
+            try:
+                _recompute_device(tenant,app,device,generation)
+                store.clear_dirty(tenant,app,device,generation)
+                refreshed+=1
+            except Exception as exc:
+                online_feature_store().invalidate_devices(
+                    tenant,app,[(device,generation)])
+                failed.append({"device_id":device,"error":type(exc).__name__,
+                               "phase":"graph_refresh"})
+    return {"refreshed":refreshed,"failed":failed}
+
+
 def lookup(tenant,app,device_id,generation,*,connection=None,max_age=MAX_FEATURE_AGE_SECONDS):
     # connection is accepted for compatibility but deliberately ignored: graph
     # features live outside the online decision SQLite authority.
-    return online_feature_store().get(
+    result=online_feature_store().get(
         tenant,app,"device",device_id,generation,FEATURE_SET,max_age=max_age)
+    # A bounded snapshot is partial evidence; do not present it as current.
+    return None if result is not None and result.get("truncated") else result
 
 
 def consume_pending(*,limit=100):
@@ -80,4 +122,6 @@ def consume_pending(*,limit=100):
             bus.fail(event.event_id,event.lease_token,type(exc).__name__,max_attempts=5)
             failed.append({"event_id":event.event_id,"error":type(exc).__name__,
                            "attempts":event.attempts})
-    return {"processed":processed,"failed":failed}
+    refresh=refresh_dirty_devices(limit=limit)
+    failed.extend(refresh["failed"])
+    return {"processed":processed,"refreshed":refresh["refreshed"],"failed":failed}

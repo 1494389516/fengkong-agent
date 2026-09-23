@@ -45,6 +45,19 @@ class SQLiteOnlineFeatureStore:
             return result
         finally:db.close()
 
+    def invalidate_devices(self,tenant,app,devices):
+        if not devices:
+            return
+        db=self.connect()
+        try:
+            db.executemany("""UPDATE entity_features SET computed_at=0
+                WHERE tenant=? AND app=? AND entity_type='device'
+                  AND entity_id=? AND generation=? AND feature_set IN (?,?)""",
+                ((tenant,app,device,generation,'graph_risk_v1','graph_risk_shadow_v1')
+                 for device,generation in devices))
+            db.commit()
+        finally: db.close()
+
 
 def online_feature_store():
     return SQLiteOnlineFeatureStore()
