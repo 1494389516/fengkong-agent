@@ -53,6 +53,8 @@ class LocalEventBus:
             if name not in columns:
                 db.execute("ALTER TABLE integration_events ADD COLUMN %s %s" % (name,ddl))
         db.execute("""CREATE INDEX IF NOT EXISTS integration_events_pending
+                      ON integration_events(published,created_at,event_id)""")
+        db.execute("""CREATE INDEX IF NOT EXISTS integration_events_claim
                       ON integration_events(topic,published,lease_until,created_at,event_id)""")
 
     @staticmethod
@@ -94,6 +96,7 @@ class LocalEventBus:
         db=connect()
         try:
             self._ensure(db)
+            db.commit()  # schema migration must finish before the claim transaction
             db.execute("BEGIN IMMEDIATE")
             # Exhausted, currently-unleased poison messages become dead letters.
             db.execute("""UPDATE integration_events
