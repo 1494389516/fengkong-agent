@@ -64,3 +64,12 @@ require("deploy/compose.yaml",
         "FK_DATA_DIR: /tenant",
         "FK_GRAPH_ALGORITHM: community_v1")
 print("Agent architecture invariants: PASS")
+
+require("agent/graph_training.py",
+        "knowledge_cutoff",
+        "future label leakage",
+        "snapshot_fingerprint")
+require("agent/graph_model_adapter.py",
+        "class CallableGNNAdapter",
+        "GNN score must be in [0,1]",
+        "not constructible from arbitrary runtime config")
