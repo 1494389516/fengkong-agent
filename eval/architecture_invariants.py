@@ -90,3 +90,13 @@ require("agent/graph_release.py",
         "runtime loader is not production-supported",
         "graph release not ready",
         "component_digest")
+
+require("agent/event_bus.py",
+        "class ClaimedEvent",
+        "lease_token",
+        "integration_events_claim",
+        "dead_letters")
+require("agent/graph_risk.py",
+        'bus.claim("risk.evidence.accepted"',
+        "event.lease_token",
+        "bus.fail")
