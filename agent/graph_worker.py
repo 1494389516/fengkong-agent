@@ -4,6 +4,8 @@ import json
 import time
 
 from .graph_risk import consume_pending
+from .event_bus import event_bus
+from .graph_worker_health import write_heartbeat
 
 
 def main():
@@ -14,7 +16,10 @@ def main():
     args=p.parse_args()
     while True:
         result=consume_pending(limit=args.limit)
-        print(json.dumps(result,ensure_ascii=False),flush=True)
+        stats=event_bus().stats(topic="risk.evidence.accepted")
+        heartbeat=write_heartbeat(result,stats)
+        print(json.dumps({**result,"bus":stats,"heartbeat":heartbeat["updated_at"]},
+                         ensure_ascii=False),flush=True)
         if args.once:return
         time.sleep(max(0.1,args.interval))
 
