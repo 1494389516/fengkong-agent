@@ -41,7 +41,7 @@ def recompute_device(tenant,app,device_id,generation,*,as_of=None):
     rows,truncated=graph_store().scope_rows(tenant,app,anchor,limit=MAX_ROWS)
     primary_name=os.environ.get("FK_GRAPH_ALGORITHM","community_v1")
     algorithm=graph_algorithm(primary_name)
-    result=algorithm.compute(rows,device_id,generation,truncated=truncated)
+    result=algorithm.compute(rows,device_id,generation,truncated=truncated,as_of=anchor)
     result.update(device_id=device_id,entity_generation=generation,as_of=anchor)
     store=online_feature_store()
     store.put(tenant,app,"device",device_id,generation,FEATURE_SET,
@@ -52,7 +52,7 @@ def recompute_device(tenant,app,device_id,generation,*,as_of=None):
     shadow_name=os.environ.get("FK_GRAPH_SHADOW_ALGORITHM","").strip()
     if shadow_name and shadow_name!=primary_name:
         shadow=graph_algorithm(shadow_name).compute(
-            rows,device_id,generation,truncated=truncated)
+            rows,device_id,generation,truncated=truncated,as_of=anchor)
         shadow.update(device_id=device_id,entity_generation=generation,as_of=anchor,
                       shadow_of=primary_name,
                       score_delta=round(float(shadow.get("community_risk_density",0.0))-
