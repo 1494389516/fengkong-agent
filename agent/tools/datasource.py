@@ -27,6 +27,23 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 _event_snapshot = ContextVar("online_event_snapshot", default=None)
 
 
+_account_reader = ContextVar("online_account_reader", default=None)
+
+
+@contextmanager
+def account_evidence_reader(reader):
+    token = _account_reader.set(reader)
+    try:
+        yield
+    finally:
+        _account_reader.reset(token)
+
+
+def selected_account_events(uid, as_of_ts, window_seconds):
+    reader = _account_reader.get()
+    return None if reader is None else reader(uid, as_of_ts, window_seconds)
+
+
 @contextmanager
 def event_snapshot(events, identity):
     token = _event_snapshot.set((identity, events))
@@ -212,6 +229,9 @@ def append_jsonl(path: Path, rec: Any) -> None:
 
 
 def load_events(*, limit=None, as_of_ts=None, window_seconds=None) -> List[Dict]:
+    if _account_reader.get() is not None:
+        from ..compute_budget import ComputeBudgetExceeded
+        raise ComputeBudgetExceeded('unplanned_online_history_read')
     if limit is not None and (type(limit) is not int or not 0 <= limit <= 1000000):
         raise ValueError("invalid event limit")
     snapshot = _event_snapshot.get()

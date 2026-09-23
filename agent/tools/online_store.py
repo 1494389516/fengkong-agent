@@ -11,7 +11,7 @@ import time
 import uuid
 from contextlib import contextmanager
 
-from .datasource import data_dir, event_snapshot
+from .datasource import data_dir, account_evidence_reader
 from .idemp_store import IdempotencyConflict
 
 
@@ -39,6 +39,8 @@ def connect(*, _migration=False):
             recorded_at REAL, body TEXT NOT NULL,
             PRIMARY KEY(tenant, app, event_id));
         CREATE INDEX IF NOT EXISTS events_scope_order ON events(tenant, app, occurred_at, event_id);
+        CREATE INDEX IF NOT EXISTS events_account_order
+          ON events(tenant, app, json_extract(body, '$.uid'), occurred_at, event_id);
         CREATE TABLE IF NOT EXISTS outbox (
             decision_id TEXT PRIMARY KEY, body TEXT NOT NULL, exported INTEGER DEFAULT 0);
     ''')
@@ -84,13 +86,30 @@ def decide(event, operator, compute, *, scope, source_kind, received_at, prepare
             contract = None if current_bundle() else _active_strategy().get('compute_contract')
             try:
                 with feature_budget(contract), sql_budget(db):
-                    history = bounded_history((r[0] for r in db.execute(
-                        "SELECT " + sql_body_expression() + " FROM events INDEXED BY events_scope_order WHERE tenant=? AND app=? AND recorded_at<=? ORDER BY occurred_at, event_id",
-                        (tenant, app, received_at))), encoded=True)
-                    snapshot_id = hashlib.sha256(json.dumps(history, sort_keys=True).encode()).hexdigest()
-                    with event_snapshot(history, (str(data_dir()), tenant, app, snapshot_id)):
+                    evidence = []
+                    def read_account(uid, as_of, window):
+                        # The built-in executor has account-only dependencies. Reject
+                        # a broader request rather than expose an incomplete snapshot.
+                        if uid != evaluation.get('uid') or as_of != evaluation['ts']:
+                            raise ComputeBudgetExceeded('unplanned_online_history_read')
+                        clauses = ["tenant=?", "app=?", "json_extract(body, '$.uid')=?",
+                                   "occurred_at<?", "recorded_at<=?"]
+                        params = [tenant, app, uid, as_of, min(as_of, received_at)]
+                        if window:
+                            clauses.append("occurred_at>=?")
+                            params.append(as_of - window)
+                        rows = bounded_history((r[0] for r in db.execute(
+                            "SELECT " + sql_body_expression() +
+                            " FROM events INDEXED BY events_account_order WHERE " +
+                            " AND ".join(clauses) + " ORDER BY occurred_at,event_id", params)), encoded=True)
+                        evidence.append({'uid': uid, 'as_of': as_of, 'window': window, 'rows': rows})
+                        return rows
+                    with account_evidence_reader(read_account):
                         record = dict(compute(evaluation, operator))
+                    if record.get('source') != 'compute_budget_fallback':
+                        snapshot_id = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
             except ComputeBudgetExceeded as exc:
+                snapshot_id = None
                 record = fallback_result(evaluation, exc)
         record.update(decision_id=str(uuid.uuid4()), tenant_id=tenant, app_id=app,
                       business_event_id=event["event_id"], feature_snapshot_id=snapshot_id,

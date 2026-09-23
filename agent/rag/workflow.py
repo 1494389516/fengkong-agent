@@ -54,7 +54,8 @@ def finish_search(state, result=None, error=''):
     if error:
         row.update(status='error', error_type=error)
         return
-    hits = result.get('hits', []) if isinstance(result, dict) else []
+    result = result if isinstance(result, dict) else {'status': 'error'}
+    hits = result.get('hits', [])
     row.update(status=result.get('status', 'error'), mode=result.get('mode', ''),
                hit_count=len(hits), hit_ids=[hit.get('chunk_id') for hit in hits[:10]],
                warning=bool(result.get('warning')))
@@ -81,22 +82,32 @@ def retrieval_audit(state):
     for source in state.get('retrieval_trace', []):
         row = {key: value for key, value in source.items() if key != 'signature'}
         rows.append(row)
-    completed = [row for row in rows if row['status'] not in ('pending', 'rejected_duplicate')]
+    attempted = [row for row in rows if row['status'] != 'rejected_duplicate']
+    completed = [row for row in attempted if row['status'] in ('ok', 'no_match')]
+    failed = [row for row in attempted if row['status'] not in ('ok', 'no_match', 'pending')]
+    counter_attempted = [row for row in attempted if row['purpose'] == 'counterevidence']
     purposes = sorted({row['purpose'] for row in completed})
     matched = any(row.get('hit_count', 0) for row in completed)
     counter_rows = [row for row in completed if row['purpose'] == 'counterevidence']
     counter_matched = any(row.get('hit_count', 0) for row in counter_rows)
     if not rows:
         outcome = 'not_used'
+    elif counter_attempted and not counter_rows:
+        outcome = 'counterevidence_incomplete'
+    elif failed or any(row['status'] == 'pending' for row in attempted):
+        outcome = 'retrieval_incomplete'
     elif matched and 'counterevidence' in purposes:
         outcome = 'balanced'
     elif matched:
         outcome = 'counterevidence_not_checked'
-    elif len(completed) >= _search_limit(state['snapshot']):
+    elif len(attempted) >= _search_limit(state['snapshot']):
         outcome = 'exhausted_no_match'
     else:
         outcome = 'knowledge_gap'
-    return {'outcome': outcome, 'attempts': rows, 'attempt_count': len(completed),
+    return {'outcome': outcome, 'attempts': rows, 'attempt_count': len(attempted),
+            'completed_successfully': len(completed), 'failed_count': len(failed),
+            'counterevidence_attempted': bool(counter_attempted),
+            'counterevidence_failed': any(row['purpose'] == 'counterevidence' for row in failed),
             'max_attempts': _search_limit(state['snapshot']), 'purposes': purposes,
             'counterevidence_search_performed': bool(counter_rows),
             'counterevidence_hit': counter_matched}
