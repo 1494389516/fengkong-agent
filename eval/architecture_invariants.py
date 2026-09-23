@@ -57,7 +57,7 @@ require("agent/graph_algorithms.py",
         "association_features_only")
 require("agent/graph_risk.py",
         'topic="risk.evidence.accepted"',
-        "online_feature_store().put",
+        "store.put",
         "SHADOW_FEATURE_SET",
         "shadow_of=primary_name")
 require("deploy/compose.yaml",
