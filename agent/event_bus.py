@@ -6,6 +6,7 @@ replace this adapter with Kafka/Pulsar without changing Collector or consumers.
 """
 from dataclasses import dataclass
 import json
+import sqlite3
 import time
 import uuid
 
@@ -51,7 +52,14 @@ class LocalEventBus:
         }
         for name,ddl in additions.items():
             if name not in columns:
-                db.execute("ALTER TABLE integration_events ADD COLUMN %s %s" % (name,ddl))
+                try:
+                    db.execute("ALTER TABLE integration_events ADD COLUMN %s %s" % (name,ddl))
+                except sqlite3.OperationalError as exc:
+                    # Another process may have completed the same additive migration
+                    # after our PRAGMA snapshot. Re-read; only that race is benign.
+                    refreshed={row[1] for row in db.execute("PRAGMA table_info(integration_events)")}
+                    if name not in refreshed:
+                        raise
         db.execute("""CREATE INDEX IF NOT EXISTS integration_events_pending
                       ON integration_events(published,created_at,event_id)""")
         db.execute("""CREATE INDEX IF NOT EXISTS integration_events_claim
