@@ -73,3 +73,11 @@ require("agent/graph_model_adapter.py",
         "class CallableGNNAdapter",
         "GNN score must be in [0,1]",
         "not constructible from arbitrary runtime config")
+
+require("agent/graph_model_eval.py",
+        "snapshot_fingerprint",
+        "account_aggregation",
+        "promotion_significance")
+require("agent/graph_model_registry.py",
+        "champion activation requires signed Control Plane release",
+        "challenger requires recorded evaluation")
