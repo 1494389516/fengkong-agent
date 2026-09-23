@@ -59,17 +59,26 @@ class LocalEventBus:
             if owned:
                 db.close()
 
-    def pending(self, *, limit=100):
+    def pending(self, *, limit=100, topic=None):
         if type(limit) is not int or not 1 <= limit <= 1000:
             raise ValueError("limit must be 1..1000")
+        if topic is not None and (not isinstance(topic, str) or not topic):
+            raise ValueError("topic must be a non-empty string")
         db = connect()
         try:
             self._ensure(db)
-            rows = db.execute(
-                "SELECT event_id,topic,event_key,payload,created_at "
-                "FROM integration_events WHERE published=0 "
-                "ORDER BY created_at,event_id LIMIT ?", (limit,)
-            ).fetchall()
+            if topic is None:
+                rows = db.execute(
+                    "SELECT event_id,topic,event_key,payload,created_at "
+                    "FROM integration_events WHERE published=0 "
+                    "ORDER BY created_at,event_id LIMIT ?", (limit,)
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT event_id,topic,event_key,payload,created_at "
+                    "FROM integration_events WHERE published=0 AND topic=? "
+                    "ORDER BY created_at,event_id LIMIT ?", (topic, limit)
+                ).fetchall()
             return [Event(row[0], row[1], row[2], json.loads(row[3]), row[4]) for row in rows]
         finally:
             db.close()

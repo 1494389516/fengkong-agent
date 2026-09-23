@@ -33,15 +33,31 @@ require("serve.py",
         'if self.path == "/reports"',
         'if self.path == "/attestation/challenge"',
         'elif self.path == "/attestation/enroll"')
-print("Agent architecture invariants: PASS")
-
 require("agent/graph_risk.py",
         "identity_trust",
         "server_bound",
-        "community_risk_density",
-        "association_features_only")
+        "graph_algorithm",
+        "online_feature_store")
 require("agent/collector.py",
         "result['server_graph'] = graph")
 require("deploy/compose.yaml",
         "graph-worker:",
         "agent.graph_worker")
+
+require("agent/graph_store.py",
+        'data_dir()/"graph.sqlite3"',
+        "class SQLiteGraphStore")
+require("agent/online_feature_store.py",
+        'data_dir()/"features.sqlite3"',
+        "class SQLiteOnlineFeatureStore")
+require("agent/graph_algorithms.py",
+        "class CommunityV1",
+        "algorithm_version",
+        "association_features_only")
+require("agent/graph_risk.py",
+        'topic="risk.evidence.accepted"',
+        "online_feature_store().put")
+require("deploy/compose.yaml",
+        "FK_DATA_DIR: /tenant",
+        "FK_GRAPH_ALGORITHM: community_v1")
+print("Agent architecture invariants: PASS")
