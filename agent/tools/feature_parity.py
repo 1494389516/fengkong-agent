@@ -51,11 +51,9 @@ def _account_last_ts(uid: str) -> Optional[float]:
 @tool(
     name="feature_parity_check",
     description=(
-        "特征离线/在线一致性校验(Training-Serving Skew 防线):对指定账号,"
-        "比较离线实现(featurelib 单一事实源)与在线实现(FK_FEATURE_ONLINE_"
-        "MODULE 注入;未配置时同源并显式标注未验证)在同一个 (uid, as_of, "
-        "window) 下的特征输出。逐字段严格比对,差异清单 + 通过率。"
-        "建模/回测/策略分析前跑一次,线上特征对不上时所有模型评估都是假的。"
+        "建模/回测前校验训练与服务特征一致性:同一(uid,as_of,window)逐字段"
+        "比较 featurelib 与 FK_FEATURE_ONLINE_MODULE,返回差异及通过率。"
+        "未配置在线实现时标注未验证;有差异须先修复 training-serving skew。"
     ),
     parameters={
         "type": "object",

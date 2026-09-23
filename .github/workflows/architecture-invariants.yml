@@ -28,3 +28,5 @@ jobs:
         run: python -m eval.graph_worker_observability_smoke
       - name: Graph projection regressions
         run: python -m eval.graph_projection_regressions
+      - name: Agent token budget regressions
+        run: python -m eval.token_budget_regressions

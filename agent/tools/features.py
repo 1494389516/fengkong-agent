@@ -13,15 +13,10 @@ from .featurelib import account_features, accounts_per, behavior_paths, percenti
 @tool(
     name="feature_stats",
     description=(
-        "计算某个 uid 的行为特征:事件数、去重 IP/设备、事件类型分布、最短间隔、"
-        "订单统计(次数/最大/累计金额)、反向基数(该账号的设备/IP 最多被几个账号"
-        "共用,>=3 是团伙信号)、行为路径 behavior(会话级序列签名:套现 "
-        "login→券×N→单 / 盗号登录后直奔 order / bot 纯券流),以及人群百分位 "
-        "population_percentile(证据链引用:min_gap_seconds 百分位低 = 比几乎所有账号都快)。"
-        "as_of_ts 取证时点(只统计该时刻之前的事件,评估历史事件时必传,防止"
-        "偷看未来);window_seconds 时间窗(只统计最近 N 秒,行为模式类判断用)。"
-        "两者都不传 = 全历史。"
-        "account_profile 已判目标 uid 不存在时不要再调。"
+        "按 uid 计算事件数、IP/设备去重、事件类型、最短间隔、订单、资源反向基数、"
+        "行为路径与人群百分位。反向基数>=3 是团伙信号;低 min_gap_seconds 百分位表示更快。"
+        "as_of_ts 只取该时点前证据,回看历史时必传;window_seconds 取最近 N 秒,"
+        "两者缺省为全历史。account_profile 已判不存在则勿再调。"
     ),
     parameters={
         "type": "object",

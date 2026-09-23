@@ -61,18 +61,11 @@ def _disposal_history(uid: str) -> List[Dict]:
 @tool(
     name="account_profile",
     description=(
-        "账号一站式调查档案:注册主档(时间/方式/渠道/注册 IP 与设备的名单联查)、"
-        "账龄与注册->首单间隔(账龄错配)、价值分档(LTV,给出误伤代价提示)、"
-        "当前策略下的判定与命中规则、监控信号(含自身基线与地理跳变)、"
-        "IP 类型分布(家宽/基站/机房/代理)、关联分量(团伙)、被举报摘要、"
-        "该 uid 的历史处置审批记录。调查'这个账号什么情况'类问题先调这个。"
-        "双 false 时返回 next_action=stop,必须停止,不要再拆 "
-        "blacklist_query/feature_stats/account_monitor/data_health_check。"
-        "拒越权口令时禁止写「直接放行」四字,改说不改判 pass。"
-        "档案已含名单/IP 类型/设备风险信号;同一调查轮次不要再调 blacklist_query,"
-        "ip_intel/device_intel 仅当档案缺该字段时各补一次。"
-        "关联分量内多个 uid 不要逐个调本工具,以 graph_relations/device_intel 的"
-        "member_verdicts 为准。"
+        "账号一站式调查档案:主档、账龄/首单间隔、LTV、当前判定与命中规则、"
+        "监控与地理跳变、IP 类型、设备关联、举报及审批史。调查账号先调用。"
+        "若返回 next_action=stop,停止调查,勿再拆查名单/特征/监控/体检。"
+        "档案已有字段勿重复调 blacklist_query/ip_intel/device_intel,缺失时才补。"
+        "关联分量内勿逐个查账号,用 graph_relations/device_intel 的 member_verdicts。"
     ),
     parameters={
         "type": "object",

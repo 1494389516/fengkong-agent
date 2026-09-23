@@ -9,7 +9,7 @@ MAX_TOOL_ROUNDS 防止模型陷入无限调工具的循环。
   ① 度量        —— 记录每次 resp.usage(含 DeepSeek 缓存命中/未命中),不测无法优化。
   ④ 工具裁剪    —— TOOL_KEEP_TURNS 之前的 tool 结果替换成占位符(结论已被 assistant 吸收)。
   ⑤ checkpoint  —— CHECKPOINT_EVERY 轮把旧历史压成一条摘要(代价最高,默认关)。
-  ⑥ 硬预算兜底  —— 发送前粗估上下文,超 CONTEXT_EST_TOKEN_BUDGET 强制压缩(保险丝)。
+  ⑥ 硬预算兜底  —— 每次发送前估算消息历史,超限压缩;仍超限则停止请求。
   ⑦ 脱敏层      —— 默认开启(FK_PRIVACY=0 才显式关闭),uid/IP/设备号在
                     LLM 边界双向替换(privacy.py),
                     敏感标识符不出程序,公有云 API 部署的合规前提。
@@ -38,10 +38,9 @@ TRIM_PLACEHOLDER = "[已裁剪:早期工具结果,结论已并入后续分析]"
 #   仅当"必须跨案例保留记忆、又不能 reset"时才开;否则优先用 ③ reset,更便宜也更缓存友好。
 CHECKPOINT_EVERY = 0
 
-# ⑥ 上下文硬预算兜底:发送前粗估上下文 token(json 字符数 / 2,中文约 1 token/字、
-#   英文约 4 字符/token,取偏保守估计),超限强制压缩一次旧历史。
-#   这是保险丝不是常规手段:正常应先被 ③ reset / ④ 裁剪控制住;触发说明单案例
-#   对话已经过长,压缩虽会打断缓存前缀,但比撑爆上下文窗口或费用失控强。0 = 关闭。
+# ⑥ 消息历史的估算上限,不含另受结构性门禁约束的工具 schema。每次请求前
+#   超限先压旧历史、再裁当前轮工具结果;仍超限则停止请求。正常应先由
+#   ③ reset / ④ 裁剪控制住;压缩会打断缓存前缀。0 = 关闭。
 CONTEXT_EST_TOKEN_BUDGET = 24000
 
 
@@ -178,7 +177,7 @@ class Agent:
             return False
         convo = "\n".join(
             "%s: %s" % (m["role"], (m.get("content") or "")[:500]) for m in body
-        )
+        )[-16000:]
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -187,6 +186,7 @@ class Agent:
                     "涉及的 uid/ip/设备及其风险判定;丢弃工具调用的过程细节。"},
                 {"role": "user", "content": convo},
             ],
+            max_tokens=1024,
         )
         self._accumulate(_extract_usage(resp))
         summary = resp.choices[0].message.content or ""
@@ -208,6 +208,20 @@ class Agent:
         for i in live[:-1]:  # 保留最近一条
             self.messages[i]["content"] = TRIM_PLACEHOLDER
         return True
+
+    def _enforce_context_budget(self, *, allow_checkpoint: bool, on_notice=None) -> bool:
+        """Keep the estimated message history below the cap before every API call."""
+        if CONTEXT_EST_TOKEN_BUDGET <= 0 or self._estimate_context_tokens() <= CONTEXT_EST_TOKEN_BUDGET:
+            return False
+        compacted = self._checkpoint_now() if allow_checkpoint else False
+        if self._estimate_context_tokens() > CONTEXT_EST_TOKEN_BUDGET:
+            compacted = self._force_trim_current_turn() or compacted
+        if self._estimate_context_tokens() > CONTEXT_EST_TOKEN_BUDGET:
+            raise PermissionError("message context token budget exceeded before LLM request")
+        if compacted and on_notice:
+            on_notice("上下文估算超 %d tokens,已强制压缩(⑥ 兜底)"
+                      % CONTEXT_EST_TOKEN_BUDGET)
+        return compacted
 
     # ⑤ 周期触发:每 CHECKPOINT_EVERY 次 ask 压缩一次。
     def _maybe_checkpoint(self) -> None:
@@ -319,7 +333,7 @@ class Agent:
         # ⑦ 用户输入里的真实 uid/IP/设备号在进 LLM 前替换成 token
         self.messages.append({"role": "user", "content":
                               self._tok.tokenize(user_input) if self._privacy else user_input})
-        compacted_this_ask = False  # ⑥ 每轮 ask 最多强制压缩一次,防压缩循环
+        compacted_this_ask = False  # 摘要最多一次;新工具结果超限时仍可再次裁剪
         ask_usage: Dict[str, int] = {"prompt": 0, "completion": 0,
                                      "cache_hit": 0, "cache_miss": 0,
                                      "api_calls": 0}
@@ -329,15 +343,9 @@ class Agent:
         _t0 = time.monotonic()  # P1-7:延迟预算的计量起点
         for _ in range(min(MAX_TOOL_ROUNDS, getattr(self, "max_rounds", MAX_TOOL_ROUNDS))):
             self._trim_tool_messages()  # ④ 发送前裁剪
-            if (CONTEXT_EST_TOKEN_BUDGET > 0 and not compacted_this_ask
-                    and self._estimate_context_tokens() > CONTEXT_EST_TOKEN_BUDGET):
-                compacted_this_ask = True
-                # 先压旧历史;压不动(单轮工具结果自身撑爆)再降级当前轮工具结果。
-                # 只在真的减了上下文时才通告,不谎报"已压缩"。
-                did = self._checkpoint_now() or self._force_trim_current_turn()
-                if did and on_notice:
-                    on_notice("上下文估算超 %d tokens,已强制压缩(⑥ 兜底)"
-                              % CONTEXT_EST_TOKEN_BUDGET)
+            compacted_this_ask = (self._enforce_context_budget(
+                allow_checkpoint=not compacted_this_ask, on_notice=on_notice)
+                or compacted_this_ask)
             _llm_t0 = time.monotonic()
             from .tools.capability import investigation_state
             task = investigation_state()

@@ -133,12 +133,10 @@ def model_register(name: str, version: str, train_fingerprint: str = "",
 @tool(
     name="model_eval",
     description=(
-        "对模型跑评估并写入登记簿:传入模型对评估切分账号的风险分 {uid: score}"
-        "(越大越可疑),计算 AUC/KS/Precision@K/Recall/FPR/FNR/混淆矩阵。"
-        "防泄漏门禁(P0-1):eval_fingerprint 必须来自 build_dataset 的时间切分"
-        "评估侧,且不等于训练指纹 —— 同源评估(train/eval 同批账号)= 训练泄漏,"
-        "指标不能冒充泛化表现。结果带训练/评估指纹、两侧账号数与切点时点。"
-        "结果是 shadow->challenger 评估门禁的依据。"
+        "评估并登记模型风险分 {uid: score}(越大越可疑):AUC/KS/Precision@K/"
+        "Recall/FPR/FNR/混淆矩阵。eval_fingerprint 必须来自 build_dataset 的"
+        "时间切分评估侧且异于训练指纹,防止同源泄漏。结果含训练/评估指纹、"
+        "两侧账号数与切点,用于 shadow->challenger 门禁。"
     ),
     parameters={
         "type": "object",
