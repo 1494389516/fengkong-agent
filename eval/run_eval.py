@@ -1614,11 +1614,14 @@ def run_strategy_registry_layer() -> int:
                 "model_dependencies": ["ghost:9.9"]})
             p_bad = _fixture_dispatch("strategy_promote", {
                 "strategy_name": "bad_v1", "version": "1.0", "to": "validated"})
+            bad_state = _fixture_dispatch("strategy_list", {"strategy_name": "bad_v1"})
             checks += [
                 ("未验证策略禁止离开 draft",
-                 "校验门禁未过" in p_bad.get("error", "")
+                 "admission failed" in p_bad.get("error", "")
                  and "r999_unknown" in p_bad["error"]
-                 and "ghost:9.9" in p_bad["error"]),
+                 and "ghost:9.9" in p_bad["error"]
+                 and len(bad_state.get("strategies", [])) == 1
+                 and bad_state["strategies"][0]["status"] == "draft"),
             ]
             r_v = _fixture_dispatch("strategy_validate", {
                 "strategy_name": "coupon_v1", "version": "1.0"})
@@ -4171,7 +4174,7 @@ def _check_agent_case(c, answer, tool_calls, used):
 def run_agent_layers(cases) -> int:
     """第 2+3 层:轨迹 + 回答 + 成本。每案例 reset(即 ③ 案例隔离的正确用法),
     用 session_usage 前后差值得到单案例成本。返回失败数。"""
-    from agent.core import Agent  # 延迟导入:离线模式不需要 openai / API key
+    from agent.core import Agent, CASE_TOKEN_BUDGET  # 延迟导入:离线模式不需要 openai / API key
 
     agent = Agent()
     agent.set_pack("full")  # 评估对照全量工具面;日常 CLI 默认 analyst
@@ -4180,6 +4183,7 @@ def run_agent_layers(cases) -> int:
     detail = []
     for c in cases:
         agent.reset()  # ③ 每个案例干净上下文,互不串证据
+        agent.case_token_budget = c.get("max_total_tokens", CASE_TOKEN_BUDGET)
         before = dict(agent.session_usage)
         tool_calls = []
         try:

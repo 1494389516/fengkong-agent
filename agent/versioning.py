@@ -43,6 +43,8 @@ def agent_policy_version() -> str:
         "TOOL_KEEP_TURNS": _core.TOOL_KEEP_TURNS,
         "CHECKPOINT_EVERY": _core.CHECKPOINT_EVERY,
         "CONTEXT_EST_TOKEN_BUDGET": _core.CONTEXT_EST_TOKEN_BUDGET,
+        "CASE_TOKEN_BUDGET": _core.CASE_TOKEN_BUDGET,
+        "MAX_RESPONSE_TOKENS": _core.MAX_RESPONSE_TOKENS,
         "MAX_TOOL_ROUNDS": _core.MAX_TOOL_ROUNDS,
     }, sort_keys=True)
     return _h16(md + "|" + params)

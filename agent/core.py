@@ -19,6 +19,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -42,6 +43,10 @@ CHECKPOINT_EVERY = 0
 #   超限先压旧历史、再裁当前轮工具结果;仍超限则停止请求。正常应先由
 #   ③ reset / ④ 裁剪控制住;压缩会打断缓存前缀。0 = 关闭。
 CONTEXT_EST_TOKEN_BUDGET = 24000
+# reset() marks a new case. Provider usage is authoritative after a call;
+# request estimates only reserve room before sending it.
+CASE_TOKEN_BUDGET = 60000
+MAX_RESPONSE_TOKENS = 2048
 
 
 def _extract_usage(resp) -> Dict[str, int]:
@@ -88,6 +93,9 @@ class Agent:
             "prompt": 0, "completion": 0, "total": 0,
             "cache_hit": 0, "cache_miss": 0, "api_calls": 0,
         }
+        self.case_token_budget = CASE_TOKEN_BUDGET
+        self._case_tokens = 0
+        self._case_id = uuid.uuid4().hex
         self._asks_since_ckpt = 0
         # ⑦ 脱敏:token 映射跨轮复用(同值同 token,LLM 才能跨轮关联同一账号)
         self._privacy = privacy_enabled()
@@ -111,6 +119,8 @@ class Agent:
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": self._system}]
         self._asks_since_ckpt = 0
+        self._case_tokens = 0
+        self._case_id = uuid.uuid4().hex
         if getattr(self, "_privacy", False):
             self._tok = Tokenizer()
 
@@ -134,6 +144,41 @@ class Agent:
         for k in ("prompt", "completion", "total", "cache_hit", "cache_miss"):
             self.session_usage[k] += u[k]
         self.session_usage["api_calls"] += 1
+
+    def _case_request_limit(self, messages: List[Dict], request_tools: List[Dict],
+                            max_output: int) -> tuple:
+        """Reserve estimated input and a bounded output within the current case.
+
+        The estimate is deliberately padded; exact prompt tokens are only known
+        after the provider responds. A response that exceeds the cap is rejected.
+        """
+        payload = json.dumps({"messages": messages, "tools": request_tools},
+                             ensure_ascii=False, default=str)
+        cjk = sum(1 for ch in payload if "\u4e00" <= ch <= "\u9fff")
+        estimate = int((cjk * 0.7 + (len(payload) - cjk) * 0.25) * 1.2)
+        estimate += 8 * (len(messages) + len(request_tools) + 1)
+        budget = getattr(self, "case_token_budget", CASE_TOKEN_BUDGET)
+        if budget <= 0:
+            raise ValueError("case token budget must be positive")
+        remaining = budget - getattr(self, "_case_tokens", 0) - estimate
+        if remaining <= 0:
+            raise PermissionError("case token budget exhausted before LLM request")
+        return estimate, min(max_output, remaining)
+
+    def _charge_case(self, usage: Dict[str, int], estimate: int,
+                     reserved_output: int) -> None:
+        # Missing/partial provider usage must never make requests free.
+        charged = (usage["prompt"] + usage["completion"] if usage["prompt"] > 0
+                   else estimate + reserved_output)
+        self._case_tokens = getattr(self, "_case_tokens", 0) + charged
+        if self._case_tokens > getattr(self, "case_token_budget", CASE_TOKEN_BUDGET):
+            self._log_ask("", "", {
+                "prompt": usage["prompt"], "completion": usage["completion"],
+                "cache_hit": usage["cache_hit"], "cache_miss": usage["cache_miss"],
+                "api_calls": 1,
+            }, [], False, {"total_ms": 0, "llm_ms": 0, "tool_ms": 0}, [],
+                budget_error="case token budget exceeded after LLM response")
+            raise PermissionError("case token budget exceeded after LLM response")
 
     # ④ 发送前把"老于 TOOL_KEEP_TURNS 个用户轮次"的 tool 结果内容换成占位符。
     #   只改 content、保留 role 与 tool_call_id,so 与 assistant.tool_calls 的配对不破,
@@ -178,17 +223,21 @@ class Agent:
         convo = "\n".join(
             "%s: %s" % (m["role"], (m.get("content") or "")[:500]) for m in body
         )[-16000:]
+        summary_messages = [
+            {"role": "system", "content":
+                "把下面的风控分析对话压成要点摘要,保留:关键结论、命中的名单/规则、"
+                "涉及的 uid/ip/设备及其风险判定;丢弃工具调用的过程细节。"},
+            {"role": "user", "content": convo},
+        ]
+        estimate, max_output = self._case_request_limit(summary_messages, [], 1024)
         resp = self.client.chat.completions.create(
             model=self.model,
-            messages=[
-                {"role": "system", "content":
-                    "把下面的风控分析对话压成要点摘要,保留:关键结论、命中的名单/规则、"
-                    "涉及的 uid/ip/设备及其风险判定;丢弃工具调用的过程细节。"},
-                {"role": "user", "content": convo},
-            ],
-            max_tokens=1024,
+            messages=summary_messages,
+            max_tokens=max_output,
         )
-        self._accumulate(_extract_usage(resp))
+        usage = _extract_usage(resp)
+        self._accumulate(usage)
+        self._charge_case(usage, estimate, max_output)
         summary = resp.choices[0].message.content or ""
         self.messages = [
             {"role": "system", "content": self._system},
@@ -231,11 +280,16 @@ class Agent:
         if self._asks_since_ckpt < CHECKPOINT_EVERY or len(self.messages) <= 3:
             return
         self._asks_since_ckpt = 0
-        self._checkpoint_now()
+        try:
+            self._checkpoint_now()
+        except PermissionError as exc:
+            if "case token budget exhausted" not in str(exc):
+                raise
 
     def _log_ask(self, question: str, answer: str, ask_usage: Dict[str, int],
                  tools_used: List[str], compacted: bool,
-                 latency: Dict[str, Any], tool_times: List[tuple]) -> None:
+                 latency: Dict[str, Any], tool_times: List[tuple],
+                 budget_error: str = "") -> None:
         """落一行运行日志(仅 FK_AGENT_RUN_LOG=1 时)。日志失败绝不能掀翻对话。
         latency: {total_ms, llm_ms, tool_ms};tool_times: [(工具名, 毫秒)]。"""
         if not self._run_log_enabled:
@@ -252,9 +306,13 @@ class Agent:
                 "api_calls": ask_usage["api_calls"],
                 "tokens": {k: ask_usage[k] for k in
                            ("prompt", "completion", "cache_hit", "cache_miss")},
+                "case_id": getattr(self, "_case_id", None),
+                "case_tokens": getattr(self, "_case_tokens", None),
+                "case_token_budget": getattr(self, "case_token_budget", CASE_TOKEN_BUDGET),
                 "latency_ms": {k: round(v, 1) for k, v in latency.items()},
                 "tool_latency_ms": [[n, round(t, 1)] for n, t in tool_times],
                 "budget_compacted": compacted,
+                "budget_error": budget_error,
             }
             from .tools.datasource import output_dir
             from .tools.capability import get_scope
@@ -350,7 +408,9 @@ class Agent:
             from .tools.capability import investigation_state
             task = investigation_state()
             request_tools = tools.schemas(strict=self.strict_mode, pack=getattr(self, "tool_pack", "full"))
-            extra = {}
+            estimate, max_output = self._case_request_limit(
+                self.messages, request_tools, MAX_RESPONSE_TOKENS)
+            extra = {"max_tokens": max_output}
             if task is not None:
                 # UTF-8 bytes plus envelope overhead upper-bounds ordinary BPE
                 # input tokens without depending on a provider-specific tokenizer.
@@ -359,19 +419,19 @@ class Agent:
                 remaining = task['snapshot']['budget']['max_tokens'] - task['tokens']
                 if remaining <= prompt_bound:
                     raise PermissionError("investigation token budget exhausted before LLM request")
-                extra['max_tokens'] = min(2048, remaining - prompt_bound)
+                extra['max_tokens'] = min(max_output, remaining - prompt_bound)
             resp = self.client.chat.completions.create(
                 model=self.model, messages=self.messages, tools=request_tools, **extra)
+            usage = _extract_usage(resp)
+            self._accumulate(usage)
+            self._charge_case(usage, estimate, extra['max_tokens'])
             if task is not None:
-                actual = _extract_usage(resp)
-                charged = actual['prompt'] + actual['completion']
+                charged = usage['prompt'] + usage['completion']
                 # Missing usage cannot create free requests.
                 task['tokens'] += max(charged, prompt_bound + extra['max_tokens'])
                 if task['tokens'] > task['snapshot']['budget']['max_tokens']:
                     raise PermissionError("investigation token budget exceeded")
             latency["llm_ms"] += (time.monotonic() - _llm_t0) * 1000
-            usage = _extract_usage(resp)  # ①
-            self._accumulate(usage)
             for k in ("prompt", "completion", "cache_hit", "cache_miss"):
                 ask_usage[k] += usage[k]
             ask_usage["api_calls"] += 1
