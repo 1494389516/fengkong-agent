@@ -124,6 +124,8 @@ def claim_evidence_audit(summary, retrieved, event_registry, retrieval):
         result['workflow_issues'].append('counterevidence claim missing')
     if retrieved and retrieval.get('outcome') == 'counterevidence_not_checked':
         result['workflow_issues'].append('knowledge used without counterevidence search')
+    if retrieval.get('outcome') in ('counterevidence_incomplete', 'retrieval_incomplete') or retrieval.get('failed_count', 0):
+        result['workflow_issues'].append('retrieval failed or unfinished; evidence coverage unknown')
     result['unknown_event_refs'] = sorted(unknown_events)
     result['unknown_knowledge_refs'] = sorted(unknown_knowledge)
     result['malformed_knowledge_citations'] = sorted(malformed_citations)

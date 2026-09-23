@@ -64,13 +64,21 @@ def _visible_at(event, as_of_ts):
     return as_of_ts is None or (ts < as_of_ts and recorded <= as_of_ts)
 
 
-def _account_events(uid: str, as_of_ts: Optional[float] = None) -> List[Dict]:
-    evs = _events_by_uid().get(uid, ())
+def _account_events(uid: str, as_of_ts: Optional[float] = None,
+                    window_seconds: Optional[int] = None) -> List[Dict]:
+    _validate_runtime_catalog()
+    from .datasource import selected_account_events
+    evs = selected_account_events(uid, as_of_ts, window_seconds)
+    if evs is None:
+        evs = [e for e in _events_by_uid().get(uid, ()) if _visible_at(e, as_of_ts)]
+        if window_seconds and evs:
+            anchor = as_of_ts if as_of_ts is not None else max(e["ts"] for e in evs) + 1
+            evs = [e for e in evs if e["ts"] >= anchor - window_seconds]
     from ..compute_budget import current_budget
     budget = current_budget()
     if budget is not None:
         budget.account(evs)
-    return [e for e in evs if _visible_at(e, as_of_ts)]
+    return evs
 
 
 def _resource_value(value):
@@ -81,10 +89,7 @@ def _resource_value(value):
 def account_features(uid: str, as_of_ts: Optional[float] = None,
                      window_seconds: Optional[int] = None) -> Dict:
     """单账号行为特征。找不到事件时 found=False(调用方据此判断"无历史")。"""
-    evs = _account_events(uid, as_of_ts)
-    if window_seconds and evs:
-        anchor = as_of_ts if as_of_ts is not None else max(e["ts"] for e in evs) + 1
-        evs = [e for e in evs if e["ts"] >= anchor - window_seconds]
+    evs = _account_events(uid, as_of_ts, window_seconds)
     if not evs:
         return {"uid": uid, "found": False, "as_of_ts": as_of_ts, "window_seconds": window_seconds}
     ts = sorted(e["ts"] for e in evs)

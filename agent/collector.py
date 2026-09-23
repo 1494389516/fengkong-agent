@@ -61,6 +61,23 @@ def _finite_payload(value, depth=0):
         for item in value: _finite_payload(item,depth+1)
 
 
+def _decode_mapping(payload, table, scope, depth=0):
+    if depth > 16:
+        raise ContractError('payload nesting budget exceeded')
+    if isinstance(payload, dict):
+        decoded = {}
+        for name, item in payload.items():
+            canonical = table.get(name, name)
+            if canonical in decoded:
+                raise ContractError('field mapping collision')
+            decoded[canonical] = (_decode_mapping(item, table, scope, depth + 1)
+                                  if scope == 'all' else item)
+        return decoded
+    if isinstance(payload, list) and scope == 'all':
+        return [_decode_mapping(item, table, scope, depth + 1) for item in payload]
+    return payload
+
+
 def ingest(upload, context, *, wire_bytes=None, remote_ip=None, now=None):
     context.require('reports.write')
     now=time.time() if now is None else now
@@ -79,6 +96,7 @@ def ingest(upload, context, *, wire_bytes=None, remote_ip=None, now=None):
     if len(key)<32 or not verify_upload_with_base_key(value,key,require_hardware=required):
         raise ContractError('invalid report MAC')
     raw_payload=base64.b64decode(value['payload_json'],validate=True)
+    if len(raw_payload)>1024*1024: raise ContractError('payload size budget exceeded')
     payload=json.loads(canonical_payload(raw_payload))
     _finite_payload(payload)
     mapping=value.get('field_mapping_version','')
@@ -88,12 +106,10 @@ def ingest(upload, context, *, wire_bytes=None, remote_ip=None, now=None):
         if not isinstance(table,dict) or not table or any(not isinstance(k,str) or not isinstance(v,str) for k,v in table.items()):
             raise ContractError('unsupported field mapping version')
         if len(set(table.values()))!=len(table): raise ContractError('invalid field mapping configuration')
-        decoded={}
-        for name,item in payload.items():
-            canonical=table.get(name,name)
-            if canonical in decoded: raise ContractError('field mapping collision')
-            decoded[canonical]=item
-        payload=decoded
+        # Depth semantics are trusted configuration bound to the MAC-covered version.
+        scope=attrs.get('field_mapping_scopes',{}).get(mapping,'topLevel')
+        if scope not in ('topLevel','all'): raise ContractError('unsupported field mapping scope')
+        payload=_decode_mapping(payload,table,scope)
     digest=_digest(value)
     # Server-owned namespace key never leaves Collector.
     identity_key=Path(os.environ['FK_IDENTITY_KEY_FILE']).read_bytes()
@@ -238,8 +254,10 @@ def issue_challenge(context, purpose='assertion', *, now=None):
         db=_database()
         try:
             db.execute('BEGIN IMMEDIATE')
-            db.execute('UPDATE attestation_challenges SET consumed=1 WHERE tenant=? AND app=? AND principal=? AND purpose=?',
-                (context.tenant,context.app,context.principal,purpose))
+            # Never replace a live challenge: the first upload may still be in flight.
+            if db.execute('SELECT 1 FROM attestation_challenges WHERE tenant=? AND app=? AND principal=? AND purpose=? AND consumed=0 AND expires_at>?',
+                (context.tenant,context.app,context.principal,purpose,now)).fetchone():
+                raise ContractError('challenge already in flight; retry after completion or expiry')
             db.execute('INSERT INTO attestation_challenges VALUES(?,?,?,?,?,?,?,0)',
                 (identifier,context.tenant,context.app,context.principal,purpose,challenge,now+120))
             db.commit()
