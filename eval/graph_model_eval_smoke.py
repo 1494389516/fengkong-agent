@@ -27,7 +27,8 @@ with tempfile.TemporaryDirectory() as tmp:
     result=evaluate_graph_model(model,snap,labels)
     assert result["metrics"]["auc"]==1.0,result
     assert result["metrics"]["sample_count"]==2
-    row=registry.register("graph_gnn","1",snap.fingerprint,"callable_gnn")
+    row=registry.register("graph_gnn","1",snap.fingerprint,"callable_gnn","a"*64,
+        runtime_contract={"loader":"offline_only"})
     assert row["status"]=="candidate"
     registry.record_evaluation("graph_gnn","1",result)
     assert registry.promote("graph_gnn","1","shadow")["status"]=="shadow"
@@ -38,4 +39,8 @@ with tempfile.TemporaryDirectory() as tmp:
     except PermissionError:
         blocked=True
     assert blocked
+    from agent.graph_release import release_readiness
+    readiness=release_readiness("graph_gnn","1")
+    assert readiness["ready"] is False
+    assert "runtime loader is not production-supported" in readiness["reasons"]
 print("graph model eval/registry smoke: PASS")
