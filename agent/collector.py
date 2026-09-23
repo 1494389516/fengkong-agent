@@ -249,6 +249,9 @@ def enrich_business_event(event, context, connection=None):
                              latest['entity_generation'], connection=db)
         if graph is not None:
             result['server_graph'] = graph
+            result['server_graph_status'] = 'current'
+        else:
+            result['server_graph_status'] = 'pending_or_stale'
         result['evidence_refs']=[o['evidence_id'] for o in observations]
     else:
         result['identity_trust']='asserted'
