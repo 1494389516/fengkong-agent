@@ -36,8 +36,8 @@ require("serve.py",
 require("agent/graph_risk.py",
         "identity_trust",
         "server_bound",
-        "community_risk_density",
-        "association_features_only")
+        "graph_algorithm",
+        "online_feature_store")
 require("agent/collector.py",
         "result['server_graph'] = graph")
 require("deploy/compose.yaml",
