@@ -42,7 +42,7 @@ def recompute_device(tenant,app,device_id,generation,*,as_of=None):
     result=algorithm.compute(rows,device_id,generation,truncated=truncated)
     result.update(device_id=device_id,entity_generation=generation,as_of=anchor)
     online_feature_store().put(tenant,app,"device",device_id,generation,FEATURE_SET,
-                               result,computed_at=anchor)
+                               result,computed_at=time.time())
     return result
 
 
