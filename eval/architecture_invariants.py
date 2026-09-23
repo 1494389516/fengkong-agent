@@ -56,15 +56,13 @@ require("agent/graph_algorithms.py",
         "temporal_half_life_seconds",
         "association_features_only")
 require("agent/graph_risk.py",
-        'topic="risk.evidence.accepted"',
+        'bus.claim("risk.evidence.accepted"',
         "store.put",
         "SHADOW_FEATURE_SET",
         "shadow_of=primary_name")
 require("deploy/compose.yaml",
         "FK_DATA_DIR: /tenant",
         "FK_GRAPH_ALGORITHM: community_v1")
-print("Agent architecture invariants: PASS")
-
 require("agent/graph_training.py",
         "knowledge_cutoff",
         "future label leakage",
@@ -100,3 +98,5 @@ require("agent/graph_risk.py",
         'bus.claim("risk.evidence.accepted"',
         "event.lease_token",
         "bus.fail")
+
+print("Agent architecture invariants: PASS")
