@@ -13,6 +13,7 @@ from .graph_store import graph_store
 from .online_feature_store import online_feature_store
 
 FEATURE_SET="graph_risk_v1"
+SHADOW_FEATURE_SET="graph_risk_shadow_v1"
 MAX_FEATURE_AGE_SECONDS=300
 
 
@@ -38,11 +39,26 @@ def ingest_observation(observation):
 def recompute_device(tenant,app,device_id,generation,*,as_of=None):
     anchor=time.time() if as_of is None else as_of
     rows,truncated=graph_store().scope_rows(tenant,app,anchor,limit=MAX_ROWS)
-    algorithm=graph_algorithm(os.environ.get("FK_GRAPH_ALGORITHM","community_v1"))
-    result=algorithm.compute(rows,device_id,generation,truncated=truncated)
+    primary_name=os.environ.get("FK_GRAPH_ALGORITHM","community_v1")
+    algorithm=graph_algorithm(primary_name)
+    result=algorithm.compute(rows,device_id,generation,truncated=truncated,as_of=anchor)
     result.update(device_id=device_id,entity_generation=generation,as_of=anchor)
-    online_feature_store().put(tenant,app,"device",device_id,generation,FEATURE_SET,
-                               result,computed_at=time.time())
+    store=online_feature_store()
+    store.put(tenant,app,"device",device_id,generation,FEATURE_SET,
+              result,computed_at=time.time())
+
+    # Challenger is shadow-only: it cannot affect Decision. Persist its output and
+    # divergence so offline evaluation can decide whether a release proposal is justified.
+    shadow_name=os.environ.get("FK_GRAPH_SHADOW_ALGORITHM","").strip()
+    if shadow_name and shadow_name!=primary_name:
+        shadow=graph_algorithm(shadow_name).compute(
+            rows,device_id,generation,truncated=truncated,as_of=anchor)
+        shadow.update(device_id=device_id,entity_generation=generation,as_of=anchor,
+                      shadow_of=primary_name,
+                      score_delta=round(float(shadow.get("community_risk_density",0.0))-
+                                        float(result.get("community_risk_density",0.0)),6))
+        store.put(tenant,app,"device",device_id,generation,SHADOW_FEATURE_SET,
+                  shadow,computed_at=time.time())
     return result
 
 

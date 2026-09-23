@@ -52,12 +52,24 @@ require("agent/online_feature_store.py",
         "class SQLiteOnlineFeatureStore")
 require("agent/graph_algorithms.py",
         "class CommunityV1",
-        "algorithm_version",
+        "class TemporalCommunityV1",
+        "temporal_half_life_seconds",
         "association_features_only")
 require("agent/graph_risk.py",
         'topic="risk.evidence.accepted"',
-        "online_feature_store().put")
+        "store.put",
+        "SHADOW_FEATURE_SET",
+        "shadow_of=primary_name")
 require("deploy/compose.yaml",
         "FK_DATA_DIR: /tenant",
         "FK_GRAPH_ALGORITHM: community_v1")
 print("Agent architecture invariants: PASS")
+
+require("agent/graph_training.py",
+        "knowledge_cutoff",
+        "future label leakage",
+        "snapshot_fingerprint")
+require("agent/graph_model_adapter.py",
+        "class CallableGNNAdapter",
+        "GNN score must be in [0,1]",
+        "not constructible from arbitrary runtime config")

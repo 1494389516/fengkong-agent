@@ -5,6 +5,8 @@ import time
 
 with tempfile.TemporaryDirectory() as tmp:
     os.environ["FK_DATA_DIR"]=tmp
+    os.environ["FK_GRAPH_ALGORITHM"]="community_v1"
+    os.environ["FK_GRAPH_SHADOW_ALGORITHM"]="temporal_community_v1"
     from agent.event_bus import event_bus
     from agent.graph_risk import consume_pending, lookup
 
@@ -24,6 +26,12 @@ with tempfile.TemporaryDirectory() as tmp:
     assert graph["account_count"]==3
     assert graph["shared_account_count"]==2
     assert graph["interpretation"]=="association_features_only"
+    from agent.online_feature_store import online_feature_store
+    challenger=online_feature_store().get("t","a","device","dev","g1","graph_risk_shadow_v1")
+    assert challenger is not None
+    assert challenger["algorithm"]=="temporal_community_v1"
+    assert challenger["shadow_of"]=="community_v1"
+    assert "score_delta" in challenger
     pending=event_bus().pending(limit=10)
     assert len(pending)==1 and pending[0].topic=="other.topic"
     assert os.path.exists(os.path.join(tmp,"online.sqlite3"))

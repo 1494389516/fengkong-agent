@@ -305,7 +305,7 @@ adapter；Agent/图计算等异步消费者应消费该边界，而不是进入 
 Decision 读取的服务端计算特征。默认分别使用独立的 `graph.sqlite3` 与
 `features.sqlite3`，不再把图状态塞进在线决策 `online.sqlite3`。
 
-当前算法 `community_v1` 使用设备-账号二部图的连通分量与 modularity community
+新增 `temporal_community_v1`，按证据 knowledge time 做半衰期衰减；可通过 `FK_GRAPH_SHADOW_ALGORITHM` 作为 challenger 运行。challenger 只写 `graph_risk_shadow_v1`，Decision 永远只读主 `graph_risk_v1`，因此算法实验不会偷偷改变线上处置。\n\n当前算法 `community_v1` 使用设备-账号二部图的连通分量与 modularity community
 生成 shared-device、identity-churn、density 等可解释特征。输出明确标记
 `association_features_only`；`community_risk_density` 是结构启发式分数，不是
 欺诈概率。后续 GNN/社区发现实现应替换算法 adapter，而不是改 Collector 或
