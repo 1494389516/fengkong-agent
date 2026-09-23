@@ -22,3 +22,5 @@ jobs:
         run: python -m eval.graph_pit_model_smoke
       - name: Graph model evaluation and registry smoke
         run: python -m eval.graph_model_eval_smoke
+      - name: Event bus leasing and dead-letter smoke
+        run: python -m eval.event_bus_leasing_smoke
