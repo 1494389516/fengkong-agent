@@ -174,6 +174,18 @@ def _readiness() -> Dict:
             schema_chars, schema_budget, system_chars, system_budget))
     integ = _integration()
     add("integration_status", integ["level"], integ["detail"])
+    from ..graph_worker_health import read_health as _graph_worker_health
+    gh = _graph_worker_health()
+    graph_expected = (os.environ.get("FK_REQUIRE_GRAPH_WORKER") == "1"
+                      or os.environ.get("FK_ENV", "").lower() in ("prod", "production"))
+    graph_level = gh["level"]
+    if not graph_expected and gh.get("reason") == "heartbeat_missing":
+        graph_level = "warn"
+    add("graph_worker_status", graph_level,
+        "reason=%s pending=%s dead=%s" % (
+            gh.get("reason"),
+            (gh.get("bus") or {}).get("pending", "n/a"),
+            (gh.get("bus") or {}).get("dead_letters", "n/a")))
 
     if "fail" in verdicts or "blocked" in verdicts:
         overall = "BLOCKED"
@@ -190,7 +202,7 @@ def _readiness() -> Dict:
 @tool(
     name="production_readiness_check",
     description=(
-        "生产就绪总门禁:12 项检查(data/feature/label 健康、模型与策略状态、"
+        "生产就绪总门禁:13 项检查(data/feature/label 健康、模型与策略状态、"
         "引擎通道、评估报告、审计、安全、降级、预算、P2接缝)。BLOCKED=硬伤先修;"
         "DEGRADED=有降级或骨架态(如本地引擎)可观察运行;READY=全部就绪。"
     ),

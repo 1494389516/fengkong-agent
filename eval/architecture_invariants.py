@@ -100,3 +100,15 @@ require("agent/graph_risk.py",
         "bus.fail")
 
 print("Agent architecture invariants: PASS")
+
+require("agent/event_bus.py",
+        "oldest_pending_age_seconds",
+        "dead_letters",
+        "max_attempts")
+require("agent/graph_worker_health.py",
+        "heartbeat_missing",
+        "backlog_old",
+        "dead_letters_present")
+require("agent/tools/readiness.py",
+        "graph_worker_status",
+        "FK_REQUIRE_GRAPH_WORKER")
