@@ -52,11 +52,14 @@ require("agent/online_feature_store.py",
         "class SQLiteOnlineFeatureStore")
 require("agent/graph_algorithms.py",
         "class CommunityV1",
-        "algorithm_version",
+        "class TemporalCommunityV1",
+        "temporal_half_life_seconds",
         "association_features_only")
 require("agent/graph_risk.py",
         'topic="risk.evidence.accepted"',
-        "online_feature_store().put")
+        "online_feature_store().put",
+        "SHADOW_FEATURE_SET",
+        "shadow_of=primary_name")
 require("deploy/compose.yaml",
         "FK_DATA_DIR: /tenant",
         "FK_GRAPH_ALGORITHM: community_v1")
