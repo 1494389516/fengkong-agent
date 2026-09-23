@@ -31,6 +31,8 @@ services:
     environment:
       FK_ENV: production
       FK_AUTH_CONFIG: /config/collector-auth.json
+      FK_DATA_DIR: /tenant
+      FK_GRAPH_ALGORITHM: community_v1
     volumes:
       - ./state/tenant:/tenant
       - ./config/collector-auth.json:/config/collector-auth.json:ro
