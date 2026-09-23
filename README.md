@@ -298,6 +298,20 @@ adapter；Agent/图计算等异步消费者应消费该边界，而不是进入 
 `python eval/architecture_invariants.py` 是不可删除的最小架构门禁，保护 Collector
 鉴权、事务事件、在线幂等、signed runtime bundle 与 Control Plane 职责隔离。
 
+## Graph / Feature 算法层
+
+异步图链路已拆成三个可替换边界：`GraphStore` 保存 server-bound 图观测，
+`graph_algorithms.py` 运行有界、版本化算法，`OnlineFeatureStore` 只保存可供
+Decision 读取的服务端计算特征。默认分别使用独立的 `graph.sqlite3` 与
+`features.sqlite3`，不再把图状态塞进在线决策 `online.sqlite3`。
+
+当前算法 `community_v1` 使用设备-账号二部图的连通分量与 modularity community
+生成 shared-device、identity-churn、density 等可解释特征。输出明确标记
+`association_features_only`；`community_risk_density` 是结构启发式分数，不是
+欺诈概率。后续 GNN/社区发现实现应替换算法 adapter，而不是改 Collector 或
+Decision 接口。Decision 只读取有 freshness TTL 的 feature projection；worker
+延迟或特征过期时返回 `pending_or_stale`，不会同步查询大图阻塞在线判定。
+
 ## 当前限制
 
 - 仓库数据为合成数据，评估结果不能直接代表真实业务效果；
