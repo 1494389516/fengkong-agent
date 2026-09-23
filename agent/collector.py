@@ -242,6 +242,13 @@ def enrich_business_event(event, context, connection=None):
         latest=max(observations,key=lambda o:o['recorded_at'])
         for field in ('device_id','entity_generation','identity_trust','hardware_attributes'):
             result[field]=latest[field]
+        # Graph projection is server-owned, bounded and advisory. Missing/stale graph
+        # intelligence never turns a client claim into a trusted aggregate.
+        from .graph_risk import lookup as graph_lookup
+        graph = graph_lookup(context.tenant, context.app, latest['device_id'],
+                             latest['entity_generation'], connection=db)
+        if graph is not None:
+            result['server_graph'] = graph
         result['evidence_refs']=[o['evidence_id'] for o in observations]
     else:
         result['identity_trust']='asserted'
