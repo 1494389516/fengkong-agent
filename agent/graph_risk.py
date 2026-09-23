@@ -72,10 +72,12 @@ def lookup(tenant,app,device_id,generation,*,connection=None,max_age=MAX_FEATURE
 def consume_pending(*,limit=100):
     from .event_bus import event_bus
     bus=event_bus();processed=0;failed=[]
-    for event in bus.pending(limit=limit,topic="risk.evidence.accepted"):
+    for event in bus.claim("risk.evidence.accepted",limit=limit,lease_seconds=30,max_attempts=5):
         try:
             ingest_observation(event.payload)
-            if bus.acknowledge(event.event_id):processed+=1
+            if bus.acknowledge(event.event_id,event.lease_token):processed+=1
         except Exception as exc:
-            failed.append({"event_id":event.event_id,"error":type(exc).__name__})
+            bus.fail(event.event_id,event.lease_token,type(exc).__name__,max_attempts=5)
+            failed.append({"event_id":event.event_id,"error":type(exc).__name__,
+                           "attempts":event.attempts})
     return {"processed":processed,"failed":failed}
