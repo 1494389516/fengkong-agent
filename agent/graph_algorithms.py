@@ -16,7 +16,7 @@ class CommunityV1:
     name="community_v1"
     version="1"
 
-    def compute(self,rows,target_device,target_generation,*,truncated=False):
+    def compute(self,rows,target_device,target_generation,*,truncated=False,as_of=None):
         g=nx.Graph()
         target=("device",target_device,target_generation)
         for _,uid,device,generation,ip,observed_at,recorded_at in rows:
@@ -85,10 +85,10 @@ class TemporalCommunityV1(CommunityV1):
     def __init__(self,half_life_seconds=7*86400):
         self.half_life_seconds=max(3600,float(half_life_seconds))
 
-    def compute(self,rows,target_device,target_generation,*,truncated=False):
+    def compute(self,rows,target_device,target_generation,*,truncated=False,as_of=None):
         if not rows:
             return self._empty(target_device,target_generation,truncated)
-        anchor=max(float(r[6]) for r in rows)
+        anchor=float(as_of) if as_of is not None else max(float(r[6]) for r in rows)
         weighted=[]
         for row in rows:
             age=max(0.0,anchor-float(row[6]))
@@ -96,7 +96,7 @@ class TemporalCommunityV1(CommunityV1):
             if weight>=0.01:
                 weighted.append((row,weight))
         base=super().compute([row for row,_ in weighted],target_device,target_generation,
-                             truncated=truncated)
+                             truncated=truncated,as_of=anchor)
         target_accounts={}
         account_devices={}
         for row,weight in weighted:
