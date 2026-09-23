@@ -81,3 +81,12 @@ require("agent/graph_model_eval.py",
 require("agent/graph_model_registry.py",
         "champion activation requires signed Control Plane release",
         "challenger requires recorded evaluation")
+
+require("agent/graph_model_registry.py",
+        "artifact_digest must be sha256 hex",
+        "unsupported graph runtime loader",
+        "builtin_graph_algorithm_v1")
+require("agent/graph_release.py",
+        "runtime loader is not production-supported",
+        "graph release not ready",
+        "component_digest")
