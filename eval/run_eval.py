@@ -634,7 +634,7 @@ def run_experiment_layer() -> int:
 
 
 def run_readiness_layer() -> int:
-    """离线:P2-4 生产就绪门禁 —— 11 项检查与三态判定。"""
+    """离线:P2-4 生产就绪门禁与三态判定。"""
     checks = []
     with tempfile.TemporaryDirectory() as td:
         base = Path(td)
@@ -645,13 +645,14 @@ def run_readiness_layer() -> int:
         try:
             r = _fixture_dispatch("production_readiness_check", {})
             checks += [
-                ("门禁:12 项检查齐全",
+                ("门禁:13 项检查齐全",
                  set(r["checks"]) == {"data_health", "feature_health",
                                       "label_quality", "model_status",
                                       "strategy_status", "engine_status",
                                       "evaluation_status", "audit_status",
                                       "security_status", "degraded_status",
-                                      "budget_status", "integration_status"}),
+                                      "budget_status", "integration_status",
+                                      "graph_worker_status"}),
                 ("骨架态:BLOCKED(无 champion/无 active strategy 核心资产)",
                  r.get("overall") == "BLOCKED"
                  and r["checks"]["model_status"]["level"] == "fail"
