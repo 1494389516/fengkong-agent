@@ -37,4 +37,10 @@ with tempfile.TemporaryDirectory() as tmp:
     out=model.score(snap,"d","g")
     assert out.score==0.75
     assert out.explanation["reason"]=="fixture"
+    from agent.graph_algorithms import TemporalCommunityV1
+    algo=TemporalCommunityV1(half_life_seconds=10)
+    rows=list(snap.rows)
+    near=algo.compute(rows,"d","g",as_of=now)
+    far=algo.compute(rows,"d","g",as_of=now+100)
+    assert far["effective_account_mass"] < near["effective_account_mass"]
 print("graph PIT/model adapter smoke: PASS")
