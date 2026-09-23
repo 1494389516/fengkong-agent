@@ -4,6 +4,8 @@ Outputs are association features, never fraud labels or autonomous enforcement.
 """
 import hashlib
 import json
+import math
+import time
 import networkx as nx
 
 MAX_ROWS=5000
@@ -75,7 +77,52 @@ class CommunityV1:
                 "interpretation":"association_features_only"}
 
 
+class TemporalCommunityV1(CommunityV1):
+    """Time-decayed weighted community features for fast-changing abuse graphs."""
+    name="temporal_community_v1"
+    version="1"
+
+    def __init__(self,half_life_seconds=7*86400):
+        self.half_life_seconds=max(3600,float(half_life_seconds))
+
+    def compute(self,rows,target_device,target_generation,*,truncated=False):
+        if not rows:
+            return self._empty(target_device,target_generation,truncated)
+        anchor=max(float(r[6]) for r in rows)
+        weighted=[]
+        for row in rows:
+            age=max(0.0,anchor-float(row[6]))
+            weight=math.exp(-math.log(2.0)*age/self.half_life_seconds)
+            if weight>=0.01:
+                weighted.append((row,weight))
+        base=super().compute([row for row,_ in weighted],target_device,target_generation,
+                             truncated=truncated)
+        target_accounts={}
+        account_devices={}
+        for row,weight in weighted:
+            _,uid,device,generation,ip,observed_at,recorded_at=row
+            if uid:
+                account_devices.setdefault(uid,set()).add((device,generation))
+            if device==target_device and generation==target_generation and uid:
+                target_accounts[uid]=max(target_accounts.get(uid,0.0),weight)
+        effective_shared=sum(target_accounts.values())
+        effective_churn=max((len(account_devices.get(uid,())) for uid in target_accounts),default=0)
+        temporal_score=min(1.0,max(0.0,
+            max(0.0,effective_shared-1.0)/5.0+
+            max(0,effective_churn-2)/8.0+
+            (0.25 if base.get("is_dense_subgraph") else 0.0)))
+        base.update(
+            algorithm=self.name,algorithm_version=self.version,
+            temporal_half_life_seconds=int(self.half_life_seconds),
+            effective_account_mass=round(effective_shared,6),
+            community_risk_density=round(temporal_score,6),
+        )
+        return base
+
+
 def graph_algorithm(name="community_v1"):
-    if name!="community_v1":
-        raise ValueError("unsupported graph algorithm: "+str(name))
-    return CommunityV1()
+    if name=="community_v1":
+        return CommunityV1()
+    if name=="temporal_community_v1":
+        return TemporalCommunityV1()
+    raise ValueError("unsupported graph algorithm: "+str(name))
