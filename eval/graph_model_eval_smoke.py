@@ -27,7 +27,8 @@ with tempfile.TemporaryDirectory() as tmp:
     result=evaluate_graph_model(model,snap,labels)
     assert result["metrics"]["auc"]==1.0,result
     assert result["metrics"]["sample_count"]==2
-    row=registry.register("graph_gnn","1",snap.fingerprint,"callable_gnn")
+    row=registry.register("graph_gnn","1",snap.fingerprint,"callable_gnn","a"*64,
+        runtime_contract={"loader":"offline_only"})
     assert row["status"]=="candidate"
     registry.record_evaluation("graph_gnn","1",result)
     assert registry.promote("graph_gnn","1","shadow")["status"]=="shadow"
@@ -38,4 +39,23 @@ with tempfile.TemporaryDirectory() as tmp:
     except PermissionError:
         blocked=True
     assert blocked
+    from agent.graph_release import release_readiness
+    readiness=release_readiness("graph_gnn","1")
+    assert readiness["ready"] is False
+    assert "runtime loader is not production-supported" in readiness["reasons"]
+    from agent.graph_algorithms import graph_algorithm
+    from agent.graph_model_adapter import StructuralFeatureAdapter
+    structural=StructuralFeatureAdapter(graph_algorithm("community_v1"))
+    structural_result=evaluate_graph_model(structural,snap,labels)
+    registry.register(structural.model_name,structural.model_version,snap.fingerprint,
+        "structural_builtin","b"*64,
+        runtime_contract={"loader":"builtin_graph_algorithm_v1","algorithm":"community_v1"})
+    registry.record_evaluation(structural.model_name,structural.model_version,structural_result)
+    registry.promote(structural.model_name,structural.model_version,"shadow")
+    registry.promote(structural.model_name,structural.model_version,"challenger")
+    from agent.graph_release import build_control_plane_component
+    component=build_control_plane_component(structural.model_name,structural.model_version)
+    assert component["kind"]=="graph_model_v1"
+    assert component["runtime_contract"]["algorithm"]=="community_v1"
+    assert len(component["component_digest"])==64
 print("graph model eval/registry smoke: PASS")

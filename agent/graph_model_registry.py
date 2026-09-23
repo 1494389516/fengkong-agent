@@ -25,14 +25,28 @@ def _save(rows):
     atomic_write_json(_path(),rows)
 
 
-def register(name,version,train_snapshot_fingerprint,adapter_kind,note=""):
+def register(name,version,train_snapshot_fingerprint,adapter_kind,artifact_digest,
+             runtime_contract=None,note=""):
     if not all(isinstance(x,str) and x.strip() for x in
-               (name,version,train_snapshot_fingerprint,adapter_kind)):
+               (name,version,train_snapshot_fingerprint,adapter_kind,artifact_digest)):
         raise ValueError("complete graph model identity required")
+    if len(artifact_digest)!=64 or any(ch not in "0123456789abcdef" for ch in artifact_digest.lower()):
+        raise ValueError("artifact_digest must be sha256 hex")
+    runtime_contract=copy.deepcopy(runtime_contract or {"loader":"offline_only"})
+    if runtime_contract.get("loader") not in ("offline_only","builtin_graph_algorithm_v1"):
+        raise ValueError("unsupported graph runtime loader")
+    if runtime_contract["loader"]=="builtin_graph_algorithm_v1":
+        algorithm=runtime_contract.get("algorithm")
+        if not isinstance(algorithm,str) or not algorithm:
+            raise ValueError("builtin graph runtime requires algorithm")
+        from .graph_algorithms import graph_algorithm
+        graph_algorithm(algorithm)
     rows=_load()
     if any(r["name"]==name and r["version"]==version for r in rows):
         raise ValueError("graph model already registered")
     row={"name":name,"version":version,"adapter_kind":adapter_kind,
+         "artifact_digest":artifact_digest.lower(),
+         "runtime_contract":runtime_contract,
          "train_snapshot_fingerprint":train_snapshot_fingerprint,
          "status":"candidate","created_at":time.time(),"note":note,
          "evaluations":[]}
