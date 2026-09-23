@@ -1,0 +1,16 @@
+name: Architecture invariants
+on:
+  pull_request:
+  push:
+jobs:
+  invariants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile Python sources
+        run: python -m compileall -q agent serve.py
+      - name: Risk-control architecture gates
+        run: python eval/architecture_invariants.py
