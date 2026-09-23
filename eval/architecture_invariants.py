@@ -34,3 +34,14 @@ require("serve.py",
         'if self.path == "/attestation/challenge"',
         'elif self.path == "/attestation/enroll"')
 print("Agent architecture invariants: PASS")
+
+require("agent/graph_risk.py",
+        "identity_trust",
+        "server_bound",
+        "community_risk_density",
+        "association_features_only")
+require("agent/collector.py",
+        "result['server_graph'] = graph")
+require("deploy/compose.yaml",
+        "graph-worker:",
+        "agent.graph_worker")

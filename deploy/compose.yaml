@@ -25,6 +25,16 @@ services:
       - ./secrets/collector-keys.json:/keys/collector-keys.json:ro
       - ./secrets/identity.key:/keys/identity.key:ro
       - ./config/apple-app-attest-root.pem:/trust/apple-app-attest-root.pem:ro
+  graph-worker:
+    <<: *common
+    command: [python, -m, agent.graph_worker, --interval, "1", --limit, "100"]
+    environment:
+      FK_ENV: production
+      FK_AUTH_CONFIG: /config/collector-auth.json
+    volumes:
+      - ./state/tenant:/tenant
+      - ./config/collector-auth.json:/config/collector-auth.json:ro
+
   runtime:
     <<: *common
     command: [python, serve.py, --host, "0.0.0.0", --port, "8080"]
