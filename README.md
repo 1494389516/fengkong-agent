@@ -312,6 +312,15 @@ Decision 读取的服务端计算特征。默认分别使用独立的 `graph.sql
 Decision 接口。Decision 只读取有 freshness TTL 的 feature projection；worker
 延迟或特征过期时返回 `pending_or_stale`，不会同步查询大图阻塞在线判定。
 
+## 图模型发布门禁
+
+图模型实验登记时绑定训练快照、artifact SHA-256 与 runtime contract。离线
+`CallableGNNAdapter` 默认声明 `offline_only`，即使评测很好也不能生成可上线
+component。只有已经进入 challenger、存在非空 PIT 评测证据，并声明当前受支持
+`builtin_graph_algorithm_v1` runtime 的模型，才可由 `graph_release.py` 生成
+带 component digest 的 Control Plane component。该步骤仍不执行激活；最终上线
+继续经过 Control Plane、审批、canary 与 signed release。
+
 ## 当前限制
 
 - 仓库数据为合成数据，评估结果不能直接代表真实业务效果；
