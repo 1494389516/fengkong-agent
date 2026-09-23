@@ -68,6 +68,8 @@ def attach_point_in_time_labels(snapshot,label_records):
             raise ValueError("label known_at required for PIT evaluation")
         if known_at>snapshot.knowledge_cutoff:
             raise ValueError("future label leakage")
+        if uid in labels and labels[uid] != label:
+            raise ValueError("conflicting label history requires an explicit as-of resolver")
         labels[uid]=label
         provenance.append((uid,label,float(known_at)))
     binding={"snapshot_fingerprint":snapshot.fingerprint,
@@ -83,4 +85,5 @@ def temporal_split(train_cutoff,eval_cutoff):
     if not math.isfinite(train_cutoff) or not math.isfinite(eval_cutoff) or eval_cutoff<=train_cutoff:
         raise ValueError("eval cutoff must be later than train cutoff")
     return {"train_cutoff":float(train_cutoff),"eval_cutoff":float(eval_cutoff),
-            "disjoint_knowledge_windows":True}
+            "ordered_knowledge_cutoffs":True,
+            "evaluation_state_includes_prior_history":True}
