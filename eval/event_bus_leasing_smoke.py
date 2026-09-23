@@ -5,8 +5,15 @@ import time
 
 with tempfile.TemporaryDirectory() as tmp:
     os.environ["FK_DATA_DIR"]=tmp
-    from agent.event_bus import event_bus
+    import sqlite3
+    legacy=sqlite3.connect(os.path.join(tmp,"online.sqlite3"))
+    legacy.execute("""CREATE TABLE integration_events (
+        event_id TEXT PRIMARY KEY, topic TEXT NOT NULL, event_key TEXT NOT NULL,
+        payload TEXT NOT NULL, created_at REAL NOT NULL,
+        published INTEGER NOT NULL DEFAULT 0)""")
+    legacy.commit();legacy.close()
 
+    from agent.event_bus import event_bus
     bus=event_bus()
     event=bus.publish("risk.evidence.accepted","k",{"v":1})
     t=time.time()
