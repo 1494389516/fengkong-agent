@@ -17,4 +17,4 @@ jobs:
       - name: Risk-control architecture gates
         run: python eval/architecture_invariants.py
       - name: Graph pipeline smoke
-        run: python eval/graph_pipeline_smoke.py
+        run: python -m eval.graph_pipeline_smoke
