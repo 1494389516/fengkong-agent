@@ -288,6 +288,16 @@ FK_PRIVACY=0 python3 main.py
 
 白名单用于降低处置等级，不会跳过全部检查。回测、影子策略和反事实重放不会修改生产状态。
 
+## 异步集成边界
+
+Collector 接受 SDK evidence 后，会在与 evidence/receipt 相同的 SQLite 事务中写入
+`risk.evidence.accepted` integration event。当前 `LocalEventBus` 是单机 durable
+adapter；Agent/图计算等异步消费者应消费该边界，而不是进入 SDK 请求路径。
+生产横向扩展时替换为 Kafka/Pulsar adapter，HTTP/Collector 与 Agent 接口无需改变。
+
+`python eval/architecture_invariants.py` 是不可删除的最小架构门禁，保护 Collector
+鉴权、事务事件、在线幂等、signed runtime bundle 与 Control Plane 职责隔离。
+
 ## 当前限制
 
 - 仓库数据为合成数据，评估结果不能直接代表真实业务效果；

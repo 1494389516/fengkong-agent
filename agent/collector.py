@@ -184,6 +184,10 @@ def ingest(upload, context, *, wire_bytes=None, remote_ip=None, now=None):
                 envelope_bytes,raw_payload,hashlib.sha256(envelope_bytes).hexdigest(),now,json.dumps(observation)))
             db.execute('INSERT INTO report_receipts VALUES(?,?,?,?,?,?,?,?)',(context.tenant,context.app,
                 value['report_id'],digest,evidence_id,value['nonce'],context.principal,json.dumps(receipt)))
+            # Commit evidence and its asynchronous integration event atomically.
+            # Agent/graph consumers read the event bus; they never sit in the SDK request path.
+            from .event_bus import event_bus
+            event_bus().publish('risk.evidence.accepted', evidence_id, observation, connection=db)
             db.commit();return receipt
         except BaseException:
             db.rollback();raise
