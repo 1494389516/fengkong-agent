@@ -42,7 +42,15 @@ class CommunityV1:
             churn=max(churn,sum(1 for n in component.neighbors(node) if n[0]=="device"))
         community_key=hashlib.sha256(json.dumps(
             [accounts,devices],sort_keys=True,separators=(",",":")).encode()).hexdigest()[:20]
-        dense=len(accounts)>=3 and density>=0.25
+        # Bipartite device-account components are structurally sparse by design.
+        # Use observed edge fill against the bipartite maximum instead of generic
+        # graph density, otherwise a perfectly shared 1-device/3-account star is
+        # incorrectly treated as low density.
+        account_nodes=[n for n in component if n[0]=="uid"]
+        device_nodes=[n for n in component if n[0]=="device"]
+        possible=max(1,len(account_nodes)*len(device_nodes))
+        bipartite_density=min(1.0,component.number_of_edges()/possible)
+        dense=len(accounts)>=3 and bipartite_density>=0.6
         structural=min(1.0,max(0.0,(len(target_accounts)-1)/5.0
                     +max(0,churn-2)/8.0+(0.25 if dense else 0.0)))
         return {
@@ -50,7 +58,7 @@ class CommunityV1:
           "community_id":community_key,
           "community_account_count":len(accounts),"community_device_count":len(devices),
           "account_count":len(target_accounts),"shared_account_count":max(0,len(target_accounts)-1),
-          "max_account_device_churn":churn,"component_density":round(density,6),
+          "max_account_device_churn":churn,"component_density":round(density,6),"bipartite_density":round(bipartite_density,6),
           "is_dense_subgraph":dense,"community_risk_density":round(structural,6),
           "risk_tags":[tag for tag,hit in (
               ("shared_device",len(target_accounts)>1),("identity_churn",churn>2),
