@@ -13,7 +13,7 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Optional
 
 from .tools import capability
 from .tools.datasource import append_jsonl, data_dir, state_write_lock
@@ -102,13 +102,24 @@ def _envelope(tool_name: str, arguments: Dict[str, Any]) -> ActionEnvelope:
 
 def _append_audit(envelope: ActionEnvelope, decision: PolicyDecision, phase: str,
                   result_hash: str = "") -> None:
-    """Append a hash-chained record. Verification fails if a record is edited/deleted."""
+    """Append a hash-chained record.
+
+    The chain detects mutation/removal inside the retained log. Detecting tail
+    truncation requires anchoring the last hash in an external/WORM system.
+    """
     path = data_dir() / "governance_audit.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with state_write_lock():
         previous = ""
         if path.exists():
-            lines = [x for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
+            # Audit is correctness-critical but should not become O(n) per tool
+            # call as the log grows. Read only a bounded tail for the last line.
+            with open(path, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(0, size - 65536))
+                tail = fh.read().decode("utf-8", errors="replace")
+            lines = [x for x in tail.splitlines() if x.strip()]
             if lines:
                 try:
                     previous = json.loads(lines[-1]).get("record_hash", "")
