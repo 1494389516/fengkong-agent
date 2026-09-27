@@ -7,7 +7,7 @@ semantic review. Event evidence remains governed separately.
 from .store import tokens
 
 _STOP = frozenset(("的","了","是","在","与","和","或","及","为","有","也","不","不能",
-                   "需要","可能","this","that","the","a","an","is","are","and","or","not"))
+                   "需要","可能","已经","确认","进行","可以","this","that","the","a","an","is","are","and","or","not"))
 
 
 def _terms(text):
