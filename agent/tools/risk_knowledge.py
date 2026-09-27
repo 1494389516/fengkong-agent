@@ -63,6 +63,10 @@ def search_risk_knowledge(query, platform='', detector_ids=None, sdk_version='',
         raise
     if config_warning:
         result['warning'] = ((result.get('warning', '') + '; ') if result.get('warning') else '') + config_warning
+
+    from agent.rag.grader import grade_retrieval
+    retrieval_grade = grade_retrieval(query, result.get('hits', []), purpose=purpose)
+    result['retrieval_grade'] = retrieval_grade
     if state:
         from agent.rag.workflow import finish_search
         finish_search(state, result=result)
@@ -71,8 +75,11 @@ def search_risk_knowledge(query, platform='', detector_ids=None, sdk_version='',
                       remaining_attempts=max(0, state['snapshot']['budget'].get('max_knowledge_searches', 3)
                                              - sum(r.get('status') != 'rejected_duplicate'
                                                    for r in state['retrieval_trace'])))
-        result['next_action'] = ('review_hits_and_check_counterevidence' if result['hits']
-                                 else 'rewrite_query_or_report_knowledge_gap')
+        result['next_action'] = (
+            'review_hits_and_check_counterevidence'
+            if retrieval_grade['status'] == 'pass'
+            else 'rewrite_query_or_report_knowledge_gap'
+        )
         citations = state.setdefault('knowledge_citations', {})
         support_material = state.setdefault('knowledge_support_material', {})
         for hit in result['hits']:
