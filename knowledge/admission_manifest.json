@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "approved_documents": {
+    "detectors/debugger.json": "cd40c9d5992deabc47fdfb100fb03e5b2b4ad912",
+    "detectors/emulator_behavior.json": "525e8e646ee0bb8d597293f272f9366deef67652",
+    "detectors/frida_thread.json": "e974132bb3957692771a9559d2283b37a0fa5bf3",
+    "detectors/sensor_replay.json": "7b23a67bf77fae7d7ccdaeae9e512ffd80d7a91a",
+    "detectors/signing_identity.json": "7bc9ac73516dc42cb919325008208614b09b0616"
+  },
+  "interpretation": "Admission pins reviewed corpus files by Git blob SHA. Updating knowledge requires an explicit manifest review."
+}

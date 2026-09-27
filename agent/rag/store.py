@@ -50,10 +50,43 @@ def tokens(text):
     return result
 
 
+def _git_blob_sha(raw):
+    return hashlib.sha1(b'blob ' + str(len(raw)).encode() + bytes([0]) + raw).hexdigest()
+
+
+def _admitted_files(directory):
+    root = Path(directory)
+    manifest_path = root / 'admission_manifest.json'
+    if not manifest_path.is_file():
+        raise ValueError('knowledge admission manifest required')
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    approved = manifest.get('approved_documents')
+    if manifest.get('schema_version') != 1 or not isinstance(approved, dict) or not approved:
+        raise ValueError('invalid knowledge admission manifest')
+    if len(approved) > MAX_DOCUMENTS:
+        raise ValueError('admission manifest exceeds document budget')
+
+    discovered = {
+        path.relative_to(root).as_posix(): path
+        for path in root.rglob('*.json')
+        if path != manifest_path
+    }
+    if set(discovered) != set(approved):
+        extra = sorted(set(discovered) - set(approved))
+        missing = sorted(set(approved) - set(discovered))
+        raise ValueError('knowledge corpus differs from admission manifest: '
+                         f'extra={extra[:5]} missing={missing[:5]}')
+    for relative, expected_sha in approved.items():
+        if not isinstance(expected_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', expected_sha):
+            raise ValueError('invalid admitted blob sha: ' + relative)
+        raw = discovered[relative].read_bytes()
+        if _git_blob_sha(raw) != expected_sha:
+            raise ValueError('knowledge document changed without admission review: ' + relative)
+    return [discovered[name] for name in sorted(discovered)]
+
+
 def read_documents(directory):
-    files = sorted(Path(directory).rglob('*.json'))
-    if not files or len(files) > MAX_DOCUMENTS:
-        raise ValueError('corpus must contain 1..1000 JSON documents')
+    files = _admitted_files(directory)
     chunks, seen = [], set()
     for path in files:
         if path.stat().st_size > 200000:
