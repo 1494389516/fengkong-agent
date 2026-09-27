@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from agent.rag.store import ingest, search
+from agent.rag.store import ingest, search, tokens
 
 
 def _load_jsonl(path):
@@ -28,10 +28,16 @@ def _mean(values):
     return sum(values) / len(values) if values else None
 
 
+def _term_set(text):
+    return {term for term in tokens(text or "") if len(term) > 1}
+
+
 def retrieval_metrics(corpus="knowledge"):
     basic = _load_jsonl("eval/rag/cases.jsonl")
     hard = _load_jsonl("eval/rag/hard_cases.jsonl")
+    context_cases = _load_jsonl("eval/rag/context_cases.jsonl")
     rows = []
+    context_recalls = []
     with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"FK_DATA_DIR": directory}):
         ingest(corpus)
         for suite, cases in (("basic", basic), ("hard", hard)):
@@ -50,6 +56,12 @@ def retrieval_metrics(corpus="knowledge"):
                     "rank": rank, "negative_empty": (not ids) if expected is None else None,
                     "section_top1": section_ok,
                 })
+
+        for case in context_cases:
+            result = search(case["query"], platform=case["platform"], top_k=5)
+            actual = {(hit["knowledge_id"], hit["section"]) for hit in result["hits"]}
+            expected = {tuple(item) for item in case["expected_chunks"]}
+            context_recalls.append(len(actual & expected) / len(expected) if expected else 1.0)
 
         # PIT leakage probe: checked-in knowledge is newer than this historical anchor.
         pit = search("DebuggerDetector", platform="ios",
@@ -71,6 +83,8 @@ def retrieval_metrics(corpus="knowledge"):
         "negative_rejection_rate": _mean([r["negative_empty"] for r in negatives]),
         "hard_section_top1": _mean([r["section_top1"] for r in hard_positive
                                      if r["section_top1"] is not None]),
+        "context_recall_at_5": _mean(context_recalls),
+        "context_recall_case_count": len(context_recalls),
         "pit_future_knowledge_blocked": not pit["hits"],
         "cross_platform_leakage_blocked": not platform["hits"],
     }
@@ -90,6 +104,8 @@ def investigation_metrics(records):
     lexical_bridge = []
     semantic_verified = []
     unsupported_rates = []
+    gold_context_recall = []
+    answer_relevance_proxy = []
     for row in records:
         report = row.get("investigation_report")
         claim_audit = row.get("claim_evidence_audit") or {}
@@ -114,6 +130,27 @@ def investigation_metrics(records):
         unsupported_rates.append(
             len(claim_audit.get("unsupported_claim_indexes", [])) / count if count else 0.0)
 
+        gold = row.get("gold_evidence_refs")
+        if isinstance(gold, list) and gold:
+            expected = {str(value).removeprefix("[K:").removesuffix("]") for value in gold}
+            retrieved_ids = {
+                hit_id
+                for attempt in retrieval.get("attempts", [])
+                for hit_id in attempt.get("hit_ids", [])
+                if isinstance(hit_id, str)
+            }
+            gold_context_recall.append(len(expected & retrieved_ids) / len(expected))
+
+        evaluation_query = row.get("evaluation_query")
+        if isinstance(evaluation_query, str) and evaluation_query.strip() and isinstance(report, dict):
+            answer = " ".join(
+                claim.get("statement", "") for claim in report.get("claims", [])
+                if isinstance(claim, dict)
+            )
+            q_terms = _term_set(evaluation_query)
+            a_terms = _term_set(answer)
+            answer_relevance_proxy.append(len(q_terms & a_terms) / max(1, len(q_terms)))
+
     def present(values):
         return [v for v in values if v is not None]
 
@@ -125,6 +162,13 @@ def investigation_metrics(records):
         "counterevidence_workflow_complete_rate": _mean(counter_complete),
         "knowledge_lexical_bridge_rate": _mean(present(lexical_bridge)),
         "unsupported_claim_rate": _mean(unsupported_rates),
+        "gold_context_recall": _mean(gold_context_recall),
+        "gold_context_recall_record_count": len(gold_context_recall),
+        "answer_relevance_lexical_proxy": _mean(answer_relevance_proxy),
+        "answer_relevance_record_count": len(answer_relevance_proxy),
+        "answer_relevance_note": (
+            "Lexical query-to-claim coverage only; this is not a semantic relevance judge."
+        ),
         "semantic_entailment_verified_rate": _mean(semantic_verified),
         "semantic_entailment_note": (
             "Expected to remain 0 until an independently evaluated entailment/contradiction model is added."
@@ -207,7 +251,7 @@ def evaluate(investigations=None):
     contract = contract_fixture_metrics()
     generator = investigation_metrics(investigations or [])
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "interpretation": (
             "Retriever metrics use synthetic checked-in queries. Generator metrics are reported only "
             "when real investigation outputs are explicitly supplied. No metric here is fraud-model quality."
