@@ -331,7 +331,7 @@ PDP 位于 prompt 外部，记录 `allow/deny`、匹配规则、参数摘要与�
 级副作用。需要改变策略/名单的动作仍应走 `propose -> 人工审批 -> 策略资产`。
 
 治理审计写入 `governance_audit.jsonl`，记录以前一条记录 hash 为输入的 SHA-256
-链，可用 `agent.governance.verify_audit_chain()` 离线检查删改。长任务可使用
+链，可用 `agent.governance.verify_audit_chain()` 离线检查链内记录删改；若要检测尾部截断或整链替换，需把 head hash 外锚到 WORM/SIEM。长任务可使用
 `agent.durable.CheckpointStore` 保存 JSON-only checkpoint，并显式
 `interrupt/resume`；不反序列化 pickle 或模型提供的可执行对象。
 
