@@ -66,12 +66,17 @@ def search_risk_knowledge(query, platform='', detector_ids=None, sdk_version='',
         result['next_action'] = ('review_hits_and_check_counterevidence' if result['hits']
                                  else 'rewrite_query_or_report_knowledge_gap')
         citations = state.setdefault('knowledge_citations', {})
+        support_material = state.setdefault('knowledge_support_material', {})
         for hit in result['hits']:
             entry = {k: hit[k] for k in
                 ('chunk_id', 'source', 'section', 'content_hash', 'known_at', 'reviewed_at', 'applicability')}
             old = citations.get(hit['chunk_id'], {})
             entry['retrieval_purposes'] = sorted(set(old.get('retrieval_purposes', [])) | {purpose})
             citations[hit['chunk_id']] = entry
+            # Internal-only material for post-generation support screening. It is
+            # not copied into the persisted citation registry or tool metadata.
+            support_material[hit['chunk_id']] = {k: hit.get(k, '') for k in
+                ('title', 'section', 'text', 'caveats', 'applicability')}
     return result
 
 
