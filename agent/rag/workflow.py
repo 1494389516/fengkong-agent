@@ -56,9 +56,13 @@ def finish_search(state, result=None, error=''):
         return
     result = result if isinstance(result, dict) else {'status': 'error'}
     hits = result.get('hits', [])
+    grade = result.get('retrieval_grade') if isinstance(result.get('retrieval_grade'), dict) else {}
     row.update(status=result.get('status', 'error'), mode=result.get('mode', ''),
                hit_count=len(hits), hit_ids=[hit.get('chunk_id') for hit in hits[:10]],
-               warning=bool(result.get('warning')))
+               warning=bool(result.get('warning')),
+               retrieval_grade=grade.get('status', ''),
+               retrieval_grade_score=grade.get('score'),
+               retrieval_grade_reason=grade.get('reason', ''))
 
 
 def record_event_evidence(state, result):
