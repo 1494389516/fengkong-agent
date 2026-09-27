@@ -281,10 +281,17 @@ def search(query, *, platform='', detector_ids=None, sdk_version='', as_of='', t
             warning = 'embedding unavailable or invalid; lexical retrieval only'
     elif embedder:
         warning = 'embedding model/index mismatch or empty corpus; lexical retrieval only'
+    # Rerank only candidates retrieved by BM25/vector; reranking is not retrieval
+    # and must never manufacture a hit for a no-match query.
+    from .rerank import rerank
+    candidate_rows = {i: eligible[i] for i in fused}
+    reranked = rerank(query, candidate_rows, fused) if candidate_rows else []
+    if reranked:
+        modes.append('rerank')
     hits = []
-    for i in sorted(fused, key=lambda i: (-fused[i], eligible[i]['chunk_id']))[:top_k]:
+    for i, score, _components in reranked[:top_k]:
         row = {k: v for k, v in eligible[i].items() if k != 'embedding'}
-        row.update(citation='[K:' + row['chunk_id'] + ']', relevance=round(fused[i], 6))
+        row.update(citation='[K:' + row['chunk_id'] + ']', relevance=round(score, 6))
         hits.append(row)
     return {'status': 'ok' if hits else 'no_match', 'hits': hits, 'mode': '+'.join(modes),
             'index_digest': meta.get('index_digest', ''), 'as_of': as_of or datetime.fromtimestamp(anchor, timezone.utc).isoformat(),
