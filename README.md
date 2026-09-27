@@ -323,6 +323,21 @@ component。只有已经进入 challenger、存在非空 PIT 评测证据，并�
 带 component digest 的 Control Plane component。该步骤仍不执行激活；最终上线
 继续经过 Control Plane、审批、canary 与 signed release。
 
+## Agent 治理运行时
+
+Agent 工具调用在既有 capability/scope 门禁之外，再经过 prompt 外部的 Policy Decision Point。
+治理层记录轨迹 provenance；RAG 等不可信/外部知识可以用于分析和提案，但不能在同一轨迹中
+直接驱动 execute 级副作用。治理审计使用 SHA-256 hash chain；它能发现保留链内部的删改，
+但尾部截断/整链替换仍需要把 head hash 外锚到 WORM/SIEM。
+
+长调查任务使用 JSON-only durable checkpoint；恢复时同时校验当前 immutable snapshot，
+不反序列化 pickle/可执行对象。最小门禁：
+
+```bash
+python -m eval.governance_invariants
+python -m eval.risk_agent_bench
+```
+
 ## 当前限制
 
 - 仓库数据为合成数据，评估结果不能直接代表真实业务效果；
