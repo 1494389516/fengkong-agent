@@ -16,6 +16,10 @@ jobs:
         run: python -m compileall -q agent serve.py
       - name: Risk-control architecture gates
         run: python eval/architecture_invariants.py
+      - name: Agent governance gates
+        run: |
+          python -m eval.governance_invariants
+          python -m eval.risk_agent_bench
       - name: Graph pipeline smoke
         run: python -m eval.graph_pipeline_smoke
       - name: Graph PIT and model adapter smoke
@@ -34,6 +38,7 @@ jobs:
         run: |
           python -m eval.rag_eval
           python -m eval.rag_quality_regressions
+          python -m eval.rag_entailment_regressions
           python -m eval.rag_cross_encoder_regressions
           python -m eval.rag_retrieval_grader_regressions
           python -m eval.claim_evidence_graph_regressions
