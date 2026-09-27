@@ -184,6 +184,9 @@ def run_task(task_id, context, *, agent_factory=None):
             from .rag.support import audit_report_support
             support_result = audit_report_support(
                 report, execution.get('knowledge_support_material', {}))
+            from .rag.entailment import evaluate_report_entailment
+            entailment_result = evaluate_report_entailment(
+                report, execution.get('knowledge_support_material', {}))
             from .rag.claim_graph import build_claim_evidence_graph
             claim_graph = build_claim_evidence_graph(
                 report,
@@ -200,6 +203,7 @@ def run_task(task_id, context, *, agent_factory=None):
                     'investigation_report':report,
                     'claim_evidence_audit':claim_result,
                     'claim_support_audit':support_result,
+                    'claim_entailment_audit':entailment_result,
                     'claim_evidence_graph':claim_graph}
             checkpoint_store.save(InvestigationCheckpoint(
                 task_id, snapshot['case_id'], 'completed', {'result': result}, status='completed'))
