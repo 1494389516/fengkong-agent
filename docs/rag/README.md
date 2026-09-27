@@ -35,7 +35,7 @@ python -m eval.rag_eval
 2. 在**服务端认证配置**的调查worker记录中保留`cases.run`权限，并按需向`tools`追加`get_event_evidence`、`search_risk_knowledge`。这些不是模型可授予自己的权限。
 3. 照常运行`agent.investigations.run_task(task_id, context)`。worker授权工具与任务快照的allowed_tools取交集。
 4. 读取结果中的`investigation_report`、`claim_evidence_audit`、`retrieval_audit`、
-   `knowledge_citation_audit`、`knowledge_index_digest`和`budget_used`。`summary`保留模型原始输出供审计。
+   `knowledge_citation_audit`、`claim_entailment_audit`、`knowledge_index_digest`和`budget_used`。`summary`保留模型原始输出供审计。
 
 交互Agent的`investigate`和默认`analyst`工具包也包含新工具。调用`get_event_evidence`需要已有认证租户/app上下文；它不回退到无认证全表查询。
 
@@ -50,6 +50,33 @@ python -m eval.rag_eval
 - `generator_grounding`：默认不宣称任何 Agent 生成质量。只有显式传入 `--investigations <jsonl>` 时，才统计真实调查结果的报告解析率、引用有效率、结构化 grounding、反证流程完整率、词汇桥接率和 unsupported claim rate。
 
 这套指标借鉴 claim-level RAG 评估的拆分思路，但不是 RAGChecker 的复刻，也没有引入其模型依赖。当前 `semantic_entailment_verified_rate` 应保持为 0，直到独立的 entailment/contradiction evaluator 经标注集验证后接入。
+
+## 可选：独立 Claim-Evidence Entailment Gate
+
+调查生成器不会给自己打分。需要语义蕴含/矛盾判断时，单独配置 evaluator：
+
+```bash
+export FK_RAG_ENTAILMENT_ENABLED=1
+export FK_RAG_ENTAILMENT_BASE_URL=https://your-evaluator.example/v1
+export FK_RAG_ENTAILMENT_MODEL=your-pinned-entailment-model
+# 在部署密钥管理中设置 FK_RAG_ENTAILMENT_API_KEY
+```
+
+evaluator 只输出 `SUPPORTED / CONTRADICTED / INSUFFICIENT`。配置缺失、调用失败、材料缺失、
+矛盾或证据不足全部 fail-closed 为 `grounding_gate=REVIEW`，不会修改 Decision Plane verdict。
+即使模型返回 `SUPPORTED`，也只有在该 evaluator 已用人工复核标注集完成校准并显式设置
+`FK_RAG_ENTAILMENT_CALIBRATED=1` 后，才允许
+`semantic_entailment_verified=true`。
+
+仓库内 `eval/rag/entailment_cases.jsonl` 明确标记为 `simulated=true`，只用于合同/冒烟验证，
+不冒充真实攻击或误杀样本。真实验收应把去标识化、人工复核的 attack/false-positive 案例按现有
+`attack_case/false_positive_case + case_id + reviewed_at + review_basis` 合同入库，并使用：
+
+```bash
+python -m eval.rag_entailment_calibration --cases /path/to/reviewed_entailment.jsonl --gate
+```
+
+只有真实复核集达到你设定的门槛后，部署侧才应打开 `FK_RAG_ENTAILMENT_CALIBRATED=1`。
 
 ## 可选：真实向量混合检索
 
@@ -118,5 +145,5 @@ python -m eval.rag_eval
 - 当前reranker是确定性的领域metadata/意图重排，不是cross-encoder；尚未接入历史索引版本服务、自动审核或GraphRAG。
 - 未调用真实LLM/embedding服务验证质量；混合检索路径用明确标记的测试向量验证契约、缓存及失败处理。
 - 现有collector观测接口不包含解码后的检测信号正文。新证据工具返回业务事件与SDK来源/硬件观测，不擅自解码可能混淆的原始载荷；这会作为调查缺口提示。
-- 报告使用结构化 claim 合同，并增加保守claim-support词汇筛查；仍未验证文字结论与来源之间的语义蕴含/矛盾，后续应接独立NLI/cross-encoder evaluator并用标注集校准。
+- 报告使用结构化 claim 合同、保守词汇筛查和可选独立 entailment evaluator；未配置或未校准 evaluator 时语义验证保持 fail-closed，不能宣称已验证。
 - 后续真实效果验收需要有复核标签的历史事件，对比无RAG、BM25和混合检索，排除未来资料与自身复盘。
