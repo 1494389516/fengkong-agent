@@ -169,16 +169,24 @@ def contract_fixture_metrics():
     good_support = audit_report_support(good, material)
     good_citation = citation_audit(good_text, retrieved)
 
-    bad = dict(good)
-    bad["claims"] = [
-        {"statement": "该账号已经完成跨境洗钱并确认团伙身份。",
+    bad_unknown = dict(good)
+    bad_unknown["claims"] = [
+        {"statement": "未知引用不应通过。",
          "role": "finding", "event_evidence": ["event:missing"],
          "knowledge_citations": ["[K:missing]"], "confidence": "high"}
     ]
-    bad_text = json.dumps(bad, ensure_ascii=False)
-    _, bad_claim = claim_evidence_audit(bad_text, retrieved, event_registry, retrieval)
-    bad_support = audit_report_support(bad, material)
-    bad_citation = citation_audit(bad_text, retrieved)
+    bad_unknown_text = json.dumps(bad_unknown, ensure_ascii=False)
+    _, bad_claim = claim_evidence_audit(
+        bad_unknown_text, retrieved, event_registry, retrieval)
+    bad_citation = citation_audit(bad_unknown_text, retrieved)
+
+    bad_unrelated = dict(good)
+    bad_unrelated["claims"] = [
+        {"statement": "该账号已经完成跨境洗钱并确认团伙身份。",
+         "role": "counterevidence", "event_evidence": [],
+         "knowledge_citations": ["[K:k1]"], "confidence": "high"}
+    ]
+    bad_support = audit_report_support(bad_unrelated, material)
 
     checks = {
         "valid_fixture_accepted": (
