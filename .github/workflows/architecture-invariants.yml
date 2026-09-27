@@ -17,7 +17,9 @@ jobs:
       - name: Risk-control architecture gates
         run: python eval/architecture_invariants.py
       - name: Agent governance gates
-        run: python eval/governance_invariants.py
+        run: |
+          python eval/governance_invariants.py
+          python eval/risk_agent_bench.py
       - name: Graph pipeline smoke
         run: python -m eval.graph_pipeline_smoke
       - name: Graph PIT and model adapter smoke
