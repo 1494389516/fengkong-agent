@@ -41,13 +41,17 @@ def search_risk_knowledge(query, platform='', detector_ids=None, sdk_version='',
     # A missing provider configuration must not disable the offline knowledge tool.
     try:
         embedder = configured_embedder()
+        from agent.rag.cross_encoder import configured_reranker
+        reranker = configured_reranker()
         config_warning = ''
     except Exception:
         embedder = None
-        config_warning = 'embedding configuration invalid; lexical retrieval only'
+        reranker = None
+        config_warning = 'embedding/reranker configuration invalid; safe retrieval fallback only'
     try:
         result = search(query, platform=platform, detector_ids=detector_ids, sdk_version=sdk_version,
-                        as_of=as_of, top_k=top_k, embedder=embedder, public_only=True, **extra)
+                        as_of=as_of, top_k=top_k, embedder=embedder, reranker=reranker,
+                        public_only=True, **extra)
     except Exception as exc:
         if state:
             from agent.rag.workflow import finish_search
