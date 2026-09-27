@@ -156,6 +156,9 @@ def run_task(task_id, context, *, agent_factory=None):
             report, claim_result = claim_evidence_audit(summary,
                 execution.get('knowledge_citations', {}),
                 execution.get('event_evidence_registry', {}), retrieval_result)
+            from .rag.support import audit_report_support
+            support_result = audit_report_support(
+                report, execution.get('knowledge_support_material', {}))
             result={'task_id':task_id,'snapshot_id':snapshot['snapshot_id'],'summary':summary,
                     'evidence_refs':snapshot['evidence_refs'],'status':'success',
                     'budget_used':{'tool_calls':execution['calls'],'tokens':execution['tokens']},
@@ -163,7 +166,8 @@ def run_task(task_id, context, *, agent_factory=None):
                     'knowledge_citation_audit':citation_result,
                     'retrieval_audit':retrieval_result,
                     'investigation_report':report,
-                    'claim_evidence_audit':claim_result}
+                    'claim_evidence_audit':claim_result,
+                    'claim_support_audit':support_result}
             changed=db.execute('UPDATE investigation_tasks SET status=?,result=?,lease_until=0 '
                 'WHERE task_id=? AND lease_token=? AND lease_until>?',('success',json.dumps(result),task_id,token,time.time())).rowcount
             if changed!=1: raise RuntimeError('worker lease lost')
