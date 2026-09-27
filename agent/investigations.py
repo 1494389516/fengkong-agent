@@ -95,6 +95,27 @@ def run_task(task_id, context, *, agent_factory=None):
             memory_context = load_investigation_memory(db, snapshot, limit=3)
             db.execute('UPDATE investigation_tasks SET status=?,lease_until=?,lease_token=? WHERE task_id=?',
                        ('running',time.time()+300,token,task_id));db.commit()
+            from .durable import CheckpointStore, InvestigationCheckpoint
+            checkpoint_store = CheckpointStore()
+            try:
+                recovered = checkpoint_store.load(task_id)
+            except FileNotFoundError:
+                recovered = None
+            if recovered is not None and recovered.status == 'completed':
+                recovered_result = recovered.state.get('result')
+                if not isinstance(recovered_result, dict):
+                    raise RuntimeError('completed checkpoint lacks structured result')
+                if recovered_result.get('snapshot_id') != snapshot.get('snapshot_id'):
+                    raise RuntimeError('checkpoint snapshot mismatch')
+                changed=db.execute('UPDATE investigation_tasks SET status=?,result=?,lease_until=0 '
+                    'WHERE task_id=? AND lease_token=?',('success',json.dumps(recovered_result),task_id,token)).rowcount
+                if changed != 1:
+                    raise RuntimeError('worker lease lost during checkpoint recovery')
+                db.commit()
+                return recovered_result
+            checkpoint_store.save(InvestigationCheckpoint(
+                task_id, snapshot['case_id'], 'agent_start',
+                {'snapshot_id': snapshot['snapshot_id'], 'entity_ref': snapshot['entity_ref']}))
             from .tools.capability import RequestScope
             granted=set(context.attributes.get('tools',[])) & set(snapshot['allowed_tools'])
             if not granted: raise PermissionError('no investigation tools authorized')
@@ -163,6 +184,9 @@ def run_task(task_id, context, *, agent_factory=None):
             from .rag.support import audit_report_support
             support_result = audit_report_support(
                 report, execution.get('knowledge_support_material', {}))
+            from .rag.entailment import evaluate_report_entailment
+            entailment_result = evaluate_report_entailment(
+                report, execution.get('knowledge_support_material', {}))
             from .rag.claim_graph import build_claim_evidence_graph
             claim_graph = build_claim_evidence_graph(
                 report,
@@ -179,7 +203,10 @@ def run_task(task_id, context, *, agent_factory=None):
                     'investigation_report':report,
                     'claim_evidence_audit':claim_result,
                     'claim_support_audit':support_result,
+                    'claim_entailment_audit':entailment_result,
                     'claim_evidence_graph':claim_graph}
+            checkpoint_store.save(InvestigationCheckpoint(
+                task_id, snapshot['case_id'], 'completed', {'result': result}, status='completed'))
             changed=db.execute('UPDATE investigation_tasks SET status=?,result=?,lease_until=0 '
                 'WHERE task_id=? AND lease_token=? AND lease_until>?',('success',json.dumps(result),task_id,token,time.time())).rowcount
             if changed!=1: raise RuntimeError('worker lease lost')
