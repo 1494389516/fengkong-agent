@@ -62,7 +62,7 @@ def search_risk_knowledge(query, platform='', detector_ids=None, sdk_version='',
             finish_search(state, error=type(exc).__name__)
         raise
     if config_warning:
-        result['warning'] = config_warning
+        result['warning'] = ((result.get('warning', '') + '; ') if result.get('warning') else '') + config_warning
     if state:
         from agent.rag.workflow import finish_search
         finish_search(state, result=result)
