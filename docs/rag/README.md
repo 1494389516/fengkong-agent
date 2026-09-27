@@ -41,6 +41,16 @@ python -m eval.rag_eval
 
 旧任务没有知识指纹，保持原能力，不能凭空增加RAG权限。索引更新后旧快照的知识检索会明确失败，不能静默使用新版本；第一版没有历史索引服务或任务重发接口。处理方式是在处理队列前完成知识发布，运行期间固定索引；需要恢复旧任务时由运维恢复原语料/模型索引。不能修改时间字段来绕过历史边界。
 
+### RAG Scorecard
+
+`python -m eval.rag_scorecard --gate --output out/rag_scorecard.json` 会把评估拆成三层：
+
+- `retriever`：Hit@1/5、MRR@5、负例拒绝率、hard-case section Top-1，以及 PIT 未来知识和跨平台泄漏探针；
+- `grounding_evaluator_contract`：用 synthetic good/bad claims 验证未知事件引用、未知知识引用和明显 citation/claim 脱节能被评估器抓到；
+- `generator_grounding`：默认不宣称任何 Agent 生成质量。只有显式传入 `--investigations <jsonl>` 时，才统计真实调查结果的报告解析率、引用有效率、结构化 grounding、反证流程完整率、词汇桥接率和 unsupported claim rate。
+
+这套指标借鉴 claim-level RAG 评估的拆分思路，但不是 RAGChecker 的复刻，也没有引入其模型依赖。当前 `semantic_entailment_verified_rate` 应保持为 0，直到独立的 entailment/contradiction evaluator 经标注集验证后接入。
+
 ## 可选：真实向量混合检索
 
 只在需要且允许将公开语料与查询发送到配置的embedding服务时开启。可以配置自托管的兼容服务。不会自动复用聊天模型密钥。
