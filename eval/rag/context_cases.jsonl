@@ -1,0 +1,3 @@
+{"query":"DebuggerDetector 的实现、误报边界和补充验证是什么","platform":"ios","expected_chunks":[["sdk_debugger","实现与信号含义"],["sdk_debugger","误报与能力边界"],["sdk_debugger","补充验证"]]}
+{"query":"SensorReplayDetector 实际实现、误报限制和后续验证","platform":"ios","expected_chunks":[["sdk_sensor_replay","实现与信号含义"],["sdk_sensor_replay","误报与能力边界"],["sdk_sensor_replay","补充验证"]]}
+{"query":"EmulatorBehaviorDetector 实现原理、能力边界、补充验证","platform":"ios","expected_chunks":[["sdk_emulator_behavior","实现与信号含义"],["sdk_emulator_behavior","误报与能力边界"],["sdk_emulator_behavior","补充验证"]]}
