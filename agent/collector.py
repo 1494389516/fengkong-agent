@@ -176,6 +176,8 @@ def ingest(upload, context, *, wire_bytes=None, remote_ip=None, now=None):
                 'hardware_attributes':hardware,'observed_at':value['ts']/1000,'recorded_at':now,
                 'source_kind':'sdk_observation','verification':'verified_mac','server_attestation':verdict,
                 'measurement_status':'observed','evidence_digest':hashlib.sha256(raw_payload).hexdigest()}
+            from .sdk_signal_evidence import project_sdk_signals
+            observation['sdk_signal_evidence'] = project_sdk_signals(payload)
             if remote_ip: observation['ip']=remote_ip
             receipt={'report_id':value['report_id'],'evidence_id':evidence_id,'verification':'verified_mac',
                      'server_attestation':verdict,'received_at':now,'idempotent_replay':False}

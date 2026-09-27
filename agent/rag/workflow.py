@@ -76,6 +76,10 @@ def record_event_evidence(state, result):
     for observation in result.get('sdk_observations', []):
         if isinstance(observation, dict) and isinstance(observation.get('evidence_id'), str):
             registry['sdk:' + observation['evidence_id']] = {'kind': 'sdk_observation'}
+            for signal in observation.get('sdk_signal_evidence', {}).get('signals', []):
+                ref = signal.get('ref')
+                if isinstance(ref, str):
+                    registry[ref] = {'kind': 'sdk_signal', 'trust': 'client_reported'}
     state['event_evidence_loaded'] = True
     state['event_evidence_registry'] = registry
     return [{'ref': ref, **metadata} for ref, metadata in registry.items()]

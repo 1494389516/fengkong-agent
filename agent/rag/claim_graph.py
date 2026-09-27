@@ -48,7 +48,10 @@ def build_claim_evidence_graph(report, event_registry, knowledge_registry, suppo
                 unresolved.append({"claim": claim_id, "ref": ref, "kind": "event"})
                 continue
             metadata = event_registry[ref]
-            add_node({"id": ref, "kind": metadata.get("kind", "event_evidence")})
+            node = {"id": ref, "kind": metadata.get("kind", "event_evidence")}
+            if metadata.get("kind") == "sdk_signal":
+                node["trust"] = "client_reported"
+            add_node(node)
             edges.append({"from": ref, "to": claim_id, "relation": "supports",
                           "verified_reference": True})
 
