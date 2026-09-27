@@ -103,7 +103,9 @@ RAG_FIELDS = frozenset(('count', 'hits', 'knowledge_id', 'chunk_id', 'title', 't
     'applicability', 'simulated', 'detector_ids', 'sdk_version_min', 'sdk_version_max',
     'section', 'text', 'content_hash', 'citation', 'relevance', 'export_policy',
     'index_digest', 'as_of', 'mode', 'warning', 'interpretation', 'error',
-    'purpose', 'attempt', 'attempt_reason', 'remaining_attempts', 'next_action'))
+    'purpose', 'attempt', 'attempt_reason', 'remaining_attempts', 'next_action',
+    'retrieval_grade', 'score', 'query_term_coverage', 'counterevidence_signal',
+    'reason', 'semantic_relevance_verified'))
 FIELD_NAMES = FIELD_NAMES | RAG_FIELDS | frozenset(('recorded_decision', 'sdk_observations',
     'missing_evidence_refs', 'omitted_evidence_count', 'limitations', 'evidence_id',
     'report_id', 'observed_at', 'recorded_at', 'verification', 'measurement_status',
@@ -142,7 +144,8 @@ PUBLIC_VALUES = PUBLIC_VALUES | frozenset(("interpretation", "support", "counter
  "review_hits_and_check_counterevidence", "rewrite_query_or_report_knowledge_gap",
  "event_fact", "recorded_decision", "sdk_observation", "bm25", "bm25+vector",
  "bm25+rerank", "bm25+vector+rerank", "bm25+rerank+cross_encoder",
- "bm25+vector+rerank+cross_encoder"))
+ "bm25+vector+rerank+cross_encoder", "rewrite_required", "auditable_lexical_bridge",
+ "query_has_no_gradeable_terms", "no_lexical_bridge", "counterevidence_not_found"))
 PUBLIC_FIELDS = frozenset(("rule_id", "reason_codes", "type", "mode", "circuit", "status", "action", "decision", "verdict", "label", "list", "dimension", "level", "next_action", "purpose", "attempt_reason", "kind"))
 # Numeric values are public only in declared analytical fields. In particular,
 # a new numeric account format in a generic value/description cannot escape.
@@ -154,7 +157,7 @@ PUBLIC_NUMBERS = frozenset((
  "accounts_total", "reject_count", "review_count", "pass_count", "risk_score", "score", "threshold", "probability",
  "precision", "recall", "f1", "auc", "false_positive_rate", "false_negative_rate", "total", "progress", "attempts",
  "first_seen", "last_seen", "observation_count", "ignored_events", "schema_omitted", "expires_at", "added_at",
- "attempt", "remaining_attempts",
+ "attempt", "remaining_attempts", "query_term_coverage",
  "tp", "fp", "tn", "fn", "sample_count", "missing_count", "missing_rate", "mean", "min", "max", "median", "std",
  "p50", "p90", "p95", "p99", "rate", "ratio", "coverage", "latency_ms", "duration_ms", "version",
 ))
