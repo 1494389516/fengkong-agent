@@ -34,3 +34,4 @@ jobs:
         run: |
           python -m eval.rag_eval
           python -m eval.rag_quality_regressions
+          python -m eval.rag_scorecard --gate --output out/rag_scorecard.json
