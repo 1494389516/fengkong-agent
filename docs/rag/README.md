@@ -69,6 +69,23 @@ python -m eval.rag_eval --hybrid
 
 检索查询应只含检测项与待解释现象，不含用户、设备或网络标识。开启远端embedding意味着查询也会出站，配置方需选择合适的部署边界。
 
+## 可选：本地 Cross-Encoder 二阶段重排
+
+默认仍使用仓库内确定性的领域 reranker，不增加模型依赖。需要评估 Cross-Encoder 时单独安装：
+
+```bash
+python -m pip install -r requirements-reranker.txt
+export FK_RAG_RERANK_ENABLED=1
+export FK_RAG_RERANK_MODEL=/absolute/path/to/pinned-reranker
+python -m eval.rag_reranker_compare --gate-no-regression
+```
+
+Cross-Encoder 只处理 BM25/vector 已召回且经过领域重排的前20个候选，不会为 `no_match` 查询凭空制造命中。模型分数不与现有 relevance 生硬相加，而是与确定性领域排序做 RRF rank fusion，避免不同模型 logit 标度改变策略。推理失败会显式 warning 并回退原排序。
+
+默认 `local_files_only=True` 且 `trust_remote_code=False`。如确需从模型仓库下载，必须显式设置 `FK_RAG_RERANK_ALLOW_DOWNLOAD=1`，并建议同时设置 `FK_RAG_RERANK_REVISION=<immutable revision>`；生产部署应固定模型文件/修订版本。当前仓库不把 `sentence-transformers` 放进默认服务依赖，避免未启用 RAG reranker 的部署被迫安装 Torch/Transformers。
+
+当前 checked-in synthetic benchmark 已经饱和，Cross-Encoder 是否真正提升质量不能由这40条满分样本证明。合入运行时 adapter 只证明接线、回退和安全边界；模型选型必须继续用更难的标注 query-document/ranking 集以及真实调查输出做 before/after。
+
 ## 知识格式与公开边界
 
 参见`knowledge/detectors/*.json`。每条文档包括：

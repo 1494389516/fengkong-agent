@@ -1,0 +1,3 @@
+# Optional local CrossEncoder runtime. Not installed by the default server build.
+# Pin model weights/revision separately in deployment; do not rely on a mutable Hub main.
+sentence-transformers>=5.4,<6

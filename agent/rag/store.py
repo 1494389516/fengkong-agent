@@ -220,7 +220,8 @@ def bm25(query, rows):
 
 
 def search(query, *, platform='', detector_ids=None, sdk_version='', as_of='', top_k=5,
-           exclude_case_id='', expected_digest=None, embedder=None, public_only=False):
+           exclude_case_id='', expected_digest=None, embedder=None, reranker=None,
+           public_only=False):
     if not isinstance(query, str) or not query.strip() or len(query) > 2000:
         raise ValueError('query must contain 1..2000 characters')
     if type(top_k) is not int or not 1 <= top_k <= 10:
@@ -288,8 +289,37 @@ def search(query, *, platform='', detector_ids=None, sdk_version='', as_of='', t
     reranked = rerank(query, candidate_rows, fused) if candidate_rows else []
     if reranked:
         modes.append('rerank')
+
+    # Optional second-stage CrossEncoder. Fuse ranks instead of raw logits:
+    # reranker score scales differ by model, while RRF is deterministic and
+    # preserves the audited domain reranker as an independent signal.
+    final = [(i, score, components) for i, score, components in reranked]
+    if reranker and reranked:
+        try:
+            pool = reranked[:20]
+            passages = [embedding_text(eligible[i]) for i, _, _ in pool]
+            ce_scores = reranker.score(query, passages)
+            if len(ce_scores) != len(pool):
+                raise ValueError('cross-encoder score count mismatch')
+            domain_rank = {i: rank for rank, (i, _, _) in enumerate(pool, 1)}
+            ce_order = sorted(zip(pool, ce_scores),
+                              key=lambda item: (-item[1], eligible[item[0][0]]['chunk_id']))
+            ce_rank = {item[0][0]: rank for rank, item in enumerate(ce_order, 1)}
+            combined = []
+            for i, score, components in pool:
+                rrf = 1 / (60 + domain_rank[i]) + 1 / (60 + ce_rank[i])
+                extra = dict(components)
+                extra.update(cross_encoder_score=round(ce_scores[domain_rank[i]-1], 6),
+                             cross_encoder_rank=ce_rank[i], fused_rank_score=round(rrf, 6))
+                combined.append((i, rrf, extra))
+            final = sorted(combined,
+                           key=lambda item: (-item[1], eligible[item[0]]['chunk_id']))
+            modes.append('cross_encoder')
+        except Exception:
+            warning = (warning + '; ' if warning else '') + (
+                'cross-encoder unavailable or invalid; deterministic reranker only')
     hits = []
-    for i, score, _components in reranked[:top_k]:
+    for i, score, _components in final[:top_k]:
         row = {k: v for k, v in eligible[i].items() if k != 'embedding'}
         row.update(citation='[K:' + row['chunk_id'] + ']', relevance=round(score, 6))
         hits.append(row)

@@ -39,22 +39,30 @@ def search_risk_knowledge(query, platform='', detector_ids=None, sdk_version='',
         extra = {'exclude_case_id': snapshot['case_id'],
                  'expected_digest': snapshot['knowledge_index_digest']}
     # A missing provider configuration must not disable the offline knowledge tool.
+    warnings = []
     try:
         embedder = configured_embedder()
-        config_warning = ''
     except Exception:
         embedder = None
-        config_warning = 'embedding configuration invalid; lexical retrieval only'
+        warnings.append('embedding configuration invalid; lexical retrieval available')
+    try:
+        from agent.rag.cross_encoder import configured_reranker
+        reranker = configured_reranker()
+    except Exception:
+        reranker = None
+        warnings.append('cross-encoder configuration invalid; deterministic reranker available')
+    config_warning = '; '.join(warnings)
     try:
         result = search(query, platform=platform, detector_ids=detector_ids, sdk_version=sdk_version,
-                        as_of=as_of, top_k=top_k, embedder=embedder, public_only=True, **extra)
+                        as_of=as_of, top_k=top_k, embedder=embedder, reranker=reranker,
+                        public_only=True, **extra)
     except Exception as exc:
         if state:
             from agent.rag.workflow import finish_search
             finish_search(state, error=type(exc).__name__)
         raise
     if config_warning:
-        result['warning'] = config_warning
+        result['warning'] = ((result.get('warning', '') + '; ') if result.get('warning') else '') + config_warning
     if state:
         from agent.rag.workflow import finish_search
         finish_search(state, result=result)
