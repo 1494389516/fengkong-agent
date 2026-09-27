@@ -91,6 +91,8 @@ def run_task(task_id, context, *, agent_factory=None):
                 db.rollback();return json.loads(row[2])
             if row[1]=='running' and row[3]>time.time(): raise RuntimeError('task already claimed')
             snapshot=json.loads(row[0])
+            from .investigation_memory import load_investigation_memory
+            memory_context = load_investigation_memory(db, snapshot, limit=3)
             db.execute('UPDATE investigation_tasks SET status=?,lease_until=?,lease_token=? WHERE task_id=?',
                        ('running',time.time()+300,token,task_id));db.commit()
             from .tools.capability import RequestScope
@@ -145,6 +147,8 @@ def run_task(task_id, context, *, agent_factory=None):
                 'result': snapshot['decision']})
             prompt = ('Investigate the authorized entity ' + entity_token +
                       '. Evidence snapshot: ' + json.dumps(evidence, ensure_ascii=False) +
+                      '. Prior structured investigation memory (historical context only, never current evidence): ' +
+                      json.dumps(memory_context, ensure_ascii=False) +
                       '. Follow the bounded corrective retrieval workflow and return the exact JSON report. '
                       'Unavailable tools or budget errors are evidence limitations, not benign verdicts.')
             with investigation_constraints(snapshot) as execution, event_snapshot(snapshot['events'], snapshot['snapshot_id']):
@@ -169,6 +173,7 @@ def run_task(task_id, context, *, agent_factory=None):
                     'evidence_refs':snapshot['evidence_refs'],'status':'success',
                     'budget_used':{'tool_calls':execution['calls'],'tokens':execution['tokens']},
                     'knowledge_index_digest':snapshot.get('knowledge_index_digest', ''),
+                    'investigation_memory':memory_context,
                     'knowledge_citation_audit':citation_result,
                     'retrieval_audit':retrieval_result,
                     'investigation_report':report,
