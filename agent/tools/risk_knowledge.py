@@ -39,15 +39,19 @@ def search_risk_knowledge(query, platform='', detector_ids=None, sdk_version='',
         extra = {'exclude_case_id': snapshot['case_id'],
                  'expected_digest': snapshot['knowledge_index_digest']}
     # A missing provider configuration must not disable the offline knowledge tool.
+    warnings = []
     try:
         embedder = configured_embedder()
-        from agent.rag.cross_encoder import configured_reranker
-        reranker = configured_reranker()
-        config_warning = ''
     except Exception:
         embedder = None
+        warnings.append('embedding configuration invalid; lexical retrieval available')
+    try:
+        from agent.rag.cross_encoder import configured_reranker
+        reranker = configured_reranker()
+    except Exception:
         reranker = None
-        config_warning = 'embedding/reranker configuration invalid; safe retrieval fallback only'
+        warnings.append('cross-encoder configuration invalid; deterministic reranker available')
+    config_warning = '; '.join(warnings)
     try:
         result = search(query, platform=platform, detector_ids=detector_ids, sdk_version=sdk_version,
                         as_of=as_of, top_k=top_k, embedder=embedder, reranker=reranker,
