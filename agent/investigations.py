@@ -93,6 +93,26 @@ def run_task(task_id, context, *, agent_factory=None):
             snapshot=json.loads(row[0])
             db.execute('UPDATE investigation_tasks SET status=?,lease_until=?,lease_token=? WHERE task_id=?',
                        ('running',time.time()+300,token,task_id));db.commit()
+            # Durable sidecar checkpoint closes the crash window between a
+            # completed Agent run and the task-row commit. JSON-only state is
+            # server-owned; model output is data, never deserialized as code.
+            from .durable import CheckpointStore, InvestigationCheckpoint
+            checkpoint_store = CheckpointStore()
+            try:
+                recovered = checkpoint_store.load(task_id)
+            except FileNotFoundError:
+                recovered = None
+            if recovered is not None and recovered.status == 'completed' and recovered.state.get('result'):
+                result = recovered.state['result']
+                changed=db.execute('UPDATE investigation_tasks SET status=?,result=?,lease_until=0 '
+                    'WHERE task_id=? AND lease_token=?',('success',json.dumps(result),task_id,token)).rowcount
+                if changed != 1:
+                    raise RuntimeError('worker lease lost during checkpoint recovery')
+                db.commit()
+                return result
+            checkpoint_store.save(InvestigationCheckpoint(
+                task_id, snapshot['case_id'], 'agent_start',
+                {'snapshot_id': snapshot['snapshot_id'], 'entity_ref': snapshot['entity_ref']}))
             from .tools.capability import RequestScope
             granted=set(context.attributes.get('tools',[])) & set(snapshot['allowed_tools'])
             if not granted: raise PermissionError('no investigation tools authorized')
@@ -164,6 +184,8 @@ def run_task(task_id, context, *, agent_factory=None):
                     'retrieval_audit':retrieval_result,
                     'investigation_report':report,
                     'claim_evidence_audit':claim_result}
+            checkpoint_store.save(InvestigationCheckpoint(
+                task_id, snapshot['case_id'], 'completed', {'result': result}, status='completed'))
             changed=db.execute('UPDATE investigation_tasks SET status=?,result=?,lease_until=0 '
                 'WHERE task_id=? AND lease_token=? AND lease_until>?',('success',json.dumps(result),task_id,token,time.time())).rowcount
             if changed!=1: raise RuntimeError('worker lease lost')
