@@ -14,13 +14,18 @@ def main():
     query.add_argument('--sdk-version', default='')
     query.add_argument('--as-of', default='')
     query.add_argument('--top-k', type=int, default=5)
+    route = sub.add_parser('route'); route.add_argument('query')
     args = parser.parse_args()
-    embedder = configured_embedder()
-    if args.command == 'ingest':
-        result = ingest(args.directory, embedder)
+    if args.command == 'route':
+        from .router import route_query
+        result = route_query(args.query)
     else:
-        result = search(args.query, platform=args.platform, sdk_version=args.sdk_version,
-                        as_of=args.as_of, top_k=args.top_k, embedder=embedder)
+        embedder = configured_embedder()
+        if args.command == 'ingest':
+            result = ingest(args.directory, embedder)
+        else:
+            result = search(args.query, platform=args.platform, sdk_version=args.sdk_version,
+                            as_of=args.as_of, top_k=args.top_k, embedder=embedder)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
