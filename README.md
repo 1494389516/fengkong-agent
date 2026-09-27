@@ -323,6 +323,24 @@ component。只有已经进入 challenger、存在非空 PIT 评测证据，并�
 带 component digest 的 Control Plane component。该步骤仍不执行激活；最终上线
 继续经过 Control Plane、审批、canary 与 signed release。
 
+## Agent 治理运行时
+
+Agent 工具调用现在在既有 `capability.enforce` 之外再经过独立 Policy Decision Point。
+PDP 位于 prompt 外部，记录 `allow/deny`、匹配规则、参数摘要与策略版本；RAG 等外部
+知识会给当前调查轨迹标记 provenance，含不可信来源的轨迹不得直接驱动 `execute`
+级副作用。需要改变策略/名单的动作仍应走 `propose -> 人工审批 -> 策略资产`。
+
+治理审计写入 `governance_audit.jsonl`，记录以前一条记录 hash 为输入的 SHA-256
+链，可用 `agent.governance.verify_audit_chain()` 离线检查删改。长任务可使用
+`agent.durable.CheckpointStore` 保存 JSON-only checkpoint，并显式
+`interrupt/resume`；不反序列化 pickle 或模型提供的可执行对象。
+
+最小门禁：
+
+```bash
+python eval/governance_invariants.py
+```
+
 ## 当前限制
 
 - 仓库数据为合成数据，评估结果不能直接代表真实业务效果；
