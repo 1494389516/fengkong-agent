@@ -140,7 +140,8 @@ PUBLIC_VALUES = frozenset(("success", "failed", "error", "queued", "running", "c
 PUBLIC_VALUES = PUBLIC_VALUES | frozenset(("interpretation", "support", "counterevidence",
  "initial", "no_match", "low_relevance", "missing_counterevidence", "broaden_terms",
  "review_hits_and_check_counterevidence", "rewrite_query_or_report_knowledge_gap",
- "event_fact", "recorded_decision", "sdk_observation", "bm25", "bm25+vector"))
+ "event_fact", "recorded_decision", "sdk_observation", "bm25", "bm25+vector",
+ "bm25+rerank", "bm25+vector+rerank"))
 PUBLIC_FIELDS = frozenset(("rule_id", "reason_codes", "type", "mode", "circuit", "status", "action", "decision", "verdict", "label", "list", "dimension", "level", "next_action", "purpose", "attempt_reason", "kind"))
 # Numeric values are public only in declared analytical fields. In particular,
 # a new numeric account format in a generic value/description cannot escape.
