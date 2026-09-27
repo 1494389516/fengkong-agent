@@ -7,8 +7,8 @@ for evaluation/debugging.
 import re
 from .store import tokens
 
-_CAVEAT_TERMS = ("误报", "合法", "正常", "边界", "不能", "是否证明", "假阳性",
-                 "false positive", "caveat", "legitimate")
+_CAVEAT_TERMS = ("误报", "合法", "正常", "边界", "不能", "能否", "是否", "确认",
+                 "直接代表", "证明", "假阳性", "false positive", "caveat", "legitimate")
 _IMPL_TERMS = ("实现", "代码", "源码", "方法", "采集", "检查", "信号", "implementation",
                "source", "method", "detect")
 
@@ -40,7 +40,9 @@ def rerank(query, candidates, base_scores):
         section_overlap = len(q_tokens & section_tokens) / max(1, len(q_tokens))
         detector_overlap = len(q_tokens & detector_tokens) / max(1, len(q_tokens))
         heading = row.get("section", "")
-        caveat_match = 1.0 if caveat_intent and _contains_any(heading, ("误报", "边界", "补充验证")) else 0.0
+        caveat_match = (1.0 if caveat_intent and _contains_any(heading, ("误报", "边界"))
+                         else 0.35 if caveat_intent and _contains_any(heading, ("补充验证",))
+                         else 0.0)
         implementation_match = 1.0 if implementation_intent and _contains_any(heading, ("实现", "信号")) else 0.0
         bonus = (
             (0.020 if exact_detector else 0.0)
