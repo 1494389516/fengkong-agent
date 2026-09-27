@@ -96,6 +96,8 @@ class Agent:
         self.case_token_budget = CASE_TOKEN_BUDGET
         self._case_tokens = 0
         self._case_id = uuid.uuid4().hex
+        from . import governance
+        governance.reset_trajectory(self._case_id)
         self._asks_since_ckpt = 0
         # ⑦ 脱敏:token 映射跨轮复用(同值同 token,LLM 才能跨轮关联同一账号)
         self._privacy = privacy_enabled()
@@ -121,6 +123,8 @@ class Agent:
         self._asks_since_ckpt = 0
         self._case_tokens = 0
         self._case_id = uuid.uuid4().hex
+        from . import governance
+        governance.reset_trajectory(self._case_id)
         if getattr(self, "_privacy", False):
             self._tok = Tokenizer()
 
