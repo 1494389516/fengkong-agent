@@ -7,8 +7,9 @@ for evaluation/debugging.
 import re
 from .store import tokens
 
-_CAVEAT_TERMS = ("误报", "合法", "正常", "边界", "不能", "能否", "是否", "确认",
-                 "直接代表", "证明", "假阳性", "false positive", "caveat", "legitimate")
+_CAVEAT_TERMS = ("误报", "合法", "正常", "边界", "不能", "能否证明", "能否确认",
+                 "能否直接", "是否直接", "是否代表", "直接代表", "假阳性",
+                 "false positive", "caveat", "legitimate")
 _IMPL_TERMS = ("实现", "代码", "源码", "方法", "采集", "检查", "信号", "implementation",
                "source", "method", "detect")
 
