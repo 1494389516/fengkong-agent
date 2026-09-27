@@ -20,11 +20,15 @@ class LocalCrossEncoderReranker:
                 "sentence-transformers is required for local cross-encoder reranking"
             ) from exc
         allow_download = os.environ.get("FK_RAG_RERANK_ALLOW_DOWNLOAD") == "1"
-        kwargs = {}
+        revision = os.environ.get("FK_RAG_RERANK_REVISION", "").strip()
+        kwargs = {"trust_remote_code": False}
         if not allow_download:
             kwargs["local_files_only"] = True
+        if revision:
+            kwargs["revision"] = revision
         self.model_name = model
-        self.identity = "cross-encoder|" + model
+        self.revision = revision
+        self.identity = "cross-encoder|" + model + ("@" + revision if revision else "")
         self.model = CrossEncoder(model, **kwargs)
 
     def score(self, query, passages):
