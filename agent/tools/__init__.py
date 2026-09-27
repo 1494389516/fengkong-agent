@@ -111,7 +111,8 @@ def dispatch(name: str, arguments: Dict[str, Any], *, projection: bool = True) -
     权限纪律(P0-7):capability 检查在代码层先于一切 —— approve/admin
     通道与未知工具拒绝并写 security audit,execute 级调用留痕。"""
     from . import capability  # 惰性:capability 注册工具时依赖本模块
-    denied = capability.enforce(name, name in _REGISTRY)
+    from .. import governance
+    denied = governance.authorize(name, arguments, name in _REGISTRY)
     if denied:
         return {"error": denied}
     from . import packs as _packs
@@ -141,6 +142,7 @@ def dispatch(name: str, arguments: Dict[str, Any], *, projection: bool = True) -
                 result = _invoke()
         else:
             result = _invoke()
+        governance.record_result(name, arguments, result)
         if not projection:
             return result
         result = _cap(result)
