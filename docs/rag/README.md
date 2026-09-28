@@ -144,6 +144,6 @@ python -m eval.rag_eval
 - 小规模单机索引，最多1000文档/10000片段；BM25与向量扫描在Python内执行，不是大规模向量服务。
 - 当前reranker是确定性的领域metadata/意图重排，不是cross-encoder；尚未接入历史索引版本服务、自动审核或GraphRAG。
 - 未调用真实LLM/embedding服务验证质量；混合检索路径用明确标记的测试向量验证契约、缓存及失败处理。
-- 现有collector观测接口不包含解码后的检测信号正文。新证据工具返回业务事件与SDK来源/硬件观测，不擅自解码可能混淆的原始载荷；这会作为调查缺口提示。
+- Collector 验签并按受信任配置还原字段后，新增有界 SDK 信号投影；调查工具按租户、app 和任务时间读取并注册逐信号引用。原始 evidence 自由文本不出站，旧记录显式标记缺口。详见 [SDK 信号证据](SDK_EVIDENCE.md)。
 - 报告使用结构化 claim 合同、保守词汇筛查和可选独立 entailment evaluator；未配置或未校准 evaluator 时语义验证保持 fail-closed，不能宣称已验证。
 - 后续真实效果验收需要有复核标签的历史事件，对比无RAG、BM25和混合检索，排除未来资料与自身复盘。

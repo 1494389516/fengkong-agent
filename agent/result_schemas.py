@@ -109,7 +109,8 @@ RAG_FIELDS = frozenset(('count', 'hits', 'knowledge_id', 'chunk_id', 'title', 't
 FIELD_NAMES = FIELD_NAMES | RAG_FIELDS | frozenset(('recorded_decision', 'sdk_observations',
     'missing_evidence_refs', 'omitted_evidence_count', 'limitations', 'evidence_id',
     'report_id', 'observed_at', 'recorded_at', 'verification', 'measurement_status',
-    'source_kind', 'identity_trust', 'server_attestation', 'evidence_registry', 'ref', 'kind'))
+    'source_kind', 'identity_trust', 'server_attestation', 'evidence_registry', 'ref', 'kind',
+    'sdk_signal_evidence', 'trust'))
 TOOL_NAMES = TOOL_NAMES + ('search_risk_knowledge', 'get_event_evidence')
 RESULT_SCHEMAS['search_risk_knowledge'] = RAG_FIELDS
 RESULT_SCHEMAS['get_event_evidence'] = FIELD_NAMES
@@ -180,6 +181,9 @@ def project(tokenizer, name, value):
     if name not in RESULT_SCHEMAS:
         return {"privacy_projection": "unregistered output withheld"}
     def walk(obj, field=None, allowed=None):
+        if name == 'get_event_evidence' and field == 'sdk_signal_evidence':
+            from .sdk_signal_evidence import public_projection
+            return public_projection(tokenizer, obj)
         if field in SENSITIVE and isinstance(obj, (str, int, float)) and not isinstance(obj, bool):
             return tokenizer._token(SENSITIVE[field], str(obj))
         if isinstance(obj, dict):

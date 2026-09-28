@@ -37,6 +37,7 @@ jobs:
       - name: RAG retrieval and evidence-quality regressions
         run: |
           python -m eval.rag_eval
+          python -m eval.rag_sdk_evidence_regressions
           python -m eval.rag_quality_regressions
           python -m eval.rag_entailment_regressions
           python -m eval.rag_cross_encoder_regressions

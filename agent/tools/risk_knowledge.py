@@ -132,7 +132,12 @@ def get_event_evidence(event_id):
                 row = db.execute('SELECT observation,received_at FROM evidence WHERE evidence_id=? AND tenant=? AND app=?',
                                  (ref, ctx.tenant, ctx.app)).fetchone() if exists else None
                 if row and (not state or row[1] <= state['snapshot']['as_of']):
-                    observations.append(json.loads(row[0]))
+                    observation = json.loads(row[0])
+                    from agent.sdk_signal_evidence import legacy_projection
+                    projection = observation.setdefault('sdk_signal_evidence', legacy_projection())
+                    for signal in projection.get('signals', []):
+                        signal['ref'] = 'sdk:' + ref + ':signal:' + str(signal['signal_index'])
+                    observations.append(observation)
                 else:
                     missing.append(ref)
     else:
@@ -142,7 +147,7 @@ def get_event_evidence(event_id):
                 ('action', 'reason', 'reasons', 'strategy_version', 'model_version', 'evaluated_at', 'degraded') if k in record},
             'sdk_observations': observations, 'missing_evidence_refs': missing,
             'omitted_evidence_count': max(0, len(refs) - 10),
-            'limitations': ['SDK observations describe provenance and hardware; raw detection payload is not decoded by this tool.',
+            'limitations': ['SDK signals are bounded client-reported measurements, not server-verified detections. Missing, empty, partial or unavailable signals never establish a clean device. Raw evidence text is withheld.',
                             'Recorded decisions and client measurements are not confirmed fraud labels.']}
     if state:
         from agent.rag.workflow import record_event_evidence
