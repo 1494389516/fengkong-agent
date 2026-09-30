@@ -46,4 +46,6 @@ jobs:
           python -m eval.rag_poisoning_regressions
           python -m eval.adaptive_router_regressions
           python -m eval.investigation_memory_regressions
+          python -m eval.rag_ablation_regressions
+          python -m eval.rag_scorecard_regressions
           python -m eval.rag_scorecard --gate --output out/rag_scorecard.json

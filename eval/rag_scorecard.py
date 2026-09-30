@@ -112,23 +112,62 @@ def investigation_metrics(records):
         citation = row.get("knowledge_citation_audit") or {}
         retrieval = row.get("retrieval_audit") or {}
         support = row.get("claim_support_audit") or {}
+        entailment = row.get("claim_entailment_audit") or {}
         report_valid.append(isinstance(report, dict))
-        citation_valid.append(citation.get("status") not in ("invalid_references",))
-        claims = claim_audit.get("claims") or []
+        citation_valid.append({
+            "references_present": True, "invalid_references": False,
+        }.get(citation.get("status")))
+        claims = claim_audit.get("claims")
+        complete_grounding = (isinstance(claims, list) and bool(claims)
+                              and all(isinstance(c, dict)
+                                      and type(c.get("structurally_supported")) is bool
+                                      for c in claims))
         structural_grounding.append(
-            _mean([bool(c.get("structurally_supported")) for c in claims])
-            if claims else None)
-        counter_complete.append(retrieval.get("outcome") not in
-                                ("counterevidence_incomplete", "retrieval_incomplete"))
-        support_claims = support.get("claims") or []
-        lexical_bridge.append(
-            _mean([c.get("status") != "no_lexical_bridge" for c in support_claims
-                   if c.get("knowledge_ids")])
-            if any(c.get("knowledge_ids") for c in support_claims) else None)
-        semantic_verified.append(bool(support.get("semantic_entailment_verified", False)))
-        count = claim_audit.get("claim_count", 0)
+            _mean([c["structurally_supported"] for c in claims])
+            if complete_grounding else None)
+        counter_outcome = retrieval.get("outcome")
+        counter_status = {
+            "balanced": True,
+            "counterevidence_not_checked": False,
+            "counterevidence_incomplete": False,
+            "retrieval_incomplete": False,
+        }.get(counter_outcome)
+        if counter_outcome in ("knowledge_gap", "exhausted_no_match"):
+            performed = retrieval.get("counterevidence_search_performed")
+            counter_status = performed if type(performed) is bool else None
+        counter_complete.append(counter_status)
+        support_claims = support.get("claims")
+        bridge_checks = []
+        complete_bridge = isinstance(support_claims, list)
+        for claim in support_claims if complete_bridge else []:
+            if (not isinstance(claim, dict)
+                    or not isinstance(claim.get("knowledge_ids"), list)
+                    or any(not isinstance(ident, str) or not ident
+                           for ident in claim["knowledge_ids"])):
+                complete_bridge = False
+                break
+            if not claim["knowledge_ids"]:
+                continue
+            checked = {
+                "no_lexical_bridge": False, "semantic_review_required": True,
+            }.get(claim.get("status"))
+            if checked is None:
+                complete_bridge = False
+                break
+            bridge_checks.append(checked)
+        lexical_bridge.append(_mean(bridge_checks) if complete_bridge else None)
+        verified = entailment.get("semantic_entailment_verified")
+        semantic_verified.append(verified if type(verified) is bool else None)
+        count = claim_audit.get("claim_count")
+        unsupported = claim_audit.get("unsupported_claim_indexes")
         unsupported_rates.append(
-            len(claim_audit.get("unsupported_claim_indexes", [])) / count if count else 0.0)
+            len(unsupported) / count
+            if (type(count) is int and count > 0 and isinstance(unsupported, list)
+                and all(type(index) is int and 0 <= index < count for index in unsupported)
+                and len(set(unsupported)) == len(unsupported)
+                and claim_audit.get("status") in
+                ("structurally_grounded", "unsupported_claims", "workflow_incomplete"))
+            else None)
 
         gold = row.get("gold_evidence_refs")
         if isinstance(gold, list) and gold:
@@ -157,11 +196,16 @@ def investigation_metrics(records):
     return {
         "record_count": len(records),
         "report_parse_rate": _mean(report_valid),
-        "citation_reference_validity_rate": _mean(citation_valid),
+        "citation_reference_validity_rate": _mean(present(citation_valid)),
+        "citation_reference_validity_record_count": len(present(citation_valid)),
         "structurally_grounded_claim_rate": _mean(present(structural_grounding)),
-        "counterevidence_workflow_complete_rate": _mean(counter_complete),
+        "structurally_grounded_record_count": len(present(structural_grounding)),
+        "counterevidence_workflow_complete_rate": _mean(present(counter_complete)),
+        "counterevidence_workflow_record_count": len(present(counter_complete)),
         "knowledge_lexical_bridge_rate": _mean(present(lexical_bridge)),
-        "unsupported_claim_rate": _mean(unsupported_rates),
+        "knowledge_lexical_bridge_record_count": len(present(lexical_bridge)),
+        "unsupported_claim_rate": _mean(present(unsupported_rates)),
+        "unsupported_claim_record_count": len(present(unsupported_rates)),
         "gold_context_recall": _mean(gold_context_recall),
         "gold_context_recall_record_count": len(gold_context_recall),
         "answer_relevance_lexical_proxy": _mean(answer_relevance_proxy),
@@ -169,9 +213,21 @@ def investigation_metrics(records):
         "answer_relevance_note": (
             "Lexical query-to-claim coverage only; this is not a semantic relevance judge."
         ),
-        "semantic_entailment_verified_rate": _mean(semantic_verified),
+        "semantic_entailment_verified_rate": _mean(present(semantic_verified)),
+        "semantic_entailment_record_count": len(present(semantic_verified)),
         "semantic_entailment_note": (
-            "Expected to remain 0 until an independently evaluated entailment/contradiction model is added."
+            "Read from claim_entailment_audit, not the lexical support screen; "
+            "verification requires an independently calibrated evaluator."
+        ),
+        "audit_coverage_note": (
+            "Missing, partial, malformed or unrecognized audit results are unknown and excluded from rates; "
+            "record counts show each denominator. No citations and unused retrieval are "
+            "not applicable, not successful checks."
+        ),
+        "claim_rate_aggregation_note": (
+            "Structural grounding, lexical bridge and unsupported-claim rates are macro "
+            "averages of per-record claim fractions. Each audited record has equal weight; "
+            "these are not pooled claim-level rates."
         ),
     }
 
