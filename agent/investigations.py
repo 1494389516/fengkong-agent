@@ -22,9 +22,24 @@ def _db(*, readonly=False):
       CREATE TABLE IF NOT EXISTS investigation_seen(decision_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS cases(case_id TEXT PRIMARY KEY, tenant TEXT, app TEXT,
           entity TEXT, bucket INTEGER, body TEXT, UNIQUE(tenant,app,entity,bucket));
-      CREATE TABLE IF NOT EXISTS investigation_tasks(task_id TEXT PRIMARY KEY,case_id TEXT UNIQUE,
+      CREATE TABLE IF NOT EXISTS investigation_tasks(task_id TEXT PRIMARY KEY,case_id TEXT,
           snapshot TEXT, status TEXT, result TEXT, lease_until REAL DEFAULT 0, lease_token TEXT);
     ''')
+    # Rebuild the old UNIQUE(case_id) table once, preserving every old task.
+    sql = db.execute("SELECT sql FROM sqlite_master WHERE name='investigation_tasks'").fetchone()[0]
+    if 'case_id TEXT UNIQUE' in sql:
+        db.executescript("""
+          BEGIN IMMEDIATE;
+          ALTER TABLE investigation_tasks RENAME TO investigation_tasks_v1;
+          CREATE TABLE investigation_tasks(task_id TEXT PRIMARY KEY,case_id TEXT,
+            snapshot TEXT,status TEXT,result TEXT,lease_until REAL DEFAULT 0,lease_token TEXT);
+          INSERT INTO investigation_tasks SELECT * FROM investigation_tasks_v1;
+          DROP TABLE investigation_tasks_v1;
+          COMMIT;
+        """)
+    db.execute("""CREATE TABLE IF NOT EXISTS case_revisions(
+      case_id TEXT, revision INTEGER, snapshot_id TEXT UNIQUE, body TEXT NOT NULL,
+      PRIMARY KEY(case_id,revision))""")
     return db
 
 
@@ -55,27 +70,36 @@ def consume_decision_outbox(limit=100):
                 bucket=int(record['evaluated_at']//86400)
                 key=(record['tenant_id'],record['app_id'],entity,bucket)
                 old=db.execute('SELECT case_id,body FROM cases WHERE tenant=? AND app=? AND entity=? AND bucket=?',key).fetchone()
+                case = json.loads(old[1]) if old else {
+                    'case_id':uuid.uuid4().hex, 'tenant_id':key[0], 'app_id':key[1],
+                    'entity_ref':entity, 'decision_ids':[], 'evidence_refs':[], 'current_revision':0}
+                # Legacy cases retain their original snapshot as revision one.
+                if old and 'current_revision' not in case:
+                    previous = db.execute('SELECT snapshot FROM investigation_tasks WHERE case_id=? ORDER BY rowid LIMIT 1', (old[0],)).fetchone()
+                    if previous:
+                        legacy = json.loads(previous[0])
+                        db.execute('INSERT OR IGNORE INTO case_revisions VALUES(?,?,?,?)',
+                                   (old[0],1,legacy['snapshot_id'],previous[0]))
+                    case['current_revision'] = 1
+                revision = case['current_revision'] + 1
+                case.update(task_id=uuid.uuid4().hex, as_of=record['evaluated_at'], current_revision=revision)
+                case['decision_ids']=sorted(set(case['decision_ids']+[decision_id]))
+                case['evidence_refs']=sorted(set(case['evidence_refs']+event.get('evidence_refs',[])))
+                snapshot={**case,'revision':revision,'previous_revision':revision-1 or None,
+                          'change_reason':'new_decision','decision':record,
+                          'budget':{'max_tool_calls':12,'max_tokens':12000,'max_graph_nodes':100,'max_knowledge_searches':3},
+                          'allowed_tools':['account_profile','feature_stats','graph_relations','rule_eval',
+                                           'search_risk_knowledge','get_event_evidence']}
+                from .evidence_snapshot import build
+                snapshot=build(snapshot)
                 if old:
-                    case=json.loads(old[1]);case['decision_ids']=sorted(set(case['decision_ids']+[decision_id]))
-                    case['evidence_refs']=sorted(set(case['evidence_refs']+event.get('evidence_refs',[])))
-                    db.execute('UPDATE cases SET body=? WHERE case_id=?',(json.dumps(case),old[0]))
+                    db.execute('UPDATE cases SET body=? WHERE case_id=?',(json.dumps(case),case['case_id']))
                 else:
-                    case_id=uuid.uuid4().hex;task_id=uuid.uuid4().hex
-                    case={'case_id':case_id,'task_id':task_id,'tenant_id':key[0],'app_id':key[1],
-                          'entity_ref':entity,'decision_ids':[decision_id],
-                          'evidence_refs':event.get('evidence_refs',[]),'as_of':record['evaluated_at']}
-                    snapshot={**case,'decision':record,'budget':{'max_tool_calls':12,'max_tokens':12000,
-                              'max_graph_nodes':100,'max_knowledge_searches':3},
-                              'allowed_tools':['account_profile','feature_stats','graph_relations','rule_eval',
-                                               'search_risk_knowledge','get_event_evidence']}
-                    from .tools.datasource import load_events
-                    snapshot['events'] = load_events(as_of_ts=case['as_of'])
-                    from .rag.store import index_metadata
-                    snapshot['knowledge_index_digest'] = index_metadata().get('index_digest', '')
-                    snapshot['snapshot_id']=hashlib.sha256(json.dumps(snapshot,sort_keys=True).encode()).hexdigest()
-                    db.execute('INSERT INTO cases VALUES(?,?,?,?,?,?)',(case_id,*key,json.dumps(case)))
-                    db.execute('INSERT INTO investigation_tasks(task_id,case_id,snapshot,status) VALUES(?,?,?,?)',
-                               (task_id,case_id,json.dumps(snapshot),'queued'))
+                    db.execute('INSERT INTO cases VALUES(?,?,?,?,?,?)',(case['case_id'],*key,json.dumps(case)))
+                db.execute('INSERT INTO case_revisions VALUES(?,?,?,?)',
+                           (case['case_id'],revision,snapshot['snapshot_id'],json.dumps(snapshot)))
+                db.execute('INSERT INTO investigation_tasks(task_id,case_id,snapshot,status) VALUES(?,?,?,?)',
+                           (case['task_id'],case['case_id'],json.dumps(snapshot),'queued'))
             db.execute('INSERT INTO investigation_seen VALUES(?)',(decision_id,))
         if rows:
             db.execute('UPDATE projection_cursor SET position=? WHERE id=1', (rows[-1][0],))

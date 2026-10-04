@@ -107,6 +107,15 @@ def get_event_evidence(event_id):
     ctx = current_context()
     path = data_dir() / 'online.sqlite3'
     if state:
+        frozen = state['snapshot'].get('event_evidence')
+        if frozen is not None:
+            import copy
+            if frozen['event_id'] != event_id:
+                raise PermissionError('event outside investigation snapshot')
+            result = copy.deepcopy(frozen)
+            from agent.rag.workflow import record_event_evidence
+            result['evidence_registry'] = record_event_evidence(state, result)
+            return result
         record = state['snapshot']['decision']
         expected = record.get('business_event_id') or record['event'].get('event_id')
         if event_id != expected:

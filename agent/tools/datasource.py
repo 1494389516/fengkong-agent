@@ -148,6 +148,16 @@ def output_dir():
 
 
 def _load_json(path: Path):
+    import copy
+    import sys
+    capability = sys.modules.get("agent.tools.capability")
+    task = capability.investigation_state() if capability and hasattr(capability, "investigation_state") else None
+    if task and 'dependency_files' in task['snapshot'] and path.parent == data_dir():
+        files = task['snapshot']['dependency_files']
+        if path.name in files:
+            if files[path.name] is None:
+                raise FileNotFoundError(path)
+            return copy.deepcopy(files[path.name])
     with _cache_lock:
         try:
             mtime = path.stat().st_mtime_ns
