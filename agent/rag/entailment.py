@@ -79,16 +79,19 @@ class OpenAICompatibleEntailmentEvaluator:
             "label, confidence in [0,1], and a short rationale."
         )
         payload = "CLAIM:\n" + claim[:4000] + "\n\nPREMISE:\n" + premise
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": payload}],
-            temperature=0,
-            max_tokens=220,
-            response_format={"type": "json_object"},
-        )
-        content = response.choices[0].message.content or "{}"
+        request = dict(model=self.model,
+            messages=[{"role":"system","content":system},{"role":"user","content":payload}],
+            temperature=0,max_tokens=220,response_format={"type":"json_object"})
+        def invoke():
+            response = self.client.chat.completions.create(**request)
+            from agent.core import _extract_usage
+            usage = _extract_usage(response)
+            actual = usage['prompt'] + usage['completion'] if usage['prompt'] > 0 else None
+            return response.choices[0].message.content or "{}", actual
+        from agent.run_ledger import metered_call
+        content = metered_call('verifier', request, len(json.dumps(request).encode())+1024, invoke)
         return _validate_result(json.loads(content))
+
 
 
 def configured_evaluator():
