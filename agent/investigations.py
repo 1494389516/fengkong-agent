@@ -214,7 +214,17 @@ def run_task(task_id, context, *, agent_factory=None):
                       json.dumps(memory_context, ensure_ascii=False) +
                       '. Follow the bounded corrective retrieval workflow and return the exact JSON report. '
                       'Unavailable tools or budget errors are evidence limitations, not benign verdicts.')
+            from .investigation_plan import template, execute as execute_plan
+            from .tools.capability import request_scope
+            from .tools.packs import request_pack
+            from .governance import bind_trajectory, trajectory_snapshot
+            plan = template(snapshot, granted)
             with investigation_constraints(snapshot) as execution, event_snapshot(snapshot['events'], snapshot['snapshot_id']):
+                with request_scope(scope), request_pack('analyst'), bind_trajectory(agent._trajectory):
+                    plan_result = execute_plan(plan, snapshot, granted, ledger, execution)
+                    agent._trajectory = trajectory_snapshot()
+                # Plan results remain locally inspectable. The model retrieves the
+                # exact evidence it needs through the same constrained tools.
                 summary = agent.ask(prompt, scope=scope)
             from .rag.reporting import citation_audit, claim_evidence_audit
             from .rag.workflow import retrieval_audit
@@ -250,6 +260,9 @@ def run_task(task_id, context, *, agent_factory=None):
             from .claims import audit_event_claims, eligibility
             result['event_claim_audit'] = audit_event_claims(report, snapshot)
             result.update(eligibility(report, result['event_claim_audit'], entailment_result))
+            result['plan'] = plan
+            result['plan_result'] = plan_result
+            result['investigator_principal'] = context.principal
             result['case_id'] = snapshot['case_id']
             result['revision'] = snapshot.get('revision', 1)
             result['budget_ledger'] = ledger.usage()

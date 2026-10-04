@@ -27,9 +27,9 @@ def begin_search(state, arguments):
         raise ValueError('invalid knowledge search attempt reason')
     query = arguments.get('query')
     normalized = re.sub(r'\s+', ' ', query.strip()).casefold() if isinstance(query, str) else ''
-    signature = (normalized, arguments.get('platform', ''),
-                 tuple(sorted(arguments.get('detector_ids') or [])),
-                 arguments.get('sdk_version', ''))
+    signature = [normalized, arguments.get('platform', ''),
+                 sorted(arguments.get('detector_ids') or []),
+                 arguments.get('sdk_version', '')]
     history = state.setdefault('retrieval_trace', [])
     used = sum(row.get('status') != 'rejected_duplicate' for row in history)
     if any(row.get('signature') == signature for row in history):
