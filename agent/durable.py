@@ -14,7 +14,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .tools.datasource import data_dir, state_write_lock
+from .tools.datasource import agent_state_dir, file_lock
 
 SCHEMA_VERSION = 1
 
@@ -36,7 +36,7 @@ class InvestigationCheckpoint:
 
 class CheckpointStore:
     def __init__(self, root: Optional[Path] = None):
-        self.root = Path(root or (data_dir() / "agent_checkpoints"))
+        self.root = Path(root or (agent_state_dir() / "agent_checkpoints"))
 
     def _path(self, run_id: str) -> Path:
         if not run_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in run_id):
@@ -49,7 +49,7 @@ class CheckpointStore:
         checkpoint.updated_at = time.time()
         path = self._path(checkpoint.run_id)
         payload = json.dumps(asdict(checkpoint), ensure_ascii=False, sort_keys=True, default=str)
-        with state_write_lock():
+        with file_lock(path):
             path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
             try:

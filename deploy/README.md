@@ -17,7 +17,7 @@ The investigator profile deliberately grants `read` on production data. Mutable 
 From the repository root:
 
 ```sh
-mkdir -p deploy/config deploy/secrets deploy/state/tenant deploy/state/collector-out deploy/state/runtime-out deploy/state/agent-out deploy/state/journal deploy/state/bundles
+mkdir -p deploy/config deploy/secrets deploy/state/tenant deploy/state/collector-out deploy/state/runtime-out deploy/state/agent-out deploy/state/agent-state deploy/state/agent-audit deploy/state/journal deploy/state/bundles
 ```
 
 Populate existing tenant data under `deploy/state/tenant`. Set ownership of writable state directories to UID/GID 10001. The runtime and Agent registries must be distinct files. `registry.example.json` and `credentials.example.json` intentionally contain invalid placeholders and already-expired expiry values; they cannot authorize anything. Provision random short-lived tokens via your identity/secrets service; store only SHA256(token) as registry keys. Do not put token values in git or command arguments.
@@ -85,3 +85,16 @@ With an authorized SDK bearer token, POST JSON to Collector port 8081:
 4. The authenticated business producer posts business events to runtime `/decisions` on port 8080 with report references. Its token never authorizes Collector operations.
 
 A valid MAC or App Attest key is evidence of the verified signing/attestation properties; neither establishes that a human performed the action. Real Apple-issued attestation, physical-device behavior, and end-to-end device delivery must still pass your device acceptance run. Local tests use generated cryptographic fixtures and do not claim real-device validation.
+
+## Agent storage and capacity contract
+
+Provision `FK_AGENT_STATE_ROOT=/agent-state` and `FK_AGENT_AUDIT_ROOT=/agent-audit`
+outside the evidence and signed release trees. Both are partitioned by the
+canonical registered dataset hash. Agent checkpoints and output use state;
+governance auditing and its chain lock use audit. Business mutation locks stay
+in the business store; this does not grant production write capability.
+
+Copy `compute-capacity.example.json` to `config/compute-capacity.json` and replace
+its illustrative values with the operator's capacity envelope. The controller
+mounts it read-only and validates it before reading requests. This configuration
+is an admission target, not measured performance evidence.

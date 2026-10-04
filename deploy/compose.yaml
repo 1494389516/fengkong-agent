@@ -62,6 +62,8 @@ services:
     environment:
       FK_ENV: production
       FK_AUTH_CONFIG: /config/agent-auth.json
+      FK_AGENT_STATE_ROOT: /agent-state
+      FK_AGENT_AUDIT_ROOT: /agent-audit
       FK_AGENT_TOKEN: ${FK_AGENT_TOKEN:-}
       FK_RUNTIME_BUNDLE_DIR: /release
       FK_RUNTIME_PUBLIC_KEY: /config/publisher.pub
@@ -69,19 +71,21 @@ services:
     volumes:
       - ./state/tenant:/tenant:ro
       - ./state/agent-out:/app/out
-      - ./state/agent-out:/tenant/out
+      - ./state/agent-state:/agent-state
+      - ./state/agent-audit:/agent-audit
       - ./config/agent-auth.json:/config/agent-auth.json:ro
       - ./config/publisher.pub:/config/publisher.pub:ro
       - ./state/bundles:/release:ro
   controller:
     <<: *common
     profiles: [release]
-    command: [python, -m, agent.control_plane, --store, /journal/releases.json, --credentials, /config/release-auth.json, --scope, "tenant:a/app:app"]
+    command: [python, -m, agent.control_plane, --store, /journal/releases.json, --credentials, /config/release-auth.json, --scope, "tenant:a/app:app", --compute-capacity, /config/compute-capacity.json]
     stdin_open: true
     network_mode: none
     volumes:
       - ./state/journal:/journal
       - ./config/release-auth.json:/config/release-auth.json:ro
+      - ./config/compute-capacity.json:/config/compute-capacity.json:ro
   publisher:
     <<: *common
     profiles: [release]

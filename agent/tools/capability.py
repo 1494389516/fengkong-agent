@@ -271,7 +271,8 @@ def validate_registry(registry: Dict[str, Any]) -> None:
 def audit(kind: str, tool_name: str, level: str, reason: str) -> None:
     """security audit 追加一行(尽力而为:审计失败不能掀翻主流程)。"""
     try:
-        p = data_dir() / "security_audit.jsonl"
+        from .datasource import agent_audit_dir
+        p = agent_audit_dir() / "security_audit.jsonl"
         p.parent.mkdir(parents=True, exist_ok=True)
         rec = {
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -356,7 +357,8 @@ def user_requests_execute(text: str, tool_name: str) -> bool:
 
 
 def _audit_records() -> list:
-    p = data_dir() / "security_audit.jsonl"
+    from .datasource import agent_audit_dir
+    p = agent_audit_dir() / "security_audit.jsonl"
     if not p.exists():
         return []
     out = []

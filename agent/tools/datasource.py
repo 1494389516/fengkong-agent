@@ -105,7 +105,41 @@ def data_dir() -> Path:
     return path
 
 
+def _agent_root(variable: str) -> Path:
+    """Operator-owned root, partitioned by authenticated evidence domain.
+
+    Default keeps local development data compatible. Production deployments
+    must set distinct roots outside the authoritative evidence/release volumes.
+    """
+    import hashlib
+    base = data_dir()
+    override = os.environ.get(variable)
+    if not override:
+        if os.environ.get("FK_ENV") == "production":
+            raise ValueError(variable + " must be provisioned in production")
+        return base
+    root = Path(override).resolve()
+    if root == base or base in root.parents or root in base.parents:
+        raise ValueError(variable + " overlaps the evidence store")
+    release = os.environ.get("FK_RUNTIME_BUNDLE_DIR")
+    if release:
+        protected = Path(release).resolve()
+        if root == protected or protected in root.parents or root in protected.parents:
+            raise ValueError(variable + " overlaps the release store")
+    return root / hashlib.sha256(str(base).encode()).hexdigest()
+
+
+def agent_state_dir() -> Path:
+    return _agent_root("FK_AGENT_STATE_ROOT")
+
+
+def agent_audit_dir() -> Path:
+    return _agent_root("FK_AGENT_AUDIT_ROOT")
+
+
 def output_dir():
+    if os.environ.get("FK_AGENT_STATE_ROOT"):
+        return agent_state_dir() / "out"
     from agent.tenancy import current_context
     import sys
     capability = sys.modules.get("agent.tools.capability")

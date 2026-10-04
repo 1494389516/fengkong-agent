@@ -1,0 +1,7 @@
+{
+  "target_qps": 1,
+  "cpu_cores": 1,
+  "max_utilization": 0.5,
+  "max_rss_bytes": 536870912,
+  "max_p99_ms": 50
+}

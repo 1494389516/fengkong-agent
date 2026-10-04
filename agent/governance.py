@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from .tools import capability
-from .tools.datasource import append_jsonl, data_dir, state_write_lock
+from .tools.datasource import append_jsonl, agent_audit_dir, file_lock
 
 POLICY_VERSION = "agent-governance-v1"
 UNTRUSTED = frozenset({"external", "user_provided", "llm_derived"})
@@ -107,9 +107,9 @@ def _append_audit(envelope: ActionEnvelope, decision: PolicyDecision, phase: str
     The chain detects mutation/removal inside the retained log. Detecting tail
     truncation requires anchoring the last hash in an external/WORM system.
     """
-    path = data_dir() / "governance_audit.jsonl"
+    path = agent_audit_dir() / "governance_audit.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    with state_write_lock():
+    with file_lock(path.parent / ".governance_chain"):
         previous = ""
         if path.exists():
             # Audit is correctness-critical but should not become O(n) per tool
@@ -181,7 +181,7 @@ def record_result(tool_name: str, arguments: Dict[str, Any], result: Any) -> Non
 
 
 def verify_audit_chain(path=None) -> Dict[str, Any]:
-    path = path or (data_dir() / "governance_audit.jsonl")
+    path = path or (agent_audit_dir() / "governance_audit.jsonl")
     if not path.exists():
         return {"ok": True, "records": 0, "error_index": None}
     previous = ""
