@@ -16,9 +16,8 @@ class CommunityV1:
     name="community_v1"
     version="1"
 
-    def compute(self,rows,target_device,target_generation,*,truncated=False,as_of=None):
+    def prepare(self,rows,*,truncated=False):
         g=nx.Graph()
-        target=("device",target_device,target_generation)
         for _,uid,device,generation,ip,observed_at,recorded_at in rows:
             d=("device",device,generation)
             if len(g)>=MAX_NODES and d not in g: truncated=True;continue
@@ -27,6 +26,16 @@ class CommunityV1:
                 u=("uid",uid)
                 if len(g)>=MAX_NODES and u not in g: truncated=True;continue
                 g.add_edge(u,d,kind="device_account")
+        return g,truncated
+
+    def compute_many(self,rows,targets,*,truncated=False,as_of=None):
+        prepared=self.prepare(rows,truncated=truncated)
+        return {target:self.compute(rows,*target,truncated=truncated,as_of=as_of,_prepared=prepared)
+                for target in targets}
+
+    def compute(self,rows,target_device,target_generation,*,truncated=False,as_of=None,_prepared=None):
+        g,truncated = _prepared if _prepared is not None else self.prepare(rows,truncated=truncated)
+        target=("device",target_device,target_generation)
         if target not in g:
             return self._empty(target_device,target_generation,truncated)
         component=g.subgraph(nx.node_connected_component(g,target)).copy()
@@ -84,6 +93,10 @@ class TemporalCommunityV1(CommunityV1):
 
     def __init__(self,half_life_seconds=7*86400):
         self.half_life_seconds=max(3600,float(half_life_seconds))
+
+    def compute_many(self,rows,targets,*,truncated=False,as_of=None):
+        # Temporal weighting remains per-target until its own equivalence gate.
+        return {target:self.compute(rows,*target,truncated=truncated,as_of=as_of) for target in targets}
 
     def compute(self,rows,target_device,target_generation,*,truncated=False,as_of=None):
         if not rows:

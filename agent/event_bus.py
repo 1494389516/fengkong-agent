@@ -243,5 +243,111 @@ class LocalEventBus:
             db.close()
 
 
-def event_bus():
-    return LocalEventBus()
+
+class ConsumerGroupBus(LocalEventBus):
+    """Independent group receipts over immutable source events.
+
+    The unqualified bus retains its legacy single-consumer cursor for graph
+    deployments. Explicit groups replay the retained source from the beginning.
+    Group names are operator configuration, never an input tool argument.
+    """
+    def __init__(self, group):
+        import re
+        if not isinstance(group,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,64}',group):
+            raise ValueError('invalid consumer group')
+        self.group=group
+
+    def _ensure(self,db):
+        super()._ensure(db)
+        db.execute('''CREATE TABLE IF NOT EXISTS integration_receipts(
+          consumer_group TEXT,event_id TEXT,published INTEGER DEFAULT 0,
+          attempts INTEGER DEFAULT 0,lease_token TEXT,lease_until REAL,last_error TEXT,
+          PRIMARY KEY(consumer_group,event_id))''')
+
+    def _receipts(self,db,topic):
+        self._ensure(db)
+        db.execute('INSERT OR IGNORE INTO integration_receipts(consumer_group,event_id) '
+                   'SELECT ?,event_id FROM integration_events WHERE topic=?',(self.group,topic))
+
+    def claim(self,topic,*,limit=100,lease_seconds=30,max_attempts=5,now=None):
+        import math
+        self._validate_limit(limit)
+        if not isinstance(topic,str) or not topic:raise ValueError('topic required')
+        if type(lease_seconds) not in (int,float) or not math.isfinite(lease_seconds) or lease_seconds<=0:raise ValueError('invalid lease')
+        if type(max_attempts) is not int or max_attempts<1:raise ValueError('invalid max attempts')
+        anchor=time.time() if now is None else float(now)
+        if not math.isfinite(anchor):raise ValueError('invalid anchor')
+        db=connect()
+        try:
+            self._ensure(db);db.commit();db.execute('BEGIN IMMEDIATE')
+            self._receipts(db,topic)
+            db.execute("UPDATE integration_receipts SET published=-1,last_error=COALESCE(last_error,'max_attempts_exhausted') "
+                'WHERE consumer_group=? AND published=0 AND attempts>=? AND (lease_until IS NULL OR lease_until<=?)',
+                (self.group,max_attempts,anchor))
+            rows=db.execute('SELECT e.event_id,e.topic,e.event_key,e.payload,e.created_at,r.attempts '
+                'FROM integration_events e JOIN integration_receipts r ON r.event_id=e.event_id '
+                'WHERE r.consumer_group=? AND e.topic=? AND r.published=0 AND r.attempts<? '
+                'AND (r.lease_until IS NULL OR r.lease_until<=?) ORDER BY e.created_at,e.event_id LIMIT ?',
+                (self.group,topic,max_attempts,anchor,limit)).fetchall()
+            result=[]
+            for row in rows:
+                token=uuid.uuid4().hex
+                db.execute('UPDATE integration_receipts SET attempts=attempts+1,lease_token=?,lease_until=?,last_error=NULL '
+                           'WHERE consumer_group=? AND event_id=?',(token,anchor+lease_seconds,self.group,row[0]))
+                result.append(ClaimedEvent(row[0],row[1],row[2],json.loads(row[3]),row[4],token,row[5]+1))
+            db.commit();return result
+        except BaseException:
+            db.rollback();raise
+        finally:db.close()
+
+    def acknowledge(self,event_id,lease_token):
+        return self._complete(event_id,lease_token,None,5)
+
+    def fail(self,event_id,lease_token,error,*,max_attempts=5):
+        return self._complete(event_id,lease_token,str(error)[:1000],max_attempts)
+
+    def _complete(self,event_id,token,error,max_attempts):
+        if not token:raise ValueError('lease token required')
+        db=connect()
+        try:
+            self._ensure(db)
+            changed=db.execute('UPDATE integration_receipts SET published=CASE WHEN ? IS NULL THEN 1 '
+                'WHEN attempts>=? THEN -1 ELSE 0 END,lease_token=NULL,lease_until=NULL,last_error=? '
+                'WHERE consumer_group=? AND event_id=? AND lease_token=? AND lease_until>? AND published=0',
+                (error,max_attempts,error,self.group,event_id,token,time.time())).rowcount
+            db.commit();return changed==1
+        finally:db.close()
+
+    def _view(self,topic=None):
+        db=connect()
+        try:
+            self._ensure(db)
+            query=('SELECT e.event_id,e.topic,e.event_key,e.payload,e.created_at,COALESCE(r.published,0),'
+                   'COALESCE(r.attempts,0),r.lease_until,r.last_error FROM integration_events e '
+                   'LEFT JOIN integration_receipts r ON r.event_id=e.event_id AND r.consumer_group=?')
+            args=[self.group]
+            if topic is not None:query+=' WHERE e.topic=?';args.append(topic)
+            return db.execute(query+' ORDER BY e.created_at,e.event_id',args).fetchall()
+        finally:db.close()
+
+    def pending(self,*,limit=100,topic=None):
+        self._validate_limit(limit)
+        return [Event(r[0],r[1],r[2],json.loads(r[3]),r[4]) for r in self._view(topic) if r[5]==0][:limit]
+
+    def dead_letters(self,*,limit=100,topic=None):
+        self._validate_limit(limit)
+        return [{'event':Event(r[0],r[1],r[2],json.loads(r[3]),r[4]),'attempts':r[6],'last_error':r[8]}
+                for r in self._view(topic) if r[5]==-1][:limit]
+
+    def stats(self,*,topic=None,now=None):
+        anchor=time.time() if now is None else now
+        rows=self._view(topic);pending=[r for r in rows if r[5]==0]
+        leased=sum((r[7] or 0)>anchor for r in pending)
+        return {'consumer_group':self.group,'topic':topic,'pending':len(pending),'leased':leased,
+                'ready':len(pending)-leased,'dead_letters':sum(r[5]==-1 for r in rows),
+                'oldest_pending_age_seconds':max(0,anchor-min((r[4] for r in pending),default=anchor)),
+                'max_attempts':max((r[6] for r in pending),default=0)}
+
+
+def event_bus(consumer_group=None):
+    return LocalEventBus() if consumer_group is None else ConsumerGroupBus(consumer_group)

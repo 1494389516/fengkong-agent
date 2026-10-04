@@ -55,14 +55,17 @@ def recompute_device(tenant,app,device_id,generation,*,as_of=None):
         return _recompute_device(tenant,app,device_id,generation,as_of=as_of)
 
 
-def _recompute_device(tenant,app,device_id,generation,*,as_of=None):
-    latest=graph_store().latest_recorded_at(tenant,app)
-    anchor=max((latest if latest is not None else time.time()),
-               (as_of if as_of is not None else float("-inf")))
-    rows,truncated=graph_store().scope_rows(tenant,app,anchor,limit=MAX_ROWS)
+def _recompute_device(tenant,app,device_id,generation,*,as_of=None,_snapshot=None,_computed=None):
+    if _snapshot is None:
+        latest=graph_store().latest_recorded_at(tenant,app)
+        anchor=max((latest if latest is not None else time.time()),
+                   (as_of if as_of is not None else float("-inf")))
+        rows,truncated=graph_store().scope_rows(tenant,app,anchor,limit=MAX_ROWS)
+    else:
+        anchor,rows,truncated=_snapshot
     primary_name=os.environ.get("FK_GRAPH_ALGORITHM","community_v1")
     algorithm=graph_algorithm(primary_name)
-    result=algorithm.compute(rows,device_id,generation,truncated=truncated,as_of=anchor)
+    result=dict(_computed) if _computed is not None else algorithm.compute(rows,device_id,generation,truncated=truncated,as_of=anchor)
     result.update(device_id=device_id,entity_generation=generation,as_of=anchor)
     store=online_feature_store()
     store.put(tenant,app,"device",device_id,generation,FEATURE_SET,
@@ -89,16 +92,29 @@ def refresh_dirty_devices(*,limit=100):
     refreshed=0;failed=[]
     with file_lock(data_dir()/".graph_projection"):
         store=graph_store()
+        groups={}
         for tenant,app,device,generation in store.dirty_devices(limit):
+            groups.setdefault((tenant,app),[]).append((device,generation))
+        for (tenant,app),targets in groups.items():
             try:
-                _recompute_device(tenant,app,device,generation)
-                store.clear_dirty(tenant,app,device,generation)
-                refreshed+=1
+                latest=store.latest_recorded_at(tenant,app)
+                anchor=latest if latest is not None else time.time()
+                rows,truncated=store.scope_rows(tenant,app,anchor,limit=MAX_ROWS)
+                algorithm=graph_algorithm(os.environ.get("FK_GRAPH_ALGORITHM","community_v1"))
+                results=algorithm.compute_many(rows,targets,truncated=truncated,as_of=anchor)
             except Exception as exc:
-                online_feature_store().invalidate_devices(
-                    tenant,app,[(device,generation)])
-                failed.append({"device_id":device,"error":type(exc).__name__,
-                               "phase":"graph_refresh"})
+                online_feature_store().invalidate_devices(tenant,app,targets)
+                failed.extend({'device_id':device,'error':type(exc).__name__,'phase':'graph_refresh'} for device,_ in targets)
+                continue
+            for device,generation in targets:
+                try:
+                    _recompute_device(tenant,app,device,generation,_snapshot=(anchor,rows,truncated),
+                                      _computed=results[(device,generation)])
+                    store.clear_dirty(tenant,app,device,generation)
+                    refreshed+=1
+                except Exception as exc:
+                    online_feature_store().invalidate_devices(tenant,app,[(device,generation)])
+                    failed.append({'device_id':device,'error':type(exc).__name__,'phase':'graph_refresh'})
     return {"refreshed":refreshed,"failed":failed}
 
 
