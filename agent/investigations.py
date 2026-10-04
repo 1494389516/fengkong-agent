@@ -130,6 +130,7 @@ def run_task(task_id, context, *, agent_factory=None):
     context.require('cases.run')
     with data_context(context):
         db=_db();token=uuid.uuid4().hex
+        budget_context = None
         try:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT t.snapshot,t.status,t.result,t.lease_until FROM investigation_tasks t '
@@ -144,27 +145,11 @@ def run_task(task_id, context, *, agent_factory=None):
             memory_context = load_investigation_memory(db, snapshot, limit=3)
             db.execute('UPDATE investigation_tasks SET status=?,lease_until=?,lease_token=? WHERE task_id=?',
                        ('running',time.time()+300,token,task_id));db.commit()
-            from .durable import CheckpointStore, InvestigationCheckpoint
-            checkpoint_store = CheckpointStore()
-            try:
-                recovered = checkpoint_store.load(task_id)
-            except FileNotFoundError:
-                recovered = None
-            if recovered is not None and recovered.status == 'completed':
-                recovered_result = recovered.state.get('result')
-                if not isinstance(recovered_result, dict):
-                    raise RuntimeError('completed checkpoint lacks structured result')
-                if recovered_result.get('snapshot_id') != snapshot.get('snapshot_id'):
-                    raise RuntimeError('checkpoint snapshot mismatch')
-                changed=db.execute('UPDATE investigation_tasks SET status=?,result=?,lease_until=0 '
-                    'WHERE task_id=? AND lease_token=?',('success',json.dumps(recovered_result),task_id,token)).rowcount
-                if changed != 1:
-                    raise RuntimeError('worker lease lost during checkpoint recovery')
-                db.commit()
-                return recovered_result
-            checkpoint_store.save(InvestigationCheckpoint(
-                task_id, snapshot['case_id'], 'agent_start',
-                {'snapshot_id': snapshot['snapshot_id'], 'entity_ref': snapshot['entity_ref']}))
+            from .run_ledger import RunLedger
+            ledger = RunLedger(db, task_id, token)
+            ledger.max_tokens = snapshot['budget']['max_tokens']
+            from .run_ledger import _current
+            budget_context = _current.set(ledger)
             from .tools.capability import RequestScope
             granted=set(context.attributes.get('tools',[])) & set(snapshot['allowed_tools'])
             if not granted: raise PermissionError('no investigation tools authorized')
@@ -174,6 +159,8 @@ def run_task(task_id, context, *, agent_factory=None):
                 from .core import Agent
                 agent_factory=Agent
             agent=agent_factory()
+            if hasattr(getattr(agent, 'client', None), 'with_options'):
+                agent.client = agent.client.with_options(max_retries=0)
             from .tools.capability import investigation_constraints
             from .tools.datasource import event_snapshot
             from .privacy import Tokenizer
@@ -209,9 +196,11 @@ def run_task(task_id, context, *, agent_factory=None):
                 agent.reset()
             agent._scope_identity = (scope.principal, scope.tenant, scope.dataset,
                                      tuple(sorted(scope.capabilities)), scope.expires_at)
+            agent._run_ledger = ledger
+            agent._case_id = task_id
+            agent._trajectory = {'run_id':task_id, 'trust':[], 'tools':[]}
             # Seed the same tokenizer used by Agent tool arguments and responses.
-            if not getattr(agent, '_tok', None):
-                agent._tok = Tokenizer()
+            agent._tok = Tokenizer(salt=ledger.privacy_salt)
             agent._privacy = True
             entity_token = agent._tok._token('UID', snapshot['entity_ref'])
             evidence = agent._tok.project_tool_result('feature_stats', {
@@ -258,15 +247,14 @@ def run_task(task_id, context, *, agent_factory=None):
                     'claim_support_audit':support_result,
                     'claim_entailment_audit':entailment_result,
                     'claim_evidence_graph':claim_graph}
-            checkpoint_store.save(InvestigationCheckpoint(
-                task_id, snapshot['case_id'], 'completed', {'result': result}, status='completed'))
-            changed=db.execute('UPDATE investigation_tasks SET status=?,result=?,lease_until=0 '
-                'WHERE task_id=? AND lease_token=? AND lease_until>?',('success',json.dumps(result),task_id,token,time.time())).rowcount
-            if changed!=1: raise RuntimeError('worker lease lost')
-            db.commit();return result
+            result['budget_ledger'] = ledger.usage()
+            ledger.commit_result(result)
+            return result
         except BaseException as exc:
             db.rollback()
-            db.execute('UPDATE investigation_tasks SET status=?,result=?,lease_until=0 WHERE task_id=? AND lease_token=?',
-                       ('failed',json.dumps({'error':type(exc).__name__}),task_id,token));db.commit();raise
+            db.execute('UPDATE investigation_tasks SET status=?,result=?,lease_until=0 WHERE task_id=? AND lease_token=? AND lease_until>?',
+                       ('failed',json.dumps({'error':type(exc).__name__}),task_id,token,time.time()));db.commit();raise
         finally:
+            if budget_context is not None:
+                _current.reset(budget_context)
             db.close()

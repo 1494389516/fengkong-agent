@@ -65,6 +65,22 @@ def reset_trajectory(run_id: Optional[str] = None) -> str:
     return rid
 
 
+from contextlib import contextmanager
+import copy
+
+@contextmanager
+def bind_trajectory(state):
+    token = _trajectory.set(copy.deepcopy(state))
+    try:
+        yield
+    finally:
+        _trajectory.reset(token)
+
+
+def restore_trajectory(state):
+    _trajectory.set(copy.deepcopy(state))
+
+
 def trajectory_snapshot() -> Dict[str, Any]:
     state = _trajectory.get()
     if state is None:
@@ -171,6 +187,8 @@ def record_result(tool_name: str, arguments: Dict[str, Any], result: Any) -> Non
     if state is None:
         reset_trajectory()
         state = _trajectory.get()
+    state = copy.deepcopy(state)
+    _trajectory.set(state)
     trust = SOURCE_TRUST.get(tool_name)
     if trust and trust not in state["trust"]:
         state["trust"].append(trust)

@@ -97,7 +97,7 @@ class Agent:
         self._case_tokens = 0
         self._case_id = uuid.uuid4().hex
         from . import governance
-        governance.reset_trajectory(self._case_id)
+        self._trajectory = {"run_id":self._case_id, "trust":[], "tools":[]}
         self._asks_since_ckpt = 0
         # ⑦ 脱敏:token 映射跨轮复用(同值同 token,LLM 才能跨轮关联同一账号)
         self._privacy = privacy_enabled()
@@ -124,7 +124,7 @@ class Agent:
         self._case_tokens = 0
         self._case_id = uuid.uuid4().hex
         from . import governance
-        governance.reset_trajectory(self._case_id)
+        self._trajectory = {"run_id":self._case_id, "trust":[], "tools":[]}
         if getattr(self, "_privacy", False):
             self._tok = Tokenizer()
 
@@ -384,7 +384,13 @@ class Agent:
             self._scope_identity = identity
             ask_state.begin_ask()
             try:
-                return self._ask_loop(user_input, on_tool, on_usage, on_notice)
+                from . import governance
+                state = getattr(self, '_trajectory', {'run_id':getattr(self, '_case_id', uuid.uuid4().hex), 'trust':[], 'tools':[]})
+                with governance.bind_trajectory(state):
+                    try:
+                        return self._ask_loop(user_input, on_tool, on_usage, on_notice)
+                    finally:
+                        self._trajectory = governance.trajectory_snapshot()
             finally:
                 ask_state.end_ask()
 
@@ -403,7 +409,7 @@ class Agent:
         tool_times: List[tuple] = []
         latency = {"total_ms": 0.0, "llm_ms": 0.0, "tool_ms": 0.0}
         _t0 = time.monotonic()  # P1-7:延迟预算的计量起点
-        for _ in range(min(MAX_TOOL_ROUNDS, getattr(self, "max_rounds", MAX_TOOL_ROUNDS))):
+        for round_index in range(min(MAX_TOOL_ROUNDS, getattr(self, "max_rounds", MAX_TOOL_ROUNDS))):
             self._trim_tool_messages()  # ④ 发送前裁剪
             compacted_this_ask = (self._enforce_context_budget(
                 allow_checkpoint=not compacted_this_ask, on_notice=on_notice)
@@ -424,15 +430,36 @@ class Agent:
                 if remaining <= prompt_bound:
                     raise PermissionError("investigation token budget exhausted before LLM request")
                 extra['max_tokens'] = min(max_output, remaining - prompt_bound)
-            resp = self.client.chat.completions.create(
-                model=self.model, messages=self.messages, tools=request_tools, **extra)
-            usage = _extract_usage(resp)
+            ledger = getattr(self, '_run_ledger', None)
+            node = 'generator:%d' % round_index
+            request = dict(model=self.model, messages=self.messages, tools=request_tools, **extra)
+            if ledger:
+                ledger.reserve(node, 'generator', prompt_bound + extra['max_tokens'], task['snapshot']['budget']['max_tokens'])
+            saved = ledger.begin(node, 'llm', request) if ledger else None
+            if saved is None:
+                resp = self.client.chat.completions.create(**request)
+                usage = _extract_usage(resp)
+                message = resp.choices[0].message
+                saved = {'usage':usage, 'content':message.content,
+                         'tool_calls':[tc.model_dump() for tc in message.tool_calls or []]}
+                if ledger:
+                    actual = usage['prompt'] + usage['completion'] if usage['prompt'] > 0 else None
+                    ledger.complete(node, saved, receipt=node, actual=actual)
+            else:
+                usage = saved['usage']
+            from types import SimpleNamespace
+            class SavedToolCall(SimpleNamespace):
+                def model_dump(self):
+                    return {'id':self.id, 'type':'function',
+                            'function':{'name':self.function.name, 'arguments':self.function.arguments}}
+            msg = SimpleNamespace(content=saved['content'], tool_calls=[SavedToolCall(
+                id=tc['id'], function=SimpleNamespace(**tc['function'])) for tc in saved['tool_calls']])
             self._accumulate(usage)
             self._charge_case(usage, estimate, extra['max_tokens'])
             if task is not None:
                 charged = usage['prompt'] + usage['completion']
                 # Missing usage cannot create free requests.
-                task['tokens'] += max(charged, prompt_bound + extra['max_tokens'])
+                task['tokens'] += charged if usage['prompt'] > 0 else prompt_bound + extra['max_tokens']
                 if task['tokens'] > task['snapshot']['budget']['max_tokens']:
                     raise PermissionError("investigation token budget exceeded")
             latency["llm_ms"] += (time.monotonic() - _llm_t0) * 1000
@@ -441,7 +468,6 @@ class Agent:
             ask_usage["api_calls"] += 1
             if on_usage:
                 on_usage(usage)
-            msg = resp.choices[0].message
             if not msg.tool_calls:
                 # ⑦ 历史里保持 token 形态(一致性),展示给人时反解
                 self.messages.append({"role": "assistant", "content": msg.content})
@@ -457,7 +483,7 @@ class Agent:
                 "content": msg.content,
                 "tool_calls": [tc.model_dump() for tc in msg.tool_calls],
             })
-            for tc in msg.tool_calls:
+            for tool_index, tc in enumerate(msg.tool_calls):
                 name = tc.function.name
                 args_str = tc.function.arguments or "{}"
                 if self._privacy:  # ⑦ LLM 传来的 token 参数反解成真值再执行
@@ -469,7 +495,19 @@ class Agent:
                 if on_tool:
                     on_tool(name, args)
                 _tool_t0 = time.monotonic()
-                result = tools.dispatch(name, args)  # ② 限幅在 dispatch 内统一做
+                tool_node = 'tool:%d:%d' % (round_index, tool_index)
+                cached = ledger.begin(tool_node, 'read_tool', {'name':name,'arguments':args}) if ledger else None
+                from . import governance
+                if cached is not None:
+                    result = cached['result']
+                    task.update(cached['execution'])
+                    governance.restore_trajectory(cached['trajectory'])
+                else:
+                    result = tools.dispatch(name, args)
+                    if ledger:
+                        ledger.complete(tool_node, {'result':result,
+                            'execution':{k:v for k,v in task.items() if k!='snapshot'},
+                            'trajectory':governance.trajectory_snapshot()})
                 tool_ms = (time.monotonic() - _tool_t0) * 1000
                 latency["tool_ms"] += tool_ms
                 tool_times.append((name, tool_ms))
