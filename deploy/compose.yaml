@@ -92,6 +92,21 @@ services:
       - ./config/agent-auth.json:/config/agent-auth.json:ro
       - ./config/publisher.pub:/config/publisher.pub:ro
       - ./state/bundles:/release:ro
+  case-review:
+    <<: *common
+    profiles: [investigate]
+    command: [python, -m, agent.review_service, --host, "0.0.0.0", --port, "8090"]
+    ports: ["127.0.0.1:8090:8090"]
+    environment:
+      FK_ENV: production
+      FK_AUTH_CONFIG: /config/reviewer-auth.json
+      FK_AGENT_STATE_ROOT: /agent-state
+      FK_AGENT_AUDIT_ROOT: /agent-audit
+    volumes:
+      - ./state/tenant:/tenant:ro
+      - ./state/agent-state:/agent-state
+      - ./state/agent-audit:/agent-audit
+      - ./config/reviewer-auth.json:/config/reviewer-auth.json:ro
   controller:
     <<: *common
     profiles: [release]
