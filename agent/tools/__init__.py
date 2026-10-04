@@ -114,13 +114,19 @@ def dispatch(name: str, arguments: Dict[str, Any], *, projection: bool = True) -
     from .. import governance
     denied = governance.authorize(name, arguments, name in _REGISTRY)
     if denied:
+        governance.record_failure(name, arguments, "authorization_denied")
         return {"error": denied}
     from . import packs as _packs
     if not _packs.allows(name):
+        governance.record_failure(name, arguments, "tool_pack_denied")
         return {"error": "tool pack denied: %s 不在当前工具包 %s 中(CLI /pack 切换)"
                 % (name, _packs.current())}
     try:
+        from ..tool_contracts import validate_arguments
+        validate_arguments(_REGISTRY[name]['parameters'], arguments)
         arguments = capability.constrain_investigation_tool(name, arguments)
+        validate_arguments(_REGISTRY[name]['parameters'], arguments)
+        governance.record_effective_arguments(name, arguments)
         from . import ask_state
         def _invoke():
             if name == "account_profile":
@@ -145,10 +151,15 @@ def dispatch(name: str, arguments: Dict[str, Any], *, projection: bool = True) -
         governance.record_result(name, arguments, result)
         if not projection:
             return result
-        result = _cap(result)
+        if name in ('get_event_evidence', 'search_risk_knowledge'):
+            from ..tool_contracts import evidence_view
+            result = evidence_view(result)
+        else:
+            result = _cap(result)
         ask_state.note_tool_result(name, result)
         return ask_state.attach_speak(result)
     except Exception as e:  # noqa: BLE001
+        governance.record_failure(name, arguments, type(e).__name__)
         return {"error": "%s: %s" % (type(e).__name__, e)}
 
 

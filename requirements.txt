@@ -5,3 +5,5 @@ pandas>=2.0
 seaborn>=0.13
 networkx>=3.0
 cryptography>=43,<47
+
+jsonschema>=4.22

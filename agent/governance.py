@@ -217,3 +217,13 @@ def verify_audit_chain(path=None) -> Dict[str, Any]:
         previous = claimed
         count += 1
     return {"ok": True, "records": count, "error_index": None, "head": previous}
+
+
+def record_failure(tool_name, arguments, reason):
+    _append_audit(_envelope(tool_name, arguments),
+                  PolicyDecision('deny', reason, 'tool_failed'), 'post_tool')
+
+
+def record_effective_arguments(tool_name, arguments):
+    _append_audit(_envelope(tool_name, arguments),
+                  PolicyDecision('allow', 'effective_arguments', 'tool_contract'), 'effective_args')
