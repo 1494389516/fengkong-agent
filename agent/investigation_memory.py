@@ -44,6 +44,10 @@ def load_investigation_memory(db, snapshot, limit=3):
         retrieval = result.get("retrieval_audit") if isinstance(result.get("retrieval_audit"), dict) else {}
         entry = {
             "as_of": old_as_of,
+            "recommendation_eligibility":result.get('recommendation_eligibility','unverified'),
+            "evidence_status":result.get('evidence_status','unverified'),
+            "label_source":"model_suggestion",
+            "human_confirmed":False,
             "decision_action": decision.get("action") if decision.get("action") in
                 ("pass", "review", "reject", "deny", "challenge") else "unknown",
             "investigation_verdict": report.get("verdict") if report.get("verdict") in

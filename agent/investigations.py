@@ -247,6 +247,11 @@ def run_task(task_id, context, *, agent_factory=None):
                     'claim_support_audit':support_result,
                     'claim_entailment_audit':entailment_result,
                     'claim_evidence_graph':claim_graph}
+            from .claims import audit_event_claims, eligibility
+            result['event_claim_audit'] = audit_event_claims(report, snapshot)
+            result.update(eligibility(report, result['event_claim_audit'], entailment_result))
+            result['case_id'] = snapshot['case_id']
+            result['revision'] = snapshot.get('revision', 1)
             result['budget_ledger'] = ledger.usage()
             ledger.commit_result(result)
             return result

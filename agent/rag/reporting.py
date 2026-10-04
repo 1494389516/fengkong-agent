@@ -49,7 +49,7 @@ def parse_investigation_report(value):
         errors.append('invalid recommended_next_step')
     for index, claim in enumerate(report.get('claims', []) if isinstance(report.get('claims'), list) else []):
         fields = {'statement', 'role', 'event_evidence', 'knowledge_citations', 'confidence'}
-        if not isinstance(claim, dict) or set(claim) != fields:
+        if not isinstance(claim, dict) or set(claim) not in (fields, fields | {'assertion'}):
             errors.append('claim %d has invalid fields' % index)
             continue
         if (not isinstance(claim['statement'], str) or not claim['statement'].strip()
