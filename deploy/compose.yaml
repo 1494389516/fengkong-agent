@@ -44,15 +44,31 @@ services:
     environment:
       FK_ENV: production
       FK_AUTH_CONFIG: /config/runtime-auth.json
+      FK_AGENT_STATE_ROOT: /agent-state
       FK_RUNTIME_BUNDLE_DIR: /release
       FK_RUNTIME_PUBLIC_KEY: /config/publisher.pub
       FK_RUNTIME_CACHE_DIR: /app/out/runtime-cache
     volumes:
       - ./state/tenant:/tenant
       - ./state/runtime-out:/app/out
+      - ./state/agent-state:/agent-state:ro
       - ./config/runtime-auth.json:/config/runtime-auth.json:ro
       - ./config/publisher.pub:/config/publisher.pub:ro
       - ./state/bundles:/release:ro
+  case-projector:
+    <<: *common
+    command: [python, -m, agent.case_worker, --interval, "1", --limit, "100"]
+    environment:
+      FK_ENV: production
+      FK_AUTH_CONFIG: /config/projector-auth.json
+      FK_PROJECTOR_TOKEN: ${FK_PROJECTOR_TOKEN:-}
+      FK_AGENT_STATE_ROOT: /agent-state
+      FK_AGENT_AUDIT_ROOT: /agent-audit
+    volumes:
+      - ./state/tenant:/tenant:ro
+      - ./state/agent-state:/agent-state
+      - ./state/agent-audit:/agent-audit
+      - ./config/projector-auth.json:/config/projector-auth.json:ro
   agent:
     <<: *common
     profiles: [investigate]

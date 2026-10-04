@@ -98,3 +98,14 @@ Copy `compute-capacity.example.json` to `config/compute-capacity.json` and repla
 its illustrative values with the operator's capacity envelope. The controller
 mounts it read-only and validates it before reading requests. This configuration
 is an admission target, not measured performance evidence.
+
+## Asynchronous case projection
+
+Run the `case-projector` service with its own short-lived registry/token granting
+only `cases.project`, and the same tenant/app/data_dir binding. It reads the
+committed decision outbox from a read-only evidence mount and commits its cursor,
+deduplication receipt and cases in the Agent SQLite store. HTTP always reports
+`investigation_projection_status=pending`; it never waits for the projector.
+Runtime mounts Agent state read-only solely for authenticated case listing.
+Do not delete/recreate or truncate the online outbox; the cursor assumes its
+append-only row sequence. Use a migration before replacing an online database.

@@ -456,12 +456,9 @@ class Handler(BaseHTTPRequestHandler):
                     result = _decide(event, operator=ctx.principal, received_at=time.time(),
                                      scope=(ctx.tenant, ctx.app), source_kind=ctx.source_kind,
                                      prepare=lambda value, db: enrich_business_event(value, ctx, connection=db))
-                    from agent.investigations import consume_decision_outbox
-                    try:
-                        consume_decision_outbox()
-                        result["investigation_projection_status"] = "current"
-                    except (OSError, ValueError, __import__("sqlite3").Error):
-                        result["investigation_projection_status"] = "pending"
+                    # Decision and outbox have committed atomically. Projection
+                    # is owned by the separate case worker, never this request.
+                    result["investigation_projection_status"] = "pending"
                 self._json(200, result)
         except PermissionError:
             self._json(403, {"error": "forbidden"})

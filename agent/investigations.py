@@ -6,10 +6,19 @@ import uuid
 from .tenancy import data_context
 
 
-def _db():
-    from .tools.online_store import connect
-    db=connect()
+def _db(*, readonly=False):
+    import sqlite3
+    from .tools.datasource import agent_state_dir
+    path = agent_state_dir() / 'investigations.sqlite3'
+    if readonly:
+        return sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(path, timeout=10)
+    db.execute('PRAGMA journal_mode=WAL')
+    db.execute('PRAGMA synchronous=FULL')
     db.executescript('''
+      CREATE TABLE IF NOT EXISTS projection_cursor(id INTEGER PRIMARY KEY CHECK(id=1), position INTEGER NOT NULL);
+      INSERT OR IGNORE INTO projection_cursor VALUES(1,0);
       CREATE TABLE IF NOT EXISTS investigation_seen(decision_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS cases(case_id TEXT PRIMARY KEY, tenant TEXT, app TEXT,
           entity TEXT, bucket INTEGER, body TEXT, UNIQUE(tenant,app,entity,bucket));
@@ -19,13 +28,27 @@ def _db():
     return db
 
 
-def consume_decision_outbox():
+def consume_decision_outbox(limit=100):
+    if type(limit) is not int or not 1 <= limit <= 1000:
+        raise ValueError('projection limit must be 1..1000')
+    import sqlite3
+    from .tools.datasource import data_dir
+    source = data_dir() / 'online.sqlite3'
+    if not source.exists():
+        return 0
     db=_db()
     try:
         db.execute('BEGIN IMMEDIATE')
-        rows=db.execute('SELECT o.decision_id,o.body FROM outbox o LEFT JOIN investigation_seen s '
-                        'ON o.decision_id=s.decision_id WHERE s.decision_id IS NULL ORDER BY o.rowid LIMIT 1000').fetchall()
-        for decision_id,body in rows:
+        position = db.execute('SELECT position FROM projection_cursor WHERE id=1').fetchone()[0]
+        source_db = sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)
+        try:
+            rows = source_db.execute('SELECT rowid,decision_id,body FROM outbox WHERE rowid>? ORDER BY rowid LIMIT ?',
+                                     (position, limit)).fetchall()
+        finally:
+            source_db.close()
+        for position, decision_id, body in rows:
+            if db.execute('SELECT 1 FROM investigation_seen WHERE decision_id=?', (decision_id,)).fetchone():
+                continue
             record=json.loads(body)
             if record.get('action') in ('review','reject','deny') or record.get('degraded'):
                 event=record['event']; entity=event.get('uid') or event.get('device_id')
@@ -54,6 +77,8 @@ def consume_decision_outbox():
                     db.execute('INSERT INTO investigation_tasks(task_id,case_id,snapshot,status) VALUES(?,?,?,?)',
                                (task_id,case_id,json.dumps(snapshot),'queued'))
             db.execute('INSERT INTO investigation_seen VALUES(?)',(decision_id,))
+        if rows:
+            db.execute('UPDATE projection_cursor SET position=? WHERE id=1', (rows[-1][0],))
         db.commit();return len(rows)
     except BaseException:
         db.rollback();raise
@@ -64,7 +89,7 @@ def consume_decision_outbox():
 def list_cases(context):
     context.require('cases.read')
     with data_context(context):
-        db=_db()
+        db=_db(readonly=True)
         try:
             return [json.loads(r[0]) for r in db.execute('SELECT body FROM cases WHERE tenant=? AND app=? ORDER BY rowid LIMIT 1000',
                                                         (context.tenant,context.app))]
