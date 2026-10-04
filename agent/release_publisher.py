@@ -105,6 +105,9 @@ def publish(store, output, private_key):
                     raise ValueError('publish requires runtime mapping: ' + component)
             if not isinstance(record['bundle']['list'].get('records'), list):
                 raise ValueError('explicit list records snapshot required')
+            if 'investigation_provenance' in record['bundle']:
+                from .strategy_artifacts import validate_chain
+                validate_chain(record['bundle']['investigation_provenance'], record.get('scope'))
             from .compute_admission import verify_record, verify_performance
             admission = verify_record(record, require_current_implementation=event['id'] == state['active'])
             history = record['history']

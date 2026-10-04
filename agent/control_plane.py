@@ -106,6 +106,9 @@ class ReleaseController:
             for field in ('policy', 'strategy', 'model', 'feature', 'list', 'graph', 'versions'):
                 if not isinstance(bundle.get(field), dict):
                     raise ValueError('runtime component mapping required: ' + field)
+        if 'investigation_provenance' in bundle:
+            from .strategy_artifacts import validate_chain
+            validate_chain(bundle['investigation_provenance'], self.scope)
         bundle = copy.deepcopy(bundle)
         from .compute_admission import admit_bundle, validate_capacity
         admission = admit_bundle(bundle)
