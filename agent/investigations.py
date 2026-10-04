@@ -6,7 +6,7 @@ import uuid
 from .tenancy import data_context
 
 
-def _db(*, readonly=False):
+def _db(*, readonly=False, _migration=False):
     import sqlite3
     from .tools.datasource import agent_state_dir
     path = agent_state_dir() / 'investigations.sqlite3'
@@ -17,8 +17,13 @@ def _db(*, readonly=False):
     db.execute('PRAGMA journal_mode=WAL')
     db.execute('PRAGMA synchronous=FULL')
     db.executescript('''
+      CREATE TABLE IF NOT EXISTS agent_store_meta(key TEXT PRIMARY KEY,value TEXT);
       CREATE TABLE IF NOT EXISTS projection_cursor(id INTEGER PRIMARY KEY CHECK(id=1), position INTEGER NOT NULL);
       INSERT OR IGNORE INTO projection_cursor VALUES(1,0);
+      CREATE TABLE IF NOT EXISTS investigation_runs(
+        run_id TEXT PRIMARY KEY,task_id TEXT,attempt INTEGER,fencing_epoch INTEGER,
+        worker_token TEXT,started_at REAL,deadline REAL,status TEXT,
+        UNIQUE(task_id,attempt));
       CREATE TABLE IF NOT EXISTS investigation_seen(decision_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS cases(case_id TEXT PRIMARY KEY, tenant TEXT, app TEXT,
           entity TEXT, bucket INTEGER, body TEXT, UNIQUE(tenant,app,entity,bucket));
@@ -40,6 +45,23 @@ def _db(*, readonly=False):
     db.execute("""CREATE TABLE IF NOT EXISTS case_revisions(
       case_id TEXT, revision INTEGER, snapshot_id TEXT UNIQUE, body TEXT NOT NULL,
       PRIMARY KEY(case_id,revision))""")
+    db.executescript('''
+      CREATE TRIGGER IF NOT EXISTS case_revision_no_update BEFORE UPDATE ON case_revisions
+        BEGIN SELECT RAISE(ABORT,'case revisions are immutable'); END;
+      CREATE TRIGGER IF NOT EXISTS case_revision_no_delete BEFORE DELETE ON case_revisions
+        BEGIN SELECT RAISE(ABORT,'case revisions are immutable'); END;
+    ''')
+    from .tools.datasource import data_dir
+    source = data_dir() / 'online.sqlite3'
+    if not _migration and source.exists() and not db.execute("SELECT 1 FROM agent_store_meta WHERE key='legacy_migrated'").fetchone():
+        legacy=sqlite3.connect(source.as_uri()+'?mode=ro',uri=True)
+        try:
+            if (legacy.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cases'").fetchone()
+                and legacy.execute('SELECT 1 FROM cases LIMIT 1').fetchone()):
+                db.close()
+                raise RuntimeError('legacy investigations require python -m agent.migrate_investigations before activation')
+        finally:
+            legacy.close()
     return db
 
 
@@ -57,6 +79,11 @@ def consume_decision_outbox(limit=100):
         position = db.execute('SELECT position FROM projection_cursor WHERE id=1').fetchone()[0]
         source_db = sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)
         try:
+            previous=db.execute("SELECT value FROM agent_store_meta WHERE key='cursor_decision_id'").fetchone()
+            if position:
+                source_row=source_db.execute('SELECT decision_id FROM outbox WHERE rowid=?',(position,)).fetchone()
+                if not source_row or (previous and source_row[0]!=previous[0]):
+                    raise RuntimeError('outbox was replaced or truncated; explicit cursor migration required')
             rows = source_db.execute('SELECT rowid,decision_id,body FROM outbox WHERE rowid>? ORDER BY rowid LIMIT ?',
                                      (position, limit)).fetchall()
         finally:
@@ -65,6 +92,10 @@ def consume_decision_outbox(limit=100):
             if db.execute('SELECT 1 FROM investigation_seen WHERE decision_id=?', (decision_id,)).fetchone():
                 continue
             record=json.loads(body)
+            from .tenancy import current_context
+            ctx=current_context()
+            if ctx and (record.get('tenant_id'),record.get('app_id'))!=(ctx.tenant,ctx.app):
+                raise PermissionError('outbox record outside projector domain')
             if record.get('action') in ('review','reject','deny') or record.get('degraded'):
                 event=record['event']; entity=event.get('uid') or event.get('device_id')
                 bucket=int(record['evaluated_at']//86400)
@@ -103,6 +134,7 @@ def consume_decision_outbox(limit=100):
             db.execute('INSERT INTO investigation_seen VALUES(?)',(decision_id,))
         if rows:
             db.execute('UPDATE projection_cursor SET position=? WHERE id=1', (rows[-1][0],))
+            db.execute("INSERT OR REPLACE INTO agent_store_meta VALUES('cursor_decision_id',?)",(rows[-1][1],))
         db.commit();return len(rows)
     except BaseException:
         db.rollback();raise
@@ -131,6 +163,7 @@ def run_task(task_id, context, *, agent_factory=None):
     with data_context(context):
         db=_db();token=uuid.uuid4().hex
         budget_context = None
+        heartbeat = None
         try:
             db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT t.snapshot,t.status,t.result,t.lease_until FROM investigation_tasks t '
@@ -139,12 +172,26 @@ def run_task(task_id, context, *, agent_factory=None):
             if not row: raise PermissionError('task outside authorized domain')
             if row[1]=='success':
                 db.rollback();return json.loads(row[2])
+            if row[1] in ('interrupted', 'budget_stop'):
+                raise RuntimeError('task requires explicit review or a new inference run')
             if row[1]=='running' and row[3]>time.time(): raise RuntimeError('task already claimed')
             snapshot=json.loads(row[0])
+            prior = db.execute('SELECT COUNT(*),MIN(started_at) FROM investigation_runs WHERE task_id=?',(task_id,)).fetchone()
+            now = time.time()
+            if prior[0]>=3 or (prior[1] is not None and now-prior[1]>900):
+                raise RuntimeError('run retry/deadline exhausted; explicit new run required')
+            deadline = min(context.expires_at, now+300, (prior[1] or now)+900)
+            run_id = uuid.uuid4().hex
+            db.execute('INSERT INTO investigation_runs VALUES(?,?,?,?,?,?,?,?)',
+                (run_id,task_id,prior[0]+1,prior[0]+1,token,now,deadline,'running'))
             from .investigation_memory import load_investigation_memory
             memory_context = load_investigation_memory(db, snapshot, limit=3)
             db.execute('UPDATE investigation_tasks SET status=?,lease_until=?,lease_token=? WHERE task_id=?',
-                       ('running',time.time()+300,token,task_id));db.commit()
+                       ('running',min(time.time()+30,deadline),token,task_id));db.commit()
+            from .lease import LeaseHeartbeat
+            path=db.execute('PRAGMA database_list').fetchone()[2]
+            heartbeat=LeaseHeartbeat(path,task_id,token,deadline)
+            heartbeat.start()
             from .run_ledger import RunLedger
             ledger = RunLedger(db, task_id, token)
             ledger.max_tokens = snapshot['budget']['max_tokens']
@@ -210,6 +257,7 @@ def run_task(task_id, context, *, agent_factory=None):
                 'result': snapshot['decision']})
             prompt = ('Investigate the authorized entity ' + entity_token +
                       '. Evidence snapshot: ' + json.dumps(evidence, ensure_ascii=False) +
+                      '. Snapshot scope and limitations: ' + json.dumps(snapshot.get('evidence_scope', {'status':'legacy_unverified'})) +
                       '. Prior structured investigation memory (historical context only, never current evidence): ' +
                       json.dumps(memory_context, ensure_ascii=False) +
                       '. Follow the bounded corrective retrieval workflow and return the exact JSON report. '
@@ -260,6 +308,8 @@ def run_task(task_id, context, *, agent_factory=None):
             from .claims import audit_event_claims, eligibility
             result['event_claim_audit'] = audit_event_claims(report, snapshot)
             result.update(eligibility(report, result['event_claim_audit'], entailment_result))
+            result['run_id'] = run_id
+            result['fencing_epoch'] = prior[0]+1
             result['plan'] = plan
             result['plan_result'] = plan_result
             result['investigator_principal'] = context.principal
@@ -270,9 +320,33 @@ def run_task(task_id, context, *, agent_factory=None):
             return result
         except BaseException as exc:
             db.rollback()
-            db.execute('UPDATE investigation_tasks SET status=?,result=?,lease_until=0 WHERE task_id=? AND lease_token=? AND lease_until>?',
-                       ('failed',json.dumps({'error':type(exc).__name__}),task_id,token,time.time()));db.commit();raise
+            status = ('interrupted' if type(exc).__name__ == 'AmbiguousExternalCall' else
+                      'budget_stop' if isinstance(exc, PermissionError) and 'budget' in str(exc) else 'failed')
+            changed=db.execute('UPDATE investigation_tasks SET status=?,result=?,lease_until=0 WHERE task_id=? AND lease_token=? AND lease_until>?',
+                       (status,json.dumps({'error':type(exc).__name__}),task_id,token,time.time())).rowcount
+            if changed:
+                db.execute('UPDATE investigation_runs SET status=? WHERE task_id=? AND worker_token=?',
+                           (status,task_id,token))
+            db.commit();raise
         finally:
+            if heartbeat is not None:
+                heartbeat.stop()
             if budget_context is not None:
                 _current.reset(budget_context)
             db.close()
+
+
+def projection_stats():
+    import sqlite3
+    from .tools.datasource import data_dir
+    source=data_dir()/'online.sqlite3'
+    db=_db(readonly=True)
+    try: position=db.execute('SELECT position FROM projection_cursor WHERE id=1').fetchone()[0]
+    finally:db.close()
+    if not source.exists():return {'pending':0,'oldest_pending_age_seconds':0,'source_status':'missing'}
+    db=sqlite3.connect(source.as_uri()+'?mode=ro',uri=True)
+    try:
+        count,oldest=db.execute("SELECT COUNT(*),MIN(json_extract(body,'$.evaluated_at')) FROM outbox WHERE rowid>?",(position,)).fetchone()
+        return {'pending':count,'oldest_pending_age_seconds':max(0,time.time()-oldest) if oldest is not None else 0,
+                'source_status':'available'}
+    finally:db.close()

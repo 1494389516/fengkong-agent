@@ -111,6 +111,7 @@ class RunLedger:
             self.assert_live()
             self.db.execute("UPDATE investigation_tasks SET status='success',result=?,lease_until=0 WHERE task_id=? AND lease_token=?",
                             (json.dumps(result,allow_nan=False),self.task_id,self.token))
+            self.db.execute("UPDATE investigation_runs SET status='completed' WHERE task_id=? AND worker_token=?",(self.task_id,self.token))
             self.db.commit()
         except BaseException:
             self.db.rollback();raise
@@ -132,4 +133,7 @@ def metered_call(component, inputs, maximum, invoke):
         return cached['payload']
     payload, actual = invoke()
     ledger.complete(node, {'payload':payload}, receipt=node, actual=actual)
+    usage=ledger.usage()
+    if sum(usage.values())>ledger.max_tokens:
+        raise PermissionError('persistent investigation budget exceeded after provider response')
     return payload

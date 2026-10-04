@@ -200,6 +200,12 @@ def ingest(directory, embedder=None):
         generation = digest({'chunks': chunks, 'embedding_model': model})
         meta = {'index_digest': generation, 'embedding_model': model,
                 'indexed_at': datetime.now(timezone.utc).isoformat()}
+        from agent.tools.datasource import atomic_write_json
+        archive=path.parent/'knowledge_archive'/(generation+'.json')
+        if not archive.exists():
+            atomic_write_json(archive,{'metadata':meta,'chunks':chunks})
+        else:
+            archived_index(generation)
         with closing(sqlite3.connect(path)) as db, db:
             db.execute('CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS chunks(chunk_id TEXT PRIMARY KEY,body TEXT NOT NULL)')
@@ -209,6 +215,18 @@ def ingest(directory, embedder=None):
             db.executemany('INSERT INTO metadata VALUES(?,?)', list(meta.items()))
     return {'chunks': len(chunks), 'index_digest': generation, 'embedded_new': len(fresh),
             'mode': 'hybrid' if embedder else 'bm25'}
+
+
+def archived_index(expected_digest):
+    if not isinstance(expected_digest,str) or not re.fullmatch(r'[0-9a-f]{64}',expected_digest):
+        raise ValueError('invalid archived knowledge digest')
+    path=index_path().parent/'knowledge_archive'/(expected_digest+'.json')
+    if path.stat().st_size>64*1024*1024:raise ValueError('archive exceeds byte budget')
+    value=json.loads(path.read_text())
+    meta,rows=value['metadata'],value['chunks']
+    if len(rows)>MAX_CHUNKS or digest({'chunks':rows,'embedding_model':meta['embedding_model']})!=expected_digest:
+        raise ValueError('archived knowledge contents changed')
+    return meta,rows
 
 
 def embedding_text(row):
@@ -254,7 +272,7 @@ def bm25(query, rows):
 
 def search(query, *, platform='', detector_ids=None, sdk_version='', as_of='', top_k=5,
            exclude_case_id='', expected_digest=None, embedder=None, reranker=None,
-           public_only=False):
+           public_only=False, allow_archive=False):
     if not isinstance(query, str) or not query.strip() or len(query) > 2000:
         raise ValueError('query must contain 1..2000 characters')
     if type(top_k) is not int or not 1 <= top_k <= 10:
@@ -267,7 +285,13 @@ def search(query, *, platform='', detector_ids=None, sdk_version='', as_of='', t
     anchor = timestamp(as_of) if as_of else datetime.now(timezone.utc).timestamp()
     meta, rows = read_index()
     if expected_digest is not None and meta.get('index_digest', '') != expected_digest:
-        raise ValueError('knowledge index changed; reissue investigation with a new snapshot')
+        if allow_archive and expected_digest:
+            try:
+                meta,rows=archived_index(expected_digest)
+            except FileNotFoundError as exc:
+                raise ValueError('knowledge index changed and archived generation is unavailable') from exc
+        else:
+            raise ValueError('knowledge index changed; reissue investigation with a new snapshot')
     eligible = []
     for row in rows:
         if public_only and row.get('export_policy') != 'public_reference':

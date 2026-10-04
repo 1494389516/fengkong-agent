@@ -109,3 +109,56 @@ deduplication receipt and cases in the Agent SQLite store. HTTP always reports
 Runtime mounts Agent state read-only solely for authenticated case listing.
 Do not delete/recreate or truncate the online outbox; the cursor assumes its
 append-only row sequence. Use a migration before replacing an online database.
+
+## vNext investigation and review operations
+
+Provision `projector-auth.json` (`cases.project`), `investigator-auth.json`
+(`cases.run`, `cases.read`, and an explicit `tools` allowlist), and
+`reviewer-auth.json` (`cases.read`, `cases.review`) as separate identities.
+All bind the same tenant/app evidence domain. Do not give the investigator
+reviewer/release privileges. State directories must be owned by the deployment
+UID, not world-writable (the CI fixture alone uses disposable writable folders).
+
+For an installation with legacy cases in `online.sqlite3`, stop old investigation
+workers and run `python -m agent.migrate_investigations` with projector credentials
+and the new state-root configuration. It copies cases/tasks/receipts transactionally,
+rejects conflicts and preserves the source. No automatic source deletion occurs.
+Backup both stores before migration. Startup rejects an unmigrated legacy store.
+
+Start projection with `python -m agent.case_worker`. The output includes pending
+count and oldest pending age. A source outbox replacement/truncation fails closed.
+Run a task with `FK_INVESTIGATOR_TOKEN` supplied securely and:
+
+```
+python -m agent.investigation_worker --task-id TASK_ID
+```
+
+Attempts have a 30-second lease, a 10-second heartbeat, a maximum 300-second
+attempt deadline, three attempts and a 900-second retry horizon. All commits use
+the current token. Completed model/tool steps replay; an unfinished provider call
+requires review and is not automatically retried. For an explicitly authorized
+new inference on the same revision (new accounting and task ID):
+
+```
+python -m agent.investigation_worker --new-run-case CASE_ID --revision 2
+```
+
+This is a **new run**, not continuation of an ambiguous billed call. A legacy
+JSON CheckpointStore interrupt/resume is not a production authorization endpoint.
+The investigator never uses its completed JSON files as completion authority.
+
+`docker compose -f deploy/compose.yaml --profile investigate up -d case-review`
+serves the review workbench at `http://127.0.0.1:8090`. Use an independently
+provisioned short-lived reviewer credential. Remote deployments must put this
+behind authenticated TLS ingress. The workbench keeps the token in memory only,
+binds reviews to result digest/current revision and never writes gold labels or
+production strategy. Delayed label maturity is represented explicitly.
+
+For provenance export, use `python -m agent.strategy_artifacts` with an authorized
+`FK_PROPOSER_TOKEN` (`cases.read`, `cases.propose`) and JSON stdin containing
+`task_id`, `review_id`, `mining_ref` (existing local rule-mining path and SHA256),
+and `candidate_id`. The mining path must be under that domain's shadow artifacts.
+Transfer the resulting content-addressed chain to the controller as the bundle's
+`investigation_provenance`. Controller and publisher validate its bindings;
+existing validation, independent approval, canary, capacity and signature gates
+still apply. This does not compile arbitrary model code into executable policy.

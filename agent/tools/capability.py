@@ -463,6 +463,8 @@ def constrain_investigation_tool(name, arguments):
     else:
         raise PermissionError('tool outside investigation contract')
     if name == 'graph_relations':
+        if snapshot.get('evidence_scope', {}).get('status') == 'partial':
+            raise PermissionError('partial graph snapshot; evidence_gap')
         from .datasource import load_events
         nodes = set()
         for event in load_events(as_of_ts=as_of):

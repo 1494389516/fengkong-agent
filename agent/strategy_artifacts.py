@@ -20,7 +20,7 @@ def build_chain(conclusion, review, mining_body, mining_sha, candidate_id, scope
     candidate=copy.deepcopy(candidate)
     provenance={'case_id':conclusion['case_id'],'revision':conclusion['revision'],
         'snapshot_id':conclusion['snapshot_id'],'result_digest':digest(conclusion),'review_digest':digest(review)}
-    evaluation={'candidate_digest':digest(candidate),'mining_sha256':mining_sha,
+    evaluation={'candidate':candidate,'candidate_digest':digest(candidate),'mining_sha256':mining_sha,
                 'train':candidate['train'],'validation':candidate['validation'],
                 'lineage':{k:v for k,v in mining_body.items() if k.endswith(('fingerprint','digest','version'))},
                 'holdout_selection_status':'requires_independent_review'}
@@ -43,6 +43,8 @@ def validate_chain(chain,scope=None):
     if p.get('conclusion_digest')!=digest(c) or p.get('evaluation_digest')!=digest(e):raise ValueError('artifact binding mismatch')
     if c.get('review_digest')!=digest(r) or c.get('result_digest')!=r.get('result_digest'):raise ValueError('review binding mismatch')
     if r.get('verdict') not in ('confirmed_risk','benign') or r.get('label_source')!='human_review':raise ValueError('review required')
+    if e.get('candidate_digest')!=digest(e.get('candidate')) or p.get('ast')!=(e.get('candidate') or {}).get('ast'):
+        raise ValueError('candidate AST/evaluation mismatch')
     if not isinstance(p.get('ast'),dict) or not e.get('mining_sha256'):raise ValueError('evaluated candidate required')
     return copy.deepcopy(chain)
 

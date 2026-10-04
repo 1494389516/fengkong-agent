@@ -64,4 +64,17 @@ class LedgerContracts(unittest.TestCase):
             self.assertEqual(dispatch.call_count,1)
             self.assertEqual(b.usage()['actual_used'],240)
 
+    def test_interleaved_agents_restore_parent_trajectory(self):
+        from agent import governance
+        from eval.token_budget_regressions import fake_agent
+        a=fake_agent([(10,1)]*2,60000);b=fake_agent([(10,1)],60000)
+        a._case_id='A';a._trajectory={'run_id':'A','trust':[],'tools':[]}
+        b._case_id='B';b._trajectory={'run_id':'B','trust':['external'],'tools':[]}
+        governance.reset_trajectory('parent')
+        with patch('agent.core.tools.schemas',return_value=[]):
+            a.ask('one');b.ask('two');a.ask('three')
+        self.assertEqual(a._trajectory['run_id'],'A');self.assertEqual(a._trajectory['trust'],[])
+        self.assertEqual(b._trajectory['run_id'],'B');self.assertEqual(b._trajectory['trust'],['external'])
+        self.assertEqual(governance.trajectory_snapshot()['run_id'],'parent')
+
 if __name__=='__main__':unittest.main()

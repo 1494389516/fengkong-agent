@@ -37,7 +37,7 @@ def search_risk_knowledge(query, platform='', detector_ids=None, sdk_version='',
             raise PermissionError('legacy task lacks knowledge snapshot; reissue task')
         as_of = datetime.fromtimestamp(snapshot['as_of'], timezone.utc).isoformat()
         extra = {'exclude_case_id': snapshot['case_id'],
-                 'expected_digest': snapshot['knowledge_index_digest']}
+                 'expected_digest': snapshot['knowledge_index_digest'], 'allow_archive': True}
     # A missing provider configuration must not disable the offline knowledge tool.
     warnings = []
     try:

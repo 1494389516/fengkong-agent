@@ -4,7 +4,7 @@ import json
 import os
 import time
 from .tenancy import authenticate, data_context
-from .investigations import consume_decision_outbox
+from .investigations import consume_decision_outbox, projection_stats
 
 
 def main():
@@ -21,7 +21,7 @@ def main():
         with data_context(ctx):
             started = time.monotonic()
             count = consume_decision_outbox(args.limit)
-            print(json.dumps({'projected': count, 'elapsed_ms': 1000*(time.monotonic()-started),
+            print(json.dumps({'projected': count, 'backlog':projection_stats(), 'elapsed_ms': 1000*(time.monotonic()-started),
                               'updated_at': time.time()}), flush=True)
         if args.once:
             return

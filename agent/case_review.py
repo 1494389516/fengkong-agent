@@ -73,3 +73,23 @@ def eligible_label(review_record,as_of):
             and review_record.get('verdict') in ('confirmed_risk','benign')
             and review_record.get('reviewed_at',float('inf'))<=as_of
             and review_record.get('matures_at',float('inf'))<=as_of)
+
+
+def new_run(context,case_id,revision):
+    """Explicit new inference for a pinned revision, never masquerading as replay."""
+    context.require('cases.run')
+    if type(revision) is not int or revision<1:raise ValueError('invalid revision')
+    with data_context(context):
+        db=_db()
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT r.body FROM case_revisions r JOIN cases c ON c.case_id=r.case_id '
+                'WHERE r.case_id=? AND r.revision=? AND c.tenant=? AND c.app=?',
+                (case_id,revision,context.tenant,context.app)).fetchone()
+            if not row:raise PermissionError('revision outside authorized domain')
+            task_id=uuid.uuid4().hex
+            db.execute("INSERT INTO investigation_tasks(task_id,case_id,snapshot,status) VALUES(?,?,?,'queued')",
+                       (task_id,case_id,row[0]))
+            db.commit();return {'task_id':task_id,'mode':'new_inference','revision':revision}
+        except BaseException:db.rollback();raise
+        finally:db.close()
