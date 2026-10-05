@@ -1,0 +1,9 @@
+{
+  "version": "EXAMPLE-NOT-A-LIVE-QUOTE",
+  "rates_nano_usd_per_token": {
+    "generator": 2000,
+    "verifier": 5000,
+    "embedding": 100
+  },
+  "max_cost_nano_usd": 100000000
+}

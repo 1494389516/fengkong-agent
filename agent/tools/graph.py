@@ -90,6 +90,9 @@ def _build_graph(as_of_ts=None, window_seconds=DEFAULT_WINDOW_SECONDS) -> nx.Gra
         if len(set([uid] + resources) - set(g)) + len(g) > limits["max_nodes"]:
             g.graph["truncated"] = True
             break
+        from ..resource_budget import consume
+        consume(graph_nodes_total=len(set([uid]+resources)-set(g)),
+                graph_edges_total=sum(not g.has_edge(uid,r) for r in resources))
         g.add_node(uid, kind="uid")
         for resource in resources:
             g.add_node(resource, kind=resource[0], resource_id=e.get(resource[0]),

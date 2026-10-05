@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 from .tools import capability
 from .tools.datasource import append_jsonl, agent_audit_dir, file_lock
 
-POLICY_VERSION = "agent-governance-v1"
+POLICY_VERSION = "agent-governance-v2"
 UNTRUSTED = frozenset({"external", "user_provided", "llm_derived"})
 PRODUCTION_LEVELS = frozenset({"execute"})
 SOURCE_TRUST = {
@@ -47,6 +47,9 @@ class ActionEnvelope:
     tenant: str = ""
     dataset: str = ""
     evidence_trust: tuple = ()
+    dependencies_digest: str = ""
+    effect: str = ""
+    input_schema_digest: str = ""
 
 _trajectory: ContextVar[Optional[Dict[str, Any]]] = ContextVar("fk_governance_trajectory", default=None)
 
@@ -90,6 +93,7 @@ def trajectory_snapshot() -> Dict[str, Any]:
         "run_id": state["run_id"],
         "trust": list(state["trust"]),
         "tools": list(state["tools"]),
+        "evidence": copy.deepcopy(state.get("evidence", {})),
     }
 
 
@@ -106,12 +110,19 @@ def _scope_fields() -> Dict[str, str]:
 
 def _envelope(tool_name: str, arguments: Dict[str, Any]) -> ActionEnvelope:
     state = trajectory_snapshot()
+    from .tool_provenance import verified_binding
+    binding=verified_binding(tool_name,arguments)
+    from .tools import _REGISTRY
+    from .tool_contracts import descriptor
+    contract=descriptor(tool_name,_REGISTRY.get(tool_name,{}).get('parameters',{}),capability.level_of(tool_name))
     return ActionEnvelope(
         run_id=state["run_id"],
         tool_name=tool_name,
         capability=capability.level_of(tool_name),
         args_hash=_digest(arguments),
         evidence_trust=tuple(state["trust"]),
+        dependencies_digest=binding["dependencies_digest"] if binding else "",
+        effect=contract.effect,input_schema_digest=contract.schema_digest,
         **_scope_fields(),
     )
 
@@ -165,6 +176,9 @@ def decide(tool_name: str, arguments: Dict[str, Any], is_registered: bool) -> Po
     # execute-level state mutation in the same trajectory. Proposals are safe
     # because their existing path is already human-approved before activation.
     if level in PRODUCTION_LEVELS and trust.intersection(UNTRUSTED):
+        from .tool_provenance import ARTIFACT_TOOLS,verified_binding
+        if tool_name in ARTIFACT_TOOLS and verified_binding(tool_name,arguments):
+            return PolicyDecision('allow','verified_artifact_dependencies','arguments.evidence_binding')
         return PolicyDecision(
             "deny",
             "untrusted_evidence_cannot_drive_execute",
@@ -193,6 +207,8 @@ def record_result(tool_name: str, arguments: Dict[str, Any], result: Any) -> Non
     if trust and trust not in state["trust"]:
         state["trust"].append(trust)
     state["tools"].append(tool_name)
+    from .tool_provenance import record
+    record(tool_name,arguments,result,state,_scope_fields(),trust)
     envelope = _envelope(tool_name, arguments)
     decision = PolicyDecision("allow", "tool_completed", "post_tool")
     _append_audit(envelope, decision, "post_tool", _digest(result))

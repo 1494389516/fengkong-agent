@@ -118,7 +118,11 @@ def consume_decision_outbox(limit=100):
                 case['evidence_refs']=sorted(set(case['evidence_refs']+event.get('evidence_refs',[])))
                 snapshot={**case,'revision':revision,'previous_revision':revision-1 or None,
                           'change_reason':'new_decision','decision':record,
-                          'budget':{'max_tool_calls':12,'max_tokens':12000,'max_graph_nodes':100,'max_knowledge_searches':3,'max_provider_calls':24},
+                          'budget':{'max_tool_calls':12,'max_tokens':12000,'max_graph_nodes':100,'max_knowledge_searches':3,'max_provider_calls':24,'max_scanned_rows':12000,
+                                    'max_input_bytes':96*1024*1024,'max_output_bytes':6*1024*1024,
+                                    'max_graph_nodes_total':1200,'max_graph_edges_total':24000,
+                                    'max_knowledge_rows':30000,'max_rerank_pairs':60,
+                                    'max_provider_input_bytes':128*1024,'max_provider_output_bytes':256*1024},
                           'allowed_tools':['account_profile','feature_stats','graph_relations','rule_eval',
                                            'search_risk_knowledge','get_event_evidence']}
                 from .evidence_snapshot import build
@@ -163,6 +167,7 @@ def run_task(task_id, context, *, agent_factory=None):
     with data_context(context):
         db=_db();token=uuid.uuid4().hex
         budget_context = None
+        ledger = None
         heartbeat = None
         try:
             db.execute('BEGIN IMMEDIATE')
@@ -318,14 +323,18 @@ def run_task(task_id, context, *, agent_factory=None):
             result['revision'] = snapshot.get('revision', 1)
             result['budget_ledger'] = ledger.usage()
             result['resource_ledger'] = ledger.resource_usage()
+            result['cost_ledger'] = ledger.cost_usage()
             ledger.commit_result(result)
             return result
         except BaseException as exc:
             db.rollback()
             status = ('interrupted' if type(exc).__name__ == 'AmbiguousExternalCall' else
                       'budget_stop' if isinstance(exc, PermissionError) and 'budget' in str(exc) else 'failed')
+            failure={'error':type(exc).__name__,'status':status}
+            if ledger is not None:
+                failure.update(budget_ledger=ledger.usage(),resource_ledger=ledger.resource_usage(),cost_ledger=ledger.cost_usage())
             changed=db.execute('UPDATE investigation_tasks SET status=?,result=?,lease_until=0 WHERE task_id=? AND lease_token=? AND lease_until>?',
-                       (status,json.dumps({'error':type(exc).__name__}),task_id,token,time.time())).rowcount
+                       (status,json.dumps(failure),task_id,token,time.time())).rowcount
             if changed:
                 db.execute('UPDATE investigation_runs SET status=? WHERE task_id=? AND worker_token=?',
                            (status,task_id,token))

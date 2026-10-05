@@ -157,6 +157,8 @@ def _load_json(path: Path):
         if path.name in files:
             if files[path.name] is None:
                 raise FileNotFoundError(path)
+            from ..resource_budget import read_value
+            read_value(files[path.name])
             return copy.deepcopy(files[path.name])
     with _cache_lock:
         try:
@@ -281,6 +283,8 @@ def load_events(*, limit=None, as_of_ts=None, window_seconds=None) -> List[Dict]
     snapshot = _event_snapshot.get()
     if snapshot is not None:
         rows = snapshot[1]
+        from ..resource_budget import read_rows
+        read_rows(rows)
     elif (data_dir()/"online.sqlite3").exists():
         import sqlite3
         from agent.tenancy import current_context

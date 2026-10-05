@@ -11,8 +11,8 @@ paid generators or embedding experiments were used.
 | 02 | HTTP returns after decision transaction; independent authenticated projector, transactional cursor/receipts and backlog metrics | Production throughput and restore/retention operations need deployment validation |
 | 03 | Immutable revision table, tasks per revision, bounded shared-device evidence snapshot, auxiliary file hashes, captured SDK evidence, verified knowledge archives | Historical versions of auxiliary files, full DetectorCatalog/feature/model manifests are not available in existing data; explicitly unverified |
 | 04 | Run attempts/epoch, token fencing, heartbeat/deadlines/retry cap, model/tool JSON step replay, stable private tokenizer salt, context binding | No claim of provider exactly-once; ambiguous calls interrupt. General sensitive-step human resume is not exposed; explicit new inference is separate |
-| 05 | Persistent reservation/actual/estimated receipts, idempotent settlement, generator/verifier/embedding accounting and disabled hidden generator retries | Durable tool/provider/search call receipts and pinned budget contracts added 2026-10-05; dollar pricing and cumulative scan/graph/byte ledgers remain separate |
-| 06 | JSON-schema argument checks before and after constraints, effective-argument audit, closed failures, lossless bounded SDK/RAG evidence views | Full field-dependency authorization graph, all-tool typed outputs and handle pagination remain future work; conservative untrusted→execute block remains |
+| 05 | Persistent reservation/actual/estimated receipts, idempotent settlement, generator/verifier/embedding accounting and disabled hidden generator retries | Durable call, logical row/byte, graph construction and reranker receipts; optional pinned operator price ceilings added 2026-10-05. Physical I/O, transport allocation and provider invoice reconciliation are not claimed |
+| 06 | JSON-schema argument checks before and after constraints, effective-argument audit, closed failures, lossless bounded SDK/RAG evidence views | Bounded field provenance and host-authorized exact-argument chart grants added; production untrusted→execute block remains. All-tool typed outputs and handle pagination remain future work |
 | 07 | Typed scalar observation checks for subject/value/unit/time/negation; workflow/evidence/eligibility separation; historical model verdicts labeled unconfirmed | General natural-language factual correctness and graph aggregation claims still require independent review |
 | 08 | Independent named consumer receipts/leases/DLQs; compatibility for legacy consumer; dirty-device batch shares scope rows and CommunityV1 graph | Immediate ingestion and temporal/shadow recomputation still have per-device work; no production latency benchmark |
 | 09 | Validated fixed DAG, role/tool/scope intersection, durable device/graph/business collection; bounded corrective counterevidence retrieval retained | No separately calibrated expert model ensemble or demonstrated multi-agent benefit |
@@ -73,3 +73,29 @@ is addressed. These explicit remaining items are part of the delivery record.
   verification, full resource/pricing accounting, broader tool contracts and
   independently calibrated expert models remain outside these verified changes.
   No production holdout or live-provider effectiveness result is claimed.
+
+
+## Follow-up: resource and evidence boundaries (2026-10-05)
+
+- New snapshots pin cumulative event/knowledge row, logical JSON byte, graph
+  construction, reranker-pair and provider JSON byte limits. Charges are applied
+  at the corresponding data/tool boundaries. Historical knowledge retrieval
+  reads the pinned archive without scanning an unrelated current generation.
+- Optional operator price ceilings are frozen with the snapshot. Reservations
+  and actual/estimated token settlement produce separately labeled upper-bound
+  costs; no configuration means `unpriced`, and no provider tariff is invented.
+- Optional RAG fallbacks propagate lease loss, budget stop and ambiguous calls.
+  Lost provider responses interrupt immediately while preserving reservations.
+- Field-level evidence digests survive trajectory replay. An authenticated host
+  may bind every chart argument to exact server-evidence fields, with scope and
+  expiry checks. Unknown/UGC fields cannot authorize; production writes cannot
+  use artifact grants. Dispatch rechecks constrained arguments. Chart filenames
+  are hashed and PNGs are atomically written under a serialized Agent-state lock.
+- Validation: all 22 existing regression commands and the RAG scorecard gate
+  passed. Unittest discovery: 31 checks, 30 passed and one host UID mapping skip.
+  No real provider calls or production data.
+- Remaining scope is explicit: universally typed tool outputs/pagination,
+  general sensitive-action resume, historical dependency manifests, graph-path
+  performance work and independent business/model effectiveness acceptance.
+  Resource byte counts are logical JSON counts; provider prices are configured
+  conservative bounds, not verified transport limits or invoices.

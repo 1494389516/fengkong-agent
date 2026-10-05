@@ -214,3 +214,61 @@ Legacy in-flight runs that already executed steps without resource receipts
 must use the explicit new-inference operation; their unknown prior resource
 usage cannot safely be reconstructed. Dollar pricing and cumulative database
 scan/graph/byte accounting remain separate from these call receipts.
+
+### Resource accounting and optional price ceilings
+
+New snapshots include cumulative limits for event rows inspected, knowledge rows
+loaded, JSON input/output bytes, graph nodes/edges constructed, reranker pairs,
+and provider request/response JSON bytes. Existing per-query and per-graph limits
+still apply. These receipts survive worker replacement; committed replay avoids
+performing and charging the work again. Counts represent **logical JSON work**,
+not physical SQLite pages, CPU cycles, HTTP headers or TLS traffic. Provider output
+bytes can only be checked once a response arrives; they are not a streaming
+transport-memory limit. Older immutable snapshots retain their existing contracts.
+
+Set `FK_INVESTIGATION_PRICING` on the **case projector** to a read-only operator
+configuration file. `deploy/investigation-pricing.example.json` describes the
+schema only; its numbers are **not actual provider prices** and are not enabled
+by default. With Compose, add the environment variable and a read-only mount of
+your reviewed file through a deployment override. Worker credentials do not
+need that file: the projector freezes the price contract in the snapshot.
+
+Prices are positive integer nano-USD per token (1 USD = 1,000,000,000 nano-USD).
+For each component, choose a conservative rate covering every permitted model,
+input/output token category and cache tier. Reservations check both token and
+price ceilings transactionally. Actual token usage releases unused reservation;
+missing usage retains a conservative estimate. `cost_ledger` explicitly labels
+these as operator price upper bounds, never verified invoices. Without a price
+contract it reports `unpriced`, not zero cost. Updating prices affects new
+snapshots; replay cannot swap the pinned price contract.
+
+Budget exhaustion, lost leases and ambiguous provider requests must reach the
+runtime even when an optional RAG evaluator/retriever normally falls back. A
+provider failure after request start is conservatively interrupted; no automatic
+retry assumes that the previous call was free. Failed tasks retain their token,
+resource and cost ledger summaries in the stored result.
+
+### Evidence-bound artifact authorization
+
+The trajectory now preserves bounded, scope-bound result/field digests. UGC
+fields remain `user_provided`; error results cannot provide authorizing fields.
+Audit envelopes include tool effect, input schema digest, effective argument hash,
+and any verified dependency digest.
+
+An authenticated **host integration**, not an Agent tool, can call
+`agent.tool_provenance.dispatch_authorized_artifact(context, tool, arguments,
+bindings, expires_at=...)`. It requires `artifacts.create`, an active
+`RequestScope` granting that tool, the existing explicit user intent, and an
+explicit isolated `FK_AGENT_STATE_ROOT`. `bindings` maps every argument JSON
+pointer to `{"ref": <trajectory evidence reference>, "path": <source pointer>}`.
+The source field must be server evidence with exactly the requested value.
+Obtain references from `governance.trajectory_snapshot()['evidence']`; do not
+accept client-supplied trust labels as references.
+
+Only the four existing regenerable chart tools support this exception to the
+run-wide untrusted-content block. Production mutations remain blocked. Grants
+expire, cannot cross principals/datasets/runs, and are invalid after changing an
+argument or its evidence. Dispatch checks the final constrained arguments again.
+The ordinary Agent/HTTP investigation path does not auto-mint these grants.
+Charts use an Agent-state lock and atomic, hashed-name PNG writes, without
+acquiring a write lock on the authoritative evidence volume.

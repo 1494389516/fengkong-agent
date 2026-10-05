@@ -108,6 +108,8 @@ def evaluate_report_entailment(report, support_material, *, evaluator=None):
         try:
             evaluator = configured_evaluator()
         except Exception as exc:
+            from agent.run_ledger import propagate_runtime_failure
+            propagate_runtime_failure(exc)
             return {"status": "evaluator_error", "claims": [],
                     "error": type(exc).__name__,
                     "semantic_entailment_verified": False, "grounding_gate": "REVIEW"}
@@ -149,6 +151,8 @@ def evaluate_report_entailment(report, support_material, *, evaluator=None):
                 blocking.append(index)
                 all_verified = False
         except Exception as exc:
+            from agent.run_ledger import propagate_runtime_failure
+            propagate_runtime_failure(exc)
             row.update(status="evaluator_error", error=type(exc).__name__,
                        semantic_entailment_verified=False)
             blocking.append(index)

@@ -61,6 +61,9 @@ def build(snapshot):
             files[name]=json.loads(raw)
         else:
             files[name]=None
+    from .investigation_pricing import configured
+    pricing=configured()
+    if pricing is not None:snapshot['budget']['pricing']=pricing
     snapshot['events']=rows
     snapshot['dependency_files']=files
     snapshot['evidence_scope']={'status':'partial' if partial else 'bounded', 'window_seconds':30*86400,

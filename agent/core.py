@@ -437,7 +437,13 @@ class Agent:
                 ledger.reserve(node, 'generator', prompt_bound + extra['max_tokens'], task['snapshot']['budget']['max_tokens'])
             saved = ledger.begin(node, 'llm', request) if ledger else None
             if saved is None:
-                resp = self.client.chat.completions.create(**request)
+                try:
+                    resp = self.client.chat.completions.create(**request)
+                except Exception as exc:
+                    if ledger:
+                        from .run_ledger import AmbiguousExternalCall
+                        raise AmbiguousExternalCall('generator response unavailable after request start') from exc
+                    raise
                 usage = _extract_usage(resp)
                 message = resp.choices[0].message
                 saved = {'usage':usage, 'content':message.content,
@@ -445,6 +451,7 @@ class Agent:
                 if ledger:
                     actual = usage['prompt'] + usage['completion'] if usage['prompt'] > 0 else None
                     ledger.complete(node, saved, receipt=node, actual=actual)
+                    ledger._check_cost('generator',0)
             else:
                 usage = saved['usage']
             from types import SimpleNamespace

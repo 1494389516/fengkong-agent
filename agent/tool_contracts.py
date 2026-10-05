@@ -13,7 +13,9 @@ class ToolDescriptor:
 
 
 def descriptor(name, schema, level):
+    from .tool_provenance import ARTIFACT_TOOLS
     effect={'read':'read','simulate':'analysis','propose':'proposal','execute':'state_mutation'}.get(level,'forbidden')
+    if name in ARTIFACT_TOOLS:effect='artifact'
     return ToolDescriptor(name,effect,digest(schema))
 
 

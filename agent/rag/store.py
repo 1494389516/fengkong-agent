@@ -166,7 +166,14 @@ def read_index():
         # One read transaction keeps metadata and chunks from the same generation.
         db.execute('BEGIN')
         meta = dict(db.execute('SELECT key,value FROM metadata'))
-        rows = [json.loads(r[0]) for r in db.execute('SELECT body FROM chunks ORDER BY chunk_id LIMIT ?', (MAX_CHUNKS + 1,))]
+        from agent.resource_budget import consume
+        rows=[]
+        cursor=db.execute('SELECT CASE WHEN length(CAST(body AS BLOB))<=1048576 THEN body ELSE NULL END '
+                          'FROM chunks ORDER BY chunk_id LIMIT ?', (MAX_CHUNKS + 1,))
+        while batch:=cursor.fetchmany(32):
+            if any(r[0] is None for r in batch):raise ValueError('knowledge row exceeds byte limit')
+            consume(knowledge_rows=len(batch),input_bytes=sum(len(r[0].encode()) for r in batch))
+            rows.extend(json.loads(r[0]) for r in batch)
     if len(rows) > MAX_CHUNKS:
         raise ValueError('index exceeds small-corpus budget')
     return meta, rows
@@ -222,8 +229,13 @@ def archived_index(expected_digest):
         raise ValueError('invalid archived knowledge digest')
     path=index_path().parent/'knowledge_archive'/(expected_digest+'.json')
     if path.stat().st_size>64*1024*1024:raise ValueError('archive exceeds byte budget')
-    value=json.loads(path.read_text())
+    from agent.resource_budget import consume
+    with path.open('rb') as handle:raw=handle.read(64*1024*1024+1)
+    if len(raw)>64*1024*1024:raise ValueError('archive exceeds byte budget')
+    consume(input_bytes=len(raw))
+    value=json.loads(raw)
     meta,rows=value['metadata'],value['chunks']
+    consume(knowledge_rows=len(rows))
     if len(rows)>MAX_CHUNKS or digest({'chunks':rows,'embedding_model':meta['embedding_model']})!=expected_digest:
         raise ValueError('archived knowledge contents changed')
     return meta,rows
@@ -283,7 +295,12 @@ def search(query, *, platform='', detector_ids=None, sdk_version='', as_of='', t
         raise ValueError('invalid detector_ids')
     requested_version = version(sdk_version) if sdk_version else None
     anchor = timestamp(as_of) if as_of else datetime.now(timezone.utc).timestamp()
-    meta, rows = read_index()
+    # A pinned archive must not pay for scanning an unrelated live generation.
+    meta=index_metadata()
+    if allow_archive and expected_digest and meta.get('index_digest','')!=expected_digest:
+        meta,rows=archived_index(expected_digest)
+    else:
+        meta,rows=read_index()
     if expected_digest is not None and meta.get('index_digest', '') != expected_digest:
         if allow_archive and expected_digest:
             try:
@@ -335,7 +352,9 @@ def search(query, *, platform='', detector_ids=None, sdk_version='', as_of='', t
             for rank, (i, _) in enumerate(semantic[:50], 1):
                 fused[i] = fused.get(i, 0) + 1 / (60 + rank)
             modes.append('vector')
-        except Exception:
+        except Exception as exc:
+            from agent.run_ledger import propagate_runtime_failure
+            propagate_runtime_failure(exc)
             warning = 'embedding unavailable or invalid; lexical retrieval only'
     elif embedder:
         warning = 'embedding model/index mismatch or empty corpus; lexical retrieval only'
@@ -355,6 +374,8 @@ def search(query, *, platform='', detector_ids=None, sdk_version='', as_of='', t
         try:
             pool = reranked[:20]
             passages = [embedding_text(eligible[i]) for i, _, _ in pool]
+            from agent.resource_budget import consume
+            consume(rerank_pairs=len(passages))
             ce_scores = reranker.score(query, passages)
             if len(ce_scores) != len(pool):
                 raise ValueError('cross-encoder score count mismatch')
@@ -372,7 +393,9 @@ def search(query, *, platform='', detector_ids=None, sdk_version='', as_of='', t
             final = sorted(combined,
                            key=lambda item: (-item[1], eligible[item[0]]['chunk_id']))
             modes.append('cross_encoder')
-        except Exception:
+        except Exception as exc:
+            from agent.run_ledger import propagate_runtime_failure
+            propagate_runtime_failure(exc)
             warning = (warning + '; ' if warning else '') + (
                 'cross-encoder unavailable or invalid; deterministic reranker only')
     hits = []

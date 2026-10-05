@@ -9,6 +9,7 @@ import sqlite3
 import time
 import uuid
 from .evidence_snapshot import digest
+from .resource_budget import ResourceBudgetExceeded
 
 class LeaseLost(RuntimeError): pass
 class AmbiguousExternalCall(RuntimeError): pass
@@ -61,6 +62,9 @@ class RunLedger:
 
     def configure_budget(self, budget):
         """Pin the complete server-owned contract across worker replacement."""
+        if 'pricing' in budget:
+            from .investigation_pricing import validate
+            validate(budget['pricing'])
         encoded=json.dumps(budget,sort_keys=True,allow_nan=False)
         for name,value in budget.items():
             if name.startswith('max_') and (type(value) is not int or value<=0):
@@ -84,7 +88,7 @@ class RunLedger:
         if limit is None:raise ValueError('resource budget not configured: '+resource)
         used=self.db.execute('SELECT COALESCE(SUM(amount),0) FROM resource_receipts WHERE task_id=? AND resource=?',
                             (self.task_id,resource)).fetchone()[0]
-        if used+amount>limit:raise PermissionError('persistent investigation resource budget exhausted: '+resource)
+        if used+amount>limit:raise ResourceBudgetExceeded('persistent investigation resource budget exhausted: '+resource)
         self.db.execute('INSERT INTO resource_receipts VALUES(?,?,?,?,?)',
                         (self.task_id,receipt,resource,amount,self.token))
 
@@ -94,6 +98,28 @@ class RunLedger:
     def resource_usage(self):
         return dict(self.db.execute('SELECT resource,SUM(amount) FROM resource_receipts WHERE task_id=? GROUP BY resource',
                                     (self.task_id,)))
+
+    def cost_usage(self):
+        pricing=self.budget_contract.get('pricing')
+        if pricing is None:return {'status':'unpriced','currency':'USD'}
+        rates=pricing['rates_nano_usd_per_token']
+        totals={'reserved_nano_usd':0,'usage_bound_nano_usd':0,'estimated_bound_nano_usd':0}
+        for component,reserved,actual,estimated in self.db.execute(
+                'SELECT component,reserved,actual_used,estimated_used FROM budget_receipts WHERE task_id=?',(self.task_id,)):
+            if component not in rates:raise ValueError('unpriced provider component')
+            for field,amount in zip(totals,(reserved,actual,estimated)):totals[field]+=amount*rates[component]
+        return dict(totals,status='operator_price_upper_bound',currency='USD',pricing_version=pricing['version'],
+                    max_cost_nano_usd=pricing['max_cost_nano_usd'],invoice_verified=False)
+
+    def _check_cost(self, component, maximum):
+        pricing=self.budget_contract.get('pricing')
+        if pricing is None:return
+        rates=pricing['rates_nano_usd_per_token']
+        if component not in rates:raise ValueError('unpriced provider component')
+        usage=self.cost_usage()
+        total=sum(usage[k] for k in ('reserved_nano_usd','usage_bound_nano_usd','estimated_bound_nano_usd'))
+        if total+maximum*rates[component]>pricing['max_cost_nano_usd']:
+            raise ResourceBudgetExceeded('persistent investigation cost budget exhausted')
 
     def reserve(self, receipt, component, maximum, limit):
         if type(maximum) is not int or maximum<=0 or type(limit) is not int or limit<=0: raise ValueError('invalid reservation')
@@ -108,9 +134,10 @@ class RunLedger:
             row=self.db.execute('SELECT status FROM budget_receipts WHERE task_id=? AND receipt_id=?',
                                 (self.task_id,receipt)).fetchone()
             if row: return
+            self._check_cost(component,maximum)
             used=self.db.execute('SELECT COALESCE(SUM(reserved+actual_used+estimated_used),0) FROM budget_receipts WHERE task_id=?',
                                  (self.task_id,)).fetchone()[0]
-            if used+maximum>limit: raise PermissionError('persistent investigation budget exhausted')
+            if used+maximum>limit: raise ResourceBudgetExceeded('persistent investigation budget exhausted')
             self.db.execute('INSERT INTO budget_receipts(task_id,receipt_id,component,reserved,status,worker_token) VALUES(?,?,?,?,?,?)',
                             (self.task_id,receipt,component,maximum,'reserved',self.token))
 
@@ -150,6 +177,9 @@ class RunLedger:
             else:
                 self.db.execute('INSERT INTO run_steps VALUES(?,?,?,?,?,?,?)',
                     (self.task_id,node,kind,fingerprint,'started',None,self.token))
+            if kind!='read_tool' and 'max_provider_input_bytes' in self.budget_contract:
+                from .resource_budget import json_bytes
+                self._charge_resource(node,'provider_input_bytes',json_bytes(inputs))
             resource='tool_calls' if kind=='read_tool' else 'provider_calls'
             if 'max_'+resource in self.budget_contract:
                 # Charge every attempted read, including an uncertain read retry.
@@ -164,6 +194,9 @@ class RunLedger:
     def complete(self, node, output, *, receipt=None, actual=None):
         encoded=json.dumps(output,ensure_ascii=False,allow_nan=False)
         with self.transaction():
+            kind=self.db.execute('SELECT kind FROM run_steps WHERE task_id=? AND node_id=?',(self.task_id,node)).fetchone()
+            if kind and kind[0]!='read_tool' and 'max_provider_output_bytes' in self.budget_contract:
+                self._charge_resource(node,'provider_output_bytes',len(encoded.encode()))
             changed=self.db.execute("UPDATE run_steps SET status='completed',output=? WHERE task_id=? AND node_id=? AND worker_token=? AND status='started'",
                                     (encoded,self.task_id,node,self.token)).rowcount
             if changed!=1: raise LeaseLost('step ownership lost')
@@ -195,9 +228,19 @@ def metered_call(component, inputs, maximum, invoke):
     cached = ledger.begin(node, component, inputs)
     if cached is not None:
         return cached['payload']
-    payload, actual = invoke()
+    try:
+        payload, actual = invoke()
+    except Exception as exc:
+        raise AmbiguousExternalCall('provider response unavailable after request start: '+component) from exc
     ledger.complete(node, {'payload':payload}, receipt=node, actual=actual)
     usage=ledger.usage()
+    ledger._check_cost(component,0)
     if sum(usage.values())>ledger.max_tokens:
-        raise PermissionError('persistent investigation budget exceeded after provider response')
+        raise ResourceBudgetExceeded('persistent investigation budget exceeded after provider response')
     return payload
+
+
+def propagate_runtime_failure(exc):
+    """Provider fallback cannot erase fencing, ambiguity or budget exhaustion."""
+    if _current.get() is not None and isinstance(exc,(LeaseLost,AmbiguousExternalCall,ResourceBudgetExceeded)):
+        raise exc

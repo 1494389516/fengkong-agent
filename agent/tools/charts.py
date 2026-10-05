@@ -82,12 +82,22 @@ def _t(zh: str, en: str) -> str:
 
 
 def _save(fig, filename: str) -> str:
-    from .datasource import output_dir
-    out = output_dir() / "charts"
+    from .datasource import agent_state_dir
+    import hashlib
+    # Identifiers in chart names must not be interpreted as filesystem paths.
+    filename=hashlib.sha256(filename.encode()).hexdigest()+'.png'
+    out = agent_state_dir() / "out" / "charts"
     out.mkdir(parents=True, exist_ok=True)
     path = out / filename
-    fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    import os,tempfile
+    fd,temporary=tempfile.mkstemp(prefix='chart-',suffix='.png',dir=out)
+    os.close(fd)
+    try:
+        fig.savefig(temporary, dpi=150, bbox_inches="tight")
+        os.replace(temporary,path)
+    finally:
+        plt.close(fig)
+        if os.path.exists(temporary):os.unlink(temporary)
     return str(path)
 
 

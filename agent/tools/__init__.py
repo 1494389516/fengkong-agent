@@ -126,6 +126,8 @@ def dispatch(name: str, arguments: Dict[str, Any], *, projection: bool = True) -
         validate_arguments(_REGISTRY[name]['parameters'], arguments)
         arguments = capability.constrain_investigation_tool(name, arguments)
         validate_arguments(_REGISTRY[name]['parameters'], arguments)
+        effective_decision=governance.decide(name,arguments,True)
+        if effective_decision.outcome!='allow':raise PermissionError(effective_decision.reason_code)
         governance.record_effective_arguments(name, arguments)
         from . import ask_state
         def _invoke():
@@ -138,7 +140,11 @@ def dispatch(name: str, arguments: Dict[str, Any], *, projection: bool = True) -
         # JSON 登记簿普遍采用读-改-原子覆盖。单有 atomic_write 只能防半截文件，
         # 不能防两个进程同时从旧版本出发后互相覆盖；所有写工具在整个调用周期
         # 持有同一把跨进程锁，人工审批也使用同一把锁。
-        if capability.level_of(name) in ("propose", "execute"):
+        from ..tool_provenance import ARTIFACT_TOOLS
+        if name in ARTIFACT_TOOLS:
+            from ..tool_provenance import artifact_lock
+            with artifact_lock():result=_invoke()
+        elif capability.level_of(name) in ("propose", "execute"):
             from .datasource import state_write_lock
             with state_write_lock():
                 # 进程若在人工审批中途崩溃，任何后续写工具都必须先恢复，
@@ -148,6 +154,8 @@ def dispatch(name: str, arguments: Dict[str, Any], *, projection: bool = True) -
                 result = _invoke()
         else:
             result = _invoke()
+        from ..resource_budget import consume, json_bytes
+        consume(output_bytes=json_bytes(result))
         governance.record_result(name, arguments, result)
         if not projection:
             return result
@@ -160,6 +168,10 @@ def dispatch(name: str, arguments: Dict[str, Any], *, projection: bool = True) -
         return ask_state.attach_speak(result)
     except Exception as e:  # noqa: BLE001
         governance.record_failure(name, arguments, type(e).__name__)
+        from ..run_ledger import propagate_runtime_failure
+        propagate_runtime_failure(e)
+        from ..resource_budget import ResourceBudgetExceeded
+        if isinstance(e, ResourceBudgetExceeded):raise
         return {"error": "%s: %s" % (type(e).__name__, e)}
 
 
