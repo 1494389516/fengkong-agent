@@ -16,7 +16,7 @@ from agent.case_review import review,detail,arbitrate,export_labels,training_lab
 class Arbitration(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
-        perms=['cases.read','cases.review','cases.arbitrate','cases.labels.export']
+        perms=['cases.run','cases.read','cases.review','cases.arbitrate','cases.labels.export']
         registry={hashlib.sha256(p.encode()).hexdigest():dict(principal=p,tenant='t',app='a',data_dir=self.tmp.name,
                     source_kind='operator',permissions=perms,expires_at=time.time()+300)
                   for p in ('r1','r2','arbiter','worker')}
@@ -39,6 +39,33 @@ class Arbitration(unittest.TestCase):
         state=detail(self.ctx['arbiter'],'task')['review_state']
         return dict(task_id='task',result_digest=digest(self.result),reviews_digest=state['reviews_digest'],
                     verdict='confirmed_risk',note='resolved using independent evidence',matures_at=0,request_id='a1')
+    def test_investigator_cannot_review_another_run_of_same_case(self):
+        with data_context(self.ctx['r1']):
+            db=_db()
+            db.execute('UPDATE investigation_tasks SET result=? WHERE task_id=?',
+                       (json.dumps(dict(self.result,investigator_principal='r1')),'other-run'))
+            db.commit();db.close()
+        with self.assertRaisesRegex(PermissionError,'independent reviewer'):
+            self.submit('r1','confirmed_risk')
+        self.submit('r2','confirmed_risk')
+
+    def test_new_run_updates_current_case_entry_only(self):
+        from agent.case_review import new_run
+        from agent.investigations import list_cases
+        with data_context(self.ctx['r1']):
+            db=_db()
+            for revision in (1,2):
+                snap=dict(case_id='c',revision=revision,snapshot_id='s'+str(revision))
+                db.execute('INSERT INTO case_revisions VALUES(?,?,?,?)',('c',revision,snap['snapshot_id'],json.dumps(snap)))
+            db.execute('UPDATE cases SET body=?', (json.dumps(dict(current_revision=2,task_id='current',entity_ref='u')),))
+            db.commit();db.close()
+        current=new_run(self.ctx['r1'],'c',2)
+        self.assertEqual(list_cases(self.ctx['r1'])[0]['task_id'],current['task_id'])
+        historical=new_run(self.ctx['r1'],'c',1)
+        self.assertNotEqual(historical['task_id'],current['task_id'])
+        self.assertEqual(list_cases(self.ctx['r1'])[0]['task_id'],current['task_id'])
+        self.assertEqual(detail(self.ctx['r1'],historical['task_id'])['snapshot']['revision'],1)
+
     def test_cross_run_conflict_and_arbitration(self):
         self.submit('r1','confirmed_risk');before=time.time()
         self.submit('r2','benign','other-run')

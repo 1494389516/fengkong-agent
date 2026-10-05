@@ -99,3 +99,7 @@ is addressed. These explicit remaining items are part of the delivery record.
   performance work and independent business/model effectiveness acceptance.
   Resource byte counts are logical JSON counts; provider prices are configured
   conservative bounds, not verified transport limits or invoices.
+
+### 2026-10-05：跨运行复核隔离与重跑入口
+
+两个新增回归用例先在旧实现失败，修复后通过：复核人独立性现在与仲裁一致，检查同案全部运行中的调查者，避免通过选择另一运行绕过隔离；显式新推理在事务内更新当前版本案件的 task_id，历史版本重跑保留当前入口。既有结果与复核历史不变。此变更不代表通用敏感步骤恢复或生产效果验收完成。

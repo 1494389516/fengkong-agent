@@ -52,7 +52,8 @@ def review(context,request):
             if digest(result)!=request['result_digest']:raise ValueError('result changed')
             if snapshot.get('revision',1)!=case.get('current_revision',1):raise ValueError('new evidence requires review of current revision')
             investigator=result.get('investigator_principal')
-            if not investigator or investigator==context.principal:raise PermissionError('independent reviewer required')
+            if not investigator or context.principal in _investigators(db,snapshot['case_id']):
+                raise PermissionError('independent reviewer required')
             body={'review_id':uuid.uuid4().hex,'tenant_id':context.tenant,'app_id':context.app,
                   'case_id':snapshot['case_id'],'revision':snapshot.get('revision',1),'snapshot_id':snapshot['snapshot_id'],
                   'task_id':request['task_id'],'result_digest':request['result_digest'],'reviewer':context.principal,
@@ -85,16 +86,27 @@ def new_run(context,case_id,revision):
         db=_db()
         try:
             db.execute('BEGIN IMMEDIATE')
-            row=db.execute('SELECT r.body FROM case_revisions r JOIN cases c ON c.case_id=r.case_id '
+            row=db.execute('SELECT r.body,c.body FROM case_revisions r JOIN cases c ON c.case_id=r.case_id '
                 'WHERE r.case_id=? AND r.revision=? AND c.tenant=? AND c.app=?',
                 (case_id,revision,context.tenant,context.app)).fetchone()
             if not row:raise PermissionError('revision outside authorized domain')
             task_id=uuid.uuid4().hex
             db.execute("INSERT INTO investigation_tasks(task_id,case_id,snapshot,status) VALUES(?,?,?,'queued')",
                        (task_id,case_id,row[0]))
+            case=json.loads(row[1])
+            if revision==case.get('current_revision',1):
+                case['task_id']=task_id
+                db.execute('UPDATE cases SET body=? WHERE case_id=?',(json.dumps(case),case_id))
             db.commit();return {'task_id':task_id,'mode':'new_inference','revision':revision}
         except BaseException:db.rollback();raise
         finally:db.close()
+
+
+def _investigators(db,case_id):
+    # Review decisions are combined across inference runs. Independence must
+    # therefore cover the case, not just the result selected in the workbench.
+    return {json.loads(raw).get('investigator_principal') for (raw,) in db.execute(
+        'SELECT result FROM investigation_tasks WHERE case_id=? AND result IS NOT NULL',(case_id,))}
 
 
 def _review_schema(db):
@@ -180,8 +192,7 @@ def arbitrate(context,request):
             if state['reviews_digest']!=request['reviews_digest']:raise ValueError('reviews changed')
             if not state['disputed']:raise ValueError('unresolved conflicting reviews required')
             participants={r['reviewer'] for r in state['reviews']}
-            for (raw,) in db.execute('SELECT result FROM investigation_tasks WHERE case_id=? AND result IS NOT NULL',(snapshot['case_id'],)):
-                participants.add(json.loads(raw).get('investigator_principal'))
+            participants.update(_investigators(db,snapshot['case_id']))
             if context.principal in participants:raise PermissionError('independent arbiter required')
             body={'arbitration_id':uuid.uuid4().hex,'case_id':snapshot['case_id'],'revision':snapshot.get('revision',1),
                   'tenant_id':context.tenant,'app_id':context.app,'task_id':request['task_id'],
