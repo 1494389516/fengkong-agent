@@ -452,6 +452,9 @@ class Agent:
                     actual = usage['prompt'] + usage['completion'] if usage['prompt'] > 0 else None
                     ledger.complete(node, saved, receipt=node, actual=actual)
                     ledger._check_cost('generator',0)
+                    if sum(ledger.usage().values())>task['snapshot']['budget']['max_tokens']:
+                        from .resource_budget import ResourceBudgetExceeded
+                        raise ResourceBudgetExceeded('persistent investigation token budget exceeded after response')
             else:
                 usage = saved['usage']
             from types import SimpleNamespace

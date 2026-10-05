@@ -92,7 +92,7 @@ is addressed. These explicit remaining items are part of the delivery record.
   use artifact grants. Dispatch rechecks constrained arguments. Chart filenames
   are hashed and PNGs are atomically written under a serialized Agent-state lock.
 - Validation: all 22 existing regression commands and the RAG scorecard gate
-  passed. Unittest discovery: 31 checks, 30 passed and one host UID mapping skip.
+  passed. Unittest discovery: 32 checks, 31 passed and one host UID mapping skip.
   No real provider calls or production data.
 - Remaining scope is explicit: universally typed tool outputs/pagination,
   general sensitive-action resume, historical dependency manifests, graph-path

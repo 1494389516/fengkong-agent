@@ -39,6 +39,17 @@ class Resources(unittest.TestCase):
                                           {'k':{'text':'premise'}},evaluator=E())
         finally:_current.reset(token)
 
+    def test_generator_overreported_usage_includes_other_components(self):
+        from eval.token_budget_regressions import fake_agent
+        from agent.tools.capability import investigation_constraints
+        ledger=RunLedger(self.db,'t','A')
+        ledger.reserve('embedding-prior','embedding',1000,12000);ledger.settle('embedding-prior',1000)
+        agent=fake_agent([(11500,0)],60000);agent._run_ledger=ledger
+        snapshot={'budget':dict(max_tokens=12000,max_tool_calls=12,max_graph_nodes=100)}
+        with patch('agent.core.tools.schemas',return_value=[]),investigation_constraints(snapshot):
+            with self.assertRaises(ResourceBudgetExceeded):agent.ask('investigate')
+        self.assertEqual(ledger.usage()['actual_used'],12500)
+
     def test_unknown_provider_response_interrupts_and_retains_reservation(self):
         from agent.run_ledger import metered_call,AmbiguousExternalCall
         ledger=RunLedger(self.db,'t','A');ledger.max_tokens=12000
