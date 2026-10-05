@@ -44,6 +44,8 @@ class Provenance(unittest.TestCase):
                     with authorize_arguments(context,'chart_account_timeline',args,bindings,expires_at=time.time()+60):pass
 
     def test_chart_name_cannot_escape_state(self):
+        from agent.tool_provenance import leaves
+        self.assertEqual(dict(leaves({1:'value',False:'boolean'})),{'/1':'value','/false':'boolean'})
         from agent.tools.charts import _save,plt
         with tempfile.TemporaryDirectory() as root,patch.dict(os.environ,{'FK_DATA_DIR':root+'/evidence','FK_AGENT_STATE_ROOT':root+'/state'}):
             path=Path(_save(plt.figure(),'../../escaped.png'))

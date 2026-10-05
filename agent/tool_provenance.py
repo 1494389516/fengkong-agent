@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 import math
+import json
 import os
 import threading
 import time
@@ -24,6 +25,7 @@ def artifact_lock():
 def leaves(value,path=''):
     if isinstance(value,dict):
         for key,item in value.items():
+            key=key if isinstance(key,str) else json.dumps(key,allow_nan=False)
             yield from leaves(item,path+'/'+key.replace('~','~0').replace('/','~1'))
     elif isinstance(value,list):
         for index,item in enumerate(value):yield from leaves(item,path+'/'+str(index))
