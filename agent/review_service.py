@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse,parse_qs
 from .tenancy import authenticate
-from .case_review import detail,review
+from .case_review import detail,review,arbitrate,export_labels
 from .investigations import list_cases
 
 class Handler(BaseHTTPRequestHandler):
@@ -35,11 +35,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             ctx=authenticate(self.headers.get('Authorization'))
-            if self.path!='/api/reviews':return self.send(404,{'error':'not_found'})
+            if self.path not in ('/api/reviews','/api/arbitrations','/api/labels/export'):return self.send(404,{'error':'not_found'})
             length=int(self.headers.get('Content-Length','0'))
             if not 0<length<=16384:raise ValueError('body limit')
             request=json.loads(self.rfile.read(length))
-            self.send(200,review(ctx,request))
+            if self.path=='/api/labels/export':
+                if not isinstance(request,dict) or set(request)!={'as_of'}:raise ValueError('invalid export contract')
+                return self.send(200,export_labels(ctx,request['as_of']))
+            self.send(200,(arbitrate if self.path=='/api/arbitrations' else review)(ctx,request))
         except PermissionError:self.send(403,{'error':'forbidden'})
         except (ValueError,KeyError,TypeError):self.send(400,{'error':'invalid_or_stale_review'})
 

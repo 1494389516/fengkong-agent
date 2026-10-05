@@ -118,7 +118,7 @@ def consume_decision_outbox(limit=100):
                 case['evidence_refs']=sorted(set(case['evidence_refs']+event.get('evidence_refs',[])))
                 snapshot={**case,'revision':revision,'previous_revision':revision-1 or None,
                           'change_reason':'new_decision','decision':record,
-                          'budget':{'max_tool_calls':12,'max_tokens':12000,'max_graph_nodes':100,'max_knowledge_searches':3},
+                          'budget':{'max_tool_calls':12,'max_tokens':12000,'max_graph_nodes':100,'max_knowledge_searches':3,'max_provider_calls':24},
                           'allowed_tools':['account_profile','feature_stats','graph_relations','rule_eval',
                                            'search_risk_knowledge','get_event_evidence']}
                 from .evidence_snapshot import build
@@ -194,6 +194,7 @@ def run_task(task_id, context, *, agent_factory=None):
             heartbeat.start()
             from .run_ledger import RunLedger
             ledger = RunLedger(db, task_id, token)
+            ledger.configure_budget(snapshot['budget'])
             ledger.max_tokens = snapshot['budget']['max_tokens']
             from .run_ledger import _current
             budget_context = _current.set(ledger)
@@ -316,6 +317,7 @@ def run_task(task_id, context, *, agent_factory=None):
             result['case_id'] = snapshot['case_id']
             result['revision'] = snapshot.get('revision', 1)
             result['budget_ledger'] = ledger.usage()
+            result['resource_ledger'] = ledger.resource_usage()
             ledger.commit_result(result)
             return result
         except BaseException as exc:

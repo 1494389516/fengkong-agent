@@ -1,6 +1,6 @@
 # Prepared stacked pull requests
 
-Target repository: `1494389516/fengkong-agent`. Remote push was blocked by automatic approval review; these are prepared local changes, not opened PRs.
+Target repository: `1494389516/fengkong-agent`. The user subsequently authorized direct main delivery. All 12 stages were uploaded to main on 2026-10-04, ending at `5d0ecf0ec1596ee326e8df765e0a609d774ee8a3`; no PRs were opened. The hashes below describe the original local staging history, whose trees match the uploaded commits.
 
 ## 01-storage-contract: 部署与状态隔离
 

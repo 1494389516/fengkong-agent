@@ -42,7 +42,10 @@ def validate_chain(chain,scope=None):
     if scope is not None and p.get('scope')!=scope:raise ValueError('artifact scope mismatch')
     if p.get('conclusion_digest')!=digest(c) or p.get('evaluation_digest')!=digest(e):raise ValueError('artifact binding mismatch')
     if c.get('review_digest')!=digest(r) or c.get('result_digest')!=r.get('result_digest'):raise ValueError('review binding mismatch')
-    if r.get('verdict') not in ('confirmed_risk','benign') or r.get('label_source')!='human_review':raise ValueError('review required')
+    if r.get('verdict') not in ('confirmed_risk','benign') or r.get('label_source') not in ('human_review','human_arbitration') or r.get('disputed',False):raise ValueError('uncontested review required')
+    for key in ('case_id','revision','snapshot_id'):
+        if c.get(key)!=r.get(key):raise ValueError('review revision mismatch')
+    if p.get('candidate_id')!=(e.get('candidate') or {}).get('candidate_id'):raise ValueError('candidate identity mismatch')
     if e.get('candidate_digest')!=digest(e.get('candidate')) or p.get('ast')!=(e.get('candidate') or {}).get('ast'):
         raise ValueError('candidate AST/evaluation mismatch')
     if not isinstance(p.get('ast'),dict) or not e.get('mining_sha256'):raise ValueError('evaluated candidate required')
@@ -53,7 +56,8 @@ def main():
     import json,os,sys
     from pathlib import Path
     from .tenancy import authenticate,data_context
-    from .case_review import detail
+    from .case_review import detail,_review_state,eligible_label
+    import time
     from .investigations import _db
     from .tools.rule_mining import verify_snapshot
     from .tools.shadow_store import artifacts_dir
@@ -65,10 +69,14 @@ def main():
     with data_context(ctx):
         db=_db(readonly=True)
         try:
-            row=db.execute('SELECT body FROM case_reviews WHERE review_id=? AND task_id=?',
-                (request['review_id'],request['task_id'])).fetchone()
-            if not row:raise PermissionError('review outside task')
-            review=json.loads(row[0])
+            db.execute('BEGIN')
+            current=db.execute('SELECT body FROM cases WHERE case_id=?',(task['snapshot']['case_id'],)).fetchone()
+            if json.loads(current[0]).get('current_revision',1)!=task['snapshot'].get('revision',1):raise ValueError('current revision required')
+            state=_review_state(db,task['snapshot'])
+            review=state['effective_label']
+            if review is None or not eligible_label(review,time.time()):raise ValueError('mature uncontested review required')
+            if request['review_id']!=review.get('review_id',review.get('arbitration_id')):raise ValueError('effective review required')
+            if review['task_id']!=request['task_id']:raise ValueError('review belongs to another inference result')
         finally:db.close()
         path=Path(request['mining_ref']['path']).resolve()
         if artifacts_dir().resolve() not in path.parents:raise PermissionError('artifact outside authorized workspace')

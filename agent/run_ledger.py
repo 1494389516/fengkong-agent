@@ -23,6 +23,13 @@ class RunLedger:
             PRIMARY KEY(task_id,node_id));
           CREATE TABLE IF NOT EXISTS run_contracts(
             task_id TEXT PRIMARY KEY, privacy_salt TEXT NOT NULL, created_at REAL);
+          CREATE TABLE IF NOT EXISTS budget_contracts(task_id TEXT PRIMARY KEY, body TEXT);
+          CREATE TABLE IF NOT EXISTS reservation_contracts(
+            task_id TEXT, receipt_id TEXT, component TEXT, maximum INTEGER, ceiling INTEGER,
+            PRIMARY KEY(task_id,receipt_id));
+          CREATE TABLE IF NOT EXISTS resource_receipts(
+            task_id TEXT, receipt_id TEXT, resource TEXT, amount INTEGER, worker_token TEXT,
+            PRIMARY KEY(task_id,receipt_id,resource));
           CREATE TABLE IF NOT EXISTS budget_receipts(
             task_id TEXT, receipt_id TEXT, component TEXT, reserved INTEGER,
             actual_used INTEGER DEFAULT 0, estimated_used INTEGER DEFAULT 0,
@@ -31,6 +38,8 @@ class RunLedger:
         with self.transaction():
             db.execute('INSERT OR IGNORE INTO run_contracts VALUES(?,?,?)',
                        (task_id, uuid.uuid4().hex, time.time()))
+        row=db.execute('SELECT body FROM budget_contracts WHERE task_id=?',(task_id,)).fetchone()
+        self.budget_contract=json.loads(row[0]) if row else {}
         self.privacy_salt=db.execute('SELECT privacy_salt FROM run_contracts WHERE task_id=?',(task_id,)).fetchone()[0]
 
     @contextmanager
@@ -50,9 +59,52 @@ class RunLedger:
         if not row or row[0]!='running' or row[1]!=self.token or row[2]<=time.time():
             raise LeaseLost('worker fencing token expired or replaced')
 
-    def reserve(self, receipt, component, maximum, limit):
-        if type(maximum) is not int or maximum<=0: raise ValueError('invalid reservation')
+    def configure_budget(self, budget):
+        """Pin the complete server-owned contract across worker replacement."""
+        encoded=json.dumps(budget,sort_keys=True,allow_nan=False)
+        for name,value in budget.items():
+            if name.startswith('max_') and (type(value) is not int or value<=0):
+                raise ValueError('positive integer budget required: '+name)
         with self.transaction():
+            row=self.db.execute('SELECT body FROM budget_contracts WHERE task_id=?',(self.task_id,)).fetchone()
+            if row and json.loads(row[0])!=budget:raise ValueError('budget contract changed; create a new run')
+            if not row and self.db.execute('SELECT 1 FROM run_steps WHERE task_id=? LIMIT 1',(self.task_id,)).fetchone():
+                raise AmbiguousExternalCall('legacy run lacks resource receipts; create a new run')
+            self.db.execute('INSERT OR IGNORE INTO budget_contracts VALUES(?,?)',(self.task_id,encoded))
+        self.budget_contract=json.loads(encoded)
+
+    def _charge_resource(self, receipt, resource, amount):
+        if type(amount) is not int or amount<0:raise ValueError('invalid resource amount')
+        old=self.db.execute('SELECT amount FROM resource_receipts WHERE task_id=? AND receipt_id=? AND resource=?',
+                            (self.task_id,receipt,resource)).fetchone()
+        if old:
+            if old[0]!=amount:raise ValueError('resource receipt changed')
+            return
+        limit=self.budget_contract.get('max_'+resource)
+        if limit is None:raise ValueError('resource budget not configured: '+resource)
+        used=self.db.execute('SELECT COALESCE(SUM(amount),0) FROM resource_receipts WHERE task_id=? AND resource=?',
+                            (self.task_id,resource)).fetchone()[0]
+        if used+amount>limit:raise PermissionError('persistent investigation resource budget exhausted: '+resource)
+        self.db.execute('INSERT INTO resource_receipts VALUES(?,?,?,?,?)',
+                        (self.task_id,receipt,resource,amount,self.token))
+
+    def charge_resource(self, receipt, resource, amount):
+        with self.transaction():self._charge_resource(receipt,resource,amount)
+
+    def resource_usage(self):
+        return dict(self.db.execute('SELECT resource,SUM(amount) FROM resource_receipts WHERE task_id=? GROUP BY resource',
+                                    (self.task_id,)))
+
+    def reserve(self, receipt, component, maximum, limit):
+        if type(maximum) is not int or maximum<=0 or type(limit) is not int or limit<=0: raise ValueError('invalid reservation')
+        with self.transaction():
+            pinned=self.budget_contract.get('max_tokens',limit)
+            if limit!=pinned:raise ValueError('token budget contract changed')
+            contract=self.db.execute('SELECT component,maximum,ceiling FROM reservation_contracts WHERE task_id=? AND receipt_id=?',
+                                     (self.task_id,receipt)).fetchone()
+            if contract and contract!=(component,maximum,limit):raise ValueError('reservation contract changed')
+            self.db.execute('INSERT OR IGNORE INTO reservation_contracts VALUES(?,?,?,?,?)',
+                            (self.task_id,receipt,component,maximum,limit))
             row=self.db.execute('SELECT status FROM budget_receipts WHERE task_id=? AND receipt_id=?',
                                 (self.task_id,receipt)).fetchone()
             if row: return
@@ -67,11 +119,14 @@ class RunLedger:
             self._settle(receipt,actual)
 
     def _settle(self, receipt, actual):
-        row=self.db.execute('SELECT reserved,status FROM budget_receipts WHERE task_id=? AND receipt_id=?',
+        row=self.db.execute('SELECT reserved,status,actual_used,estimated_used FROM budget_receipts WHERE task_id=? AND receipt_id=?',
                             (self.task_id,receipt)).fetchone()
         if not row: raise ValueError('unknown reservation')
-        if row[1]=='settled': return
         if actual is not None and (type(actual) is not int or actual<0): raise ValueError('invalid provider usage')
+        if row[1]=='settled':
+            if (actual is None and row[3]==0) or (actual is not None and (row[2]!=actual or row[3]!=0)):
+                raise ValueError('settlement changed')
+            return
         self.db.execute('UPDATE budget_receipts SET reserved=0,actual_used=?,estimated_used=?,status=?,worker_token=? '
                         'WHERE task_id=? AND receipt_id=?',
                         (actual or 0, row[0] if actual is None else 0,'settled',self.token,self.task_id,receipt))
@@ -95,6 +150,15 @@ class RunLedger:
             else:
                 self.db.execute('INSERT INTO run_steps VALUES(?,?,?,?,?,?,?)',
                     (self.task_id,node,kind,fingerprint,'started',None,self.token))
+            resource='tool_calls' if kind=='read_tool' else 'provider_calls'
+            if 'max_'+resource in self.budget_contract:
+                # Charge every attempted read, including an uncertain read retry.
+                # Completed-step replay returned above and is free.
+                attempt=node+':'+uuid.uuid4().hex
+                self._charge_resource(attempt,resource,1)
+                if kind=='read_tool' and (inputs.get('name') or inputs.get('tool'))=='search_risk_knowledge':
+                    if 'max_knowledge_searches' in self.budget_contract:
+                        self._charge_resource(attempt,'knowledge_searches',1)
         return None
 
     def complete(self, node, output, *, receipt=None, actual=None):

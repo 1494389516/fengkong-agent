@@ -162,3 +162,55 @@ Transfer the resulting content-addressed chain to the controller as the bundle's
 `investigation_provenance`. Controller and publisher validate its bindings;
 existing validation, independent approval, canary, capacity and signature gates
 still apply. This does not compile arbitrary model code into executable policy.
+
+### Review conflicts, arbitration and training-label export
+
+Reviews of **all inference runs for the same case revision** participate in one
+review set. Conflicting verdicts block label export. `GET /api/case` exposes
+`review_state`, including `reviews_digest`, conflicts and any effective resolution.
+The workbench now offers arbitration when a conflict exists. Issue a separate,
+short-lived identity with `cases.read` and `cases.arbitrate`; the original
+investigator and participating reviewers cannot arbitrate their own case.
+
+`POST /api/arbitrations` accepts `task_id`, `result_digest`, `reviews_digest`,
+`verdict`, `note`, `matures_at`, and `request_id`. The service binds its decision
+to the exact review set and current revision. Any subsequent review invalidates
+that resolution. Review and arbitration records are append-only. Retrying the
+same request ID with the same content returns the original record; changed
+content is rejected.
+
+A separate `cases.labels.export` permission authorizes
+`POST /api/labels/export` with `{"as_of": <Unix timestamp>}`. The cutoff cannot
+be in the future. Only current revisions, mature labels and resolved review
+sets qualify. An unresolved or immature case blocks that entity, even if another
+case has an eligible label. Conflicting labels across cases also block export.
+
+For a versioned file suitable for an explicit downstream training input:
+
+```sh
+# Supply FK_LABEL_EXPORT_TOKEN through the deployment secret mechanism.
+python -m agent.review_labels --as-of 1791158400
+```
+
+This writes a content-addressed JSON dataset under Agent state. Consumers call
+`agent.case_review.training_labels(bundle, tenant, app)` to validate the digest,
+scope, maturity and per-row provenance before using its labels. This is an
+opt-in adapter: it does not overwrite `labels.json`, automatically retrain a
+model, or add human-review labels to an independent gold holdout. Content hashes
+detect changed exports; they do not authenticate files from an untrusted sender.
+
+Strategy artifact export now requires the effective mature uncontested review
+(or arbitration ID in `review_id`) for the current revision and the requested
+inference result. It rejects stale, superseded, disputed and immature reviews.
+
+### Persistent call budgets
+
+New cases pin `max_provider_calls=24` together with token, tool and knowledge
+search limits. Every attempted tool/provider step consumes a durable receipt;
+a completed-step replay consumes none. A read interrupted before commit charges
+again when retried, so a restart cannot reset its tool allowance. A changed
+budget contract, reservation component/ceiling or settlement is rejected.
+Legacy in-flight runs that already executed steps without resource receipts
+must use the explicit new-inference operation; their unknown prior resource
+usage cannot safely be reconstructed. Dollar pricing and cumulative database
+scan/graph/byte accounting remain separate from these call receipts.

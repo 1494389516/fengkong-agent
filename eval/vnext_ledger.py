@@ -33,6 +33,29 @@ class LedgerContracts(unittest.TestCase):
         self.assertEqual(b.usage()['estimated_used'],8000)
         with self.assertRaises(PermissionError):b.reserve('llm:2','generator',3000,12000)
 
+    def test_resource_retries_and_budget_contract_survive_replacement(self):
+        from agent.run_ledger import RunLedger
+        a=RunLedger(self.db,'t','A')
+        budget=dict(max_tokens=12000,max_tool_calls=2,max_provider_calls=1)
+        a.configure_budget(budget)
+        a.begin('read','read_tool',{'name':'get_event_evidence'})
+        self.db.execute("UPDATE investigation_tasks SET lease_token='B'");self.db.commit()
+        b=RunLedger(self.db,'t','B');b.configure_budget(budget)
+        b.begin('read','read_tool',{'name':'get_event_evidence'})
+        b.complete('read',{'value':1})
+        self.assertEqual(b.begin('read','read_tool',{'name':'get_event_evidence'}),{'value':1})
+        self.assertEqual(b.resource_usage(),{'tool_calls':2})
+        with self.assertRaises(PermissionError):b.begin('extra','read_tool',{})
+        self.assertIsNone(self.db.execute("SELECT node_id FROM run_steps WHERE node_id='extra'").fetchone())
+        with self.assertRaises(ValueError):b.configure_budget(dict(budget,max_tool_calls=3))
+        b.reserve('model','generator',8000,12000)
+        with self.assertRaises(ValueError):b.reserve('model','verifier',8000,12000)
+        with self.assertRaises(ValueError):b.reserve('new','generator',1,24000)
+        b.settle('model',1500)
+        with self.assertRaises(ValueError):b.settle('model',0)
+        b.begin('llm','llm',{});b.complete('llm',{'text':'done'})
+        with self.assertRaises(PermissionError):b.begin('llm2','llm',{})
+
     def test_agent_replays_committed_tool_after_crash(self):
         from types import SimpleNamespace as NS
         from agent.run_ledger import RunLedger
