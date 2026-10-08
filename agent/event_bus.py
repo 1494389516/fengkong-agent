@@ -6,11 +6,25 @@ replace this adapter with Kafka/Pulsar without changing Collector or consumers.
 """
 from dataclasses import dataclass
 import json
+import math
 import sqlite3
 import time
 import uuid
 
 from .tools.online_store import connect
+
+
+def _lease_window(lease_seconds, now=None):
+    try:
+        if type(lease_seconds) not in (int, float) or not math.isfinite(lease_seconds) or lease_seconds <= 0:
+            raise ValueError("positive finite lease_seconds required")
+        anchor = time.time() if now is None else float(now)
+        deadline = anchor + lease_seconds
+        if not math.isfinite(anchor) or not math.isfinite(deadline) or deadline <= anchor:
+            raise ValueError("finite advancing lease deadline required")
+        return anchor, deadline
+    except OverflowError as exc:
+        raise ValueError("lease value out of range") from exc
 
 
 @dataclass(frozen=True)
@@ -96,11 +110,9 @@ class LocalEventBus:
         self._validate_limit(limit)
         if not isinstance(topic,str) or not topic:
             raise ValueError("topic must be a non-empty string")
-        if type(lease_seconds) not in (int,float) or lease_seconds <= 0:
-            raise ValueError("positive lease_seconds required")
         if type(max_attempts) is not int or max_attempts < 1:
             raise ValueError("positive max_attempts required")
-        anchor=time.time() if now is None else float(now)
+        anchor,deadline=_lease_window(lease_seconds,now)
         db=connect()
         try:
             self._ensure(db)
@@ -126,7 +138,7 @@ class LocalEventBus:
                     SET attempts=?,lease_token=?,lease_until=?,last_error=NULL
                     WHERE event_id=? AND published=0
                       AND (lease_until IS NULL OR lease_until<=?)""",
-                    (attempts,token,anchor+float(lease_seconds),row[0],anchor)).rowcount
+                    (attempts,token,deadline,row[0],anchor)).rowcount
                 if changed:
                     claimed.append(ClaimedEvent(
                         row[0],row[1],row[2],json.loads(row[3]),row[4],token,attempts))
@@ -135,6 +147,28 @@ class LocalEventBus:
         except BaseException:
             db.rollback()
             raise
+        finally:
+            db.close()
+
+    def renew(self, event_id, lease_token, *, lease_seconds=30, now=None):
+        """Extend only a live, owned lease; never resurrect an expired token."""
+        if not lease_token:
+            raise ValueError("lease_token required")
+        anchor, deadline = _lease_window(lease_seconds, now)
+        grouped = isinstance(self, ConsumerGroupBus)
+        table = 'integration_receipts' if grouped else 'integration_events'
+        group_filter = ' AND consumer_group=?' if grouped else ''
+        params = [deadline, event_id, lease_token, anchor]
+        if grouped:
+            params.append(self.group)
+        db = connect()
+        try:
+            self._ensure(db)
+            changed = db.execute('UPDATE ' + table + ' SET lease_until=MAX(lease_until,?) '
+                'WHERE event_id=? AND lease_token=? AND lease_until>? AND published=0' + group_filter,
+                params).rowcount
+            db.commit()
+            return changed == 1
         finally:
             db.close()
 
@@ -270,20 +304,18 @@ class ConsumerGroupBus(LocalEventBus):
                    'SELECT ?,event_id FROM integration_events WHERE topic=?',(self.group,topic))
 
     def claim(self,topic,*,limit=100,lease_seconds=30,max_attempts=5,now=None):
-        import math
         self._validate_limit(limit)
         if not isinstance(topic,str) or not topic:raise ValueError('topic required')
-        if type(lease_seconds) not in (int,float) or not math.isfinite(lease_seconds) or lease_seconds<=0:raise ValueError('invalid lease')
         if type(max_attempts) is not int or max_attempts<1:raise ValueError('invalid max attempts')
-        anchor=time.time() if now is None else float(now)
-        if not math.isfinite(anchor):raise ValueError('invalid anchor')
+        anchor,deadline=_lease_window(lease_seconds,now)
         db=connect()
         try:
             self._ensure(db);db.commit();db.execute('BEGIN IMMEDIATE')
             self._receipts(db,topic)
             db.execute("UPDATE integration_receipts SET published=-1,last_error=COALESCE(last_error,'max_attempts_exhausted') "
-                'WHERE consumer_group=? AND published=0 AND attempts>=? AND (lease_until IS NULL OR lease_until<=?)',
-                (self.group,max_attempts,anchor))
+                'WHERE consumer_group=? AND published=0 AND attempts>=? AND (lease_until IS NULL OR lease_until<=?) '
+                'AND event_id IN (SELECT event_id FROM integration_events WHERE topic=?)',
+                (self.group,max_attempts,anchor,topic))
             rows=db.execute('SELECT e.event_id,e.topic,e.event_key,e.payload,e.created_at,r.attempts '
                 'FROM integration_events e JOIN integration_receipts r ON r.event_id=e.event_id '
                 'WHERE r.consumer_group=? AND e.topic=? AND r.published=0 AND r.attempts<? '
@@ -293,7 +325,7 @@ class ConsumerGroupBus(LocalEventBus):
             for row in rows:
                 token=uuid.uuid4().hex
                 db.execute('UPDATE integration_receipts SET attempts=attempts+1,lease_token=?,lease_until=?,last_error=NULL '
-                           'WHERE consumer_group=? AND event_id=?',(token,anchor+lease_seconds,self.group,row[0]))
+                           'WHERE consumer_group=? AND event_id=?',(token,deadline,self.group,row[0]))
                 result.append(ClaimedEvent(row[0],row[1],row[2],json.loads(row[3]),row[4],token,row[5]+1))
             db.commit();return result
         except BaseException:

@@ -36,17 +36,18 @@ def ingest_observation(observation):
     # a crash can leave a feature pending, but cannot expose an obsolete one as fresh.
     with file_lock(data_dir()/".graph_projection"):
         store=graph_store()
-        affected=set(store.devices_for_uid(tenant,app,observation.get("uid")))
-        affected.add(device)
-        online_feature_store().invalidate_devices(tenant,app,affected)
+        # Community membership and bounded snapshots can change beyond one UID.
+        # Persist refresh work before invalidating; never serve stale scope features.
+        store.mark_scope_dirty(tenant,app)
+        online_feature_store().invalidate_scope(tenant,app)
         try:
             store.append(observation)
-            store.mark_dirty(tenant,app,affected-{device})
+            store.mark_dirty(tenant,app,{device})
             result=_recompute_device(tenant,app,*device)
             store.clear_dirty(tenant,app,*device)
             return result
         except BaseException:
-            online_feature_store().invalidate_devices(tenant,app,affected)
+            online_feature_store().invalidate_scope(tenant,app)
             raise
 
 
@@ -129,15 +130,26 @@ def lookup(tenant,app,device_id,generation,*,connection=None,max_age=MAX_FEATURE
 
 def consume_pending(*,limit=100):
     from .event_bus import event_bus
+    from .lease_guard import keep_lease, LeaseLost
     bus=event_bus();processed=0;failed=[]
-    for event in bus.claim("risk.evidence.accepted",limit=limit,lease_seconds=30,max_attempts=5):
+    bus._validate_limit(limit)
+    for _ in range(limit):
+        # Claim just in time: waiting behind other events must not spend a lease.
+        batch=bus.claim("risk.evidence.accepted",limit=1,lease_seconds=30,max_attempts=5)
+        if not batch: break
+        event=batch[0]
         try:
-            ingest_observation(event.payload)
-            if bus.acknowledge(event.event_id,event.lease_token):processed+=1
+            with keep_lease(bus,event):
+                ingest_observation(event.payload)
+            if not bus.acknowledge(event.event_id,event.lease_token):
+                raise LeaseLost("acknowledgement rejected")
+            processed+=1
         except Exception as exc:
             bus.fail(event.event_id,event.lease_token,type(exc).__name__,max_attempts=5)
             failed.append({"event_id":event.event_id,"error":type(exc).__name__,
                            "attempts":event.attempts})
+            # Do not burn all retries of the same failing event in one drain.
+            break
     refresh=refresh_dirty_devices(limit=limit)
     failed.extend(refresh["failed"])
     return {"processed":processed,"refreshed":refresh["refreshed"],"failed":failed}
