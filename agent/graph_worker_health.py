@@ -17,12 +17,17 @@ def _path():
 
 def write_heartbeat(consume_result,bus_stats,*,now=None):
     stamp=time.time() if now is None else float(now)
+    from .graph_store import graph_store
+    from .online_feature_store import online_feature_store
+    projection={**graph_store().dirty_stats(now=stamp),
+                **online_feature_store().availability_stats(now=stamp)}
     payload={
         "updated_at":stamp,
         "topic":TOPIC,
         "processed":int(consume_result.get("processed",0)),
         "failed":len(consume_result.get("failed") or []),
         "bus":dict(bus_stats),
+        "projection":projection,
     }
     atomic_write_json(_path(),payload)
     return payload
@@ -50,11 +55,22 @@ def read_health(*,max_age_seconds=10.0,max_backlog_age_seconds=60.0,now=None):
         level="degraded";reasons.append("backlog_old")
     if dead>0:
         level="degraded";reasons.append("dead_letters_present")
+    projection=payload.get('projection')
+    if projection is None:
+        level="degraded";reasons.append("projection_status_missing")
+    else:
+        if projection.get('pending',0)>0:
+            level="degraded";reasons.append("projection_refresh_pending")
+        if projection.get('unavailable',0)>0:
+            level="degraded";reasons.append("projection_unavailable")
+    if payload.get('failed',0)>0:
+        level="degraded";reasons.append("worker_failures")
     return {
         "level":level,
         "reason":",".join(reasons) if reasons else "healthy",
         "heartbeat_age_seconds":round(age,3),
         "bus":bus,
+        "projection":projection,
         "processed":payload.get("processed",0),
         "failed":payload.get("failed",0),
         "path":str(p),
