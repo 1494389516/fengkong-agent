@@ -15,8 +15,46 @@ def _path():
     return data_dir()/"out"/"graph_worker_health.json"
 
 
+def _number(value):
+    if type(value) not in (int,float) or value<0 or not math.isfinite(value):
+        raise ValueError('nonnegative finite number required')
+    return value
+
+
+def _count(value):
+    if type(value) is not int or value<0:
+        raise ValueError('nonnegative integer required')
+    return value
+
+
+def _validate(payload):
+    """Validate before defaults, coercions or comparisons can hide missing data."""
+    if not isinstance(payload,dict) or payload['topic']!=TOPIC:
+        raise ValueError('invalid heartbeat')
+    _number(payload['updated_at'])
+    for key in ('processed','failed'):
+        _count(payload[key])
+    bus=payload['bus'];projection=payload['projection']
+    if not isinstance(bus,dict) or not isinstance(projection,dict):
+        raise ValueError('invalid telemetry objects')
+    for key in ('pending','ready','leased','dead_letters','max_attempts'):
+        _count(bus[key])
+    _number(bus['oldest_pending_age_seconds'])
+    if bus['pending']!=bus['ready']+bus['leased']:
+        raise ValueError('inconsistent bus counts')
+    for key in ('pending','total','available','unavailable'):
+        _count(projection[key])
+    _number(projection['oldest_pending_age_seconds'])
+    ratio=_number(projection['availability'])
+    if projection['total']!=projection['available']+projection['unavailable']:
+        raise ValueError('inconsistent projection counts')
+    expected=projection['available']/projection['total'] if projection['total'] else 1.0
+    if ratio>1 or not math.isclose(ratio,expected,rel_tol=1e-9,abs_tol=1e-12):
+        raise ValueError('inconsistent availability')
+
+
 def write_heartbeat(consume_result,bus_stats,*,now=None):
-    stamp=time.time() if now is None else float(now)
+    stamp=_number(time.time() if now is None else now)
     from .graph_store import graph_store
     from .online_feature_store import online_feature_store
     projection={**graph_store().dirty_stats(now=stamp),
@@ -24,29 +62,43 @@ def write_heartbeat(consume_result,bus_stats,*,now=None):
     payload={
         "updated_at":stamp,
         "topic":TOPIC,
-        "processed":int(consume_result.get("processed",0)),
+        "processed":_count(consume_result["processed"]),
         "failed":len(consume_result.get("failed") or []),
         "bus":dict(bus_stats),
         "projection":projection,
     }
+    _validate(payload)
     atomic_write_json(_path(),payload)
     return payload
 
 
 def read_health(*,max_age_seconds=10.0,max_backlog_age_seconds=60.0,now=None):
-    anchor=time.time() if now is None else float(now)
     p=_path()
-    if not p.exists():
-        return {"level":"degraded","reason":"heartbeat_missing","path":str(p)}
+    def degraded(reason):
+        return {"level":"degraded","reason":reason,"path":str(p)}
     try:
-        payload=json.loads(p.read_text(encoding="utf-8"))
-        updated=float(payload["updated_at"])
-        bus=payload.get("bus") or {}
-    except Exception:
-        return {"level":"degraded","reason":"heartbeat_invalid","path":str(p)}
-    age=max(0.0,anchor-updated)
-    backlog_age=float(bus.get("oldest_pending_age_seconds") or 0.0)
-    dead=int(bus.get("dead_letters") or 0)
+        anchor=_number(time.time() if now is None else now)
+        _number(max_age_seconds);_number(max_backlog_age_seconds)
+    except (ValueError,TypeError,OverflowError):
+        return degraded('health_config_invalid')
+    try:
+        with p.open('rb') as handle:
+            raw=handle.read(65537)
+        if len(raw)>65536:
+            raise ValueError('heartbeat exceeds size budget')
+        payload=json.loads(raw)
+        _validate(payload)
+        updated=payload['updated_at']
+        bus=payload['bus']
+    except FileNotFoundError:
+        return degraded('heartbeat_missing')
+    except (OSError,ValueError,TypeError,KeyError,OverflowError,RecursionError):
+        return degraded('heartbeat_invalid')
+    if updated>anchor:
+        return degraded('heartbeat_future')
+    age=anchor-updated
+    backlog_age=bus['oldest_pending_age_seconds']
+    dead=bus['dead_letters']
     level="ok"
     reasons=[]
     if not math.isfinite(age) or age>max_age_seconds:
@@ -55,15 +107,12 @@ def read_health(*,max_age_seconds=10.0,max_backlog_age_seconds=60.0,now=None):
         level="degraded";reasons.append("backlog_old")
     if dead>0:
         level="degraded";reasons.append("dead_letters_present")
-    projection=payload.get('projection')
-    if projection is None:
-        level="degraded";reasons.append("projection_status_missing")
-    else:
-        if projection.get('pending',0)>0:
-            level="degraded";reasons.append("projection_refresh_pending")
-        if projection.get('unavailable',0)>0:
-            level="degraded";reasons.append("projection_unavailable")
-    if payload.get('failed',0)>0:
+    projection=payload['projection']
+    if projection['pending']>0:
+        level="degraded";reasons.append("projection_refresh_pending")
+    if projection['unavailable']>0:
+        level="degraded";reasons.append("projection_unavailable")
+    if payload['failed']>0:
         level="degraded";reasons.append("worker_failures")
     return {
         "level":level,
@@ -71,7 +120,7 @@ def read_health(*,max_age_seconds=10.0,max_backlog_age_seconds=60.0,now=None):
         "heartbeat_age_seconds":round(age,3),
         "bus":bus,
         "projection":projection,
-        "processed":payload.get("processed",0),
-        "failed":payload.get("failed",0),
+        "processed":payload["processed"],
+        "failed":payload["failed"],
         "path":str(p),
     }
