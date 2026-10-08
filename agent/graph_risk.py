@@ -8,7 +8,7 @@ import math
 import os
 import time
 
-from .graph_algorithms import graph_algorithm, MAX_ROWS
+from .graph_algorithms import graph_algorithm, MAX_ROWS, MAX_NODES
 from .graph_store import graph_store
 from .online_feature_store import online_feature_store
 from .tools.datasource import data_dir, file_lock
@@ -20,6 +20,37 @@ MAX_FEATURE_AGE_SECONDS=300
 
 def _finite(value):
     return type(value) in (int,float) and math.isfinite(value)
+
+
+def _affected_devices(store, observation):
+    """Bounded dependency closure; None means snapshot-wide invalidation required."""
+    # Temporal weights depend on the scope clock even in disconnected components.
+    if os.environ.get('FK_GRAPH_ALGORITHM','community_v1') != 'community_v1' or os.environ.get('FK_GRAPH_SHADOW_ALGORITHM','').strip() not in ('','community_v1'):
+        return None
+    tenant,app=observation['tenant_id'],observation['app_id']
+    anchor=max(store.latest_recorded_at(tenant,app) or observation['recorded_at'],observation['recorded_at'])
+    rows,truncated=store.scope_rows(tenant,app,anchor,limit=MAX_ROWS)
+    if truncated or len(rows)>=MAX_ROWS:
+        return None  # Insertion/eviction can alter other components of the bounded view.
+    edges={}
+    def add(device,generation,uid):
+        d=('device',device,generation)
+        edges.setdefault(d,set())
+        if uid:
+            u=('uid',uid)
+            edges.setdefault(u,set()).add(d);edges[d].add(u)
+    for _,uid,device,generation,_,_,_ in rows:
+        add(device,generation,uid)
+    add(observation['device_id'],observation['entity_generation'],observation.get('uid'))
+    if len(edges)>=MAX_NODES:
+        return None  # Node-budget eviction is also scope-wide.
+    target=('device',observation['device_id'],observation['entity_generation'])
+    seen={target};pending=[target]
+    while pending:
+        node=pending.pop()
+        for neighbor in edges[node]-seen:
+            seen.add(neighbor);pending.append(neighbor)
+    return {(n[1],n[2]) for n in seen if n[0]=='device'}
 
 
 def ingest_observation(observation):
@@ -36,10 +67,18 @@ def ingest_observation(observation):
     # a crash can leave a feature pending, but cannot expose an obsolete one as fresh.
     with file_lock(data_dir()/".graph_projection"):
         store=graph_store()
-        # Community membership and bounded snapshots can change beyond one UID.
-        # Persist refresh work before invalidating; never serve stale scope features.
-        store.mark_scope_dirty(tenant,app)
-        online_feature_store().invalidate_scope(tenant,app)
+        affected=_affected_devices(store,observation)
+        # Queue work before invalidation; retries preserve the original queue age.
+        def invalidate():
+            if affected is None:
+                online_feature_store().invalidate_scope(tenant,app)
+            else:
+                online_feature_store().invalidate_devices(tenant,app,affected)
+        if affected is None:
+            store.mark_scope_dirty(tenant,app)
+        else:
+            store.mark_dirty(tenant,app,affected)
+        invalidate()
         try:
             store.append(observation)
             store.mark_dirty(tenant,app,{device})
@@ -47,7 +86,7 @@ def ingest_observation(observation):
             store.clear_dirty(tenant,app,*device)
             return result
         except BaseException:
-            online_feature_store().invalidate_scope(tenant,app)
+            invalidate()
             raise
 
 
@@ -105,6 +144,7 @@ def refresh_dirty_devices(*,limit=100):
                 results=algorithm.compute_many(rows,targets,truncated=truncated,as_of=anchor)
             except Exception as exc:
                 online_feature_store().invalidate_devices(tenant,app,targets)
+                store.defer_dirty(tenant,app,targets)
                 failed.extend({'device_id':device,'error':type(exc).__name__,'phase':'graph_refresh'} for device,_ in targets)
                 continue
             for device,generation in targets:
@@ -115,6 +155,7 @@ def refresh_dirty_devices(*,limit=100):
                     refreshed+=1
                 except Exception as exc:
                     online_feature_store().invalidate_devices(tenant,app,[(device,generation)])
+                    store.defer_dirty(tenant,app,[(device,generation)])
                     failed.append({'device_id':device,'error':type(exc).__name__,'phase':'graph_refresh'})
     return {"refreshed":refreshed,"failed":failed}
 

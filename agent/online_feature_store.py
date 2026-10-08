@@ -45,6 +45,18 @@ class SQLiteOnlineFeatureStore:
             return result
         finally:db.close()
 
+    def availability_stats(self,*,now=None,max_age=300):
+        anchor=time.time() if now is None else now
+        db=self.connect()
+        try:
+            total,available=db.execute("""SELECT COUNT(*),COALESCE(SUM(CASE
+                WHEN computed_at>0 AND computed_at>=? AND COALESCE(json_extract(body,'$.truncated'),0)=0
+                THEN 1 ELSE 0 END),0) FROM entity_features WHERE entity_type='device'
+                AND feature_set='graph_risk_v1'""",(anchor-max_age,)).fetchone()
+            return {'total':total,'available':available,'unavailable':total-available,
+                    'availability':available/total if total else 1.0}
+        finally: db.close()
+
     def invalidate_scope(self,tenant,app):
         db=self.connect()
         try:

@@ -5,6 +5,7 @@ the online decision/event authority. A production graph database can replace thi
 adapter without changing graph algorithms or Decision enrichment.
 """
 import sqlite3
+import time
 from .tools.datasource import data_dir
 
 
@@ -31,6 +32,15 @@ class SQLiteGraphStore:
           entity_generation TEXT NOT NULL,
           PRIMARY KEY(tenant,app,device_id,entity_generation));
         """)
+        columns={r[1] for r in db.execute('PRAGMA table_info(dirty_devices)')}
+        for name in ('dirty_since','scheduled_at'):
+            if name not in columns:
+                try:
+                    db.execute('ALTER TABLE dirty_devices ADD COLUMN '+name+' REAL NOT NULL DEFAULT 0')
+                except sqlite3.OperationalError:
+                    if name not in {r[1] for r in db.execute('PRAGMA table_info(dirty_devices)')}:
+                        raise
+        db.execute('CREATE INDEX IF NOT EXISTS dirty_queue ON dirty_devices(scheduled_at)')
         return db
 
     def append(self,observation):
@@ -75,8 +85,9 @@ class SQLiteGraphStore:
         db=self.connect()
         try:
             db.execute("""INSERT OR IGNORE INTO dirty_devices
-                SELECT DISTINCT tenant,app,device_id,entity_generation
-                FROM observations WHERE tenant=? AND app=?""",(tenant,app))
+                (tenant,app,device_id,entity_generation,dirty_since,scheduled_at)
+                SELECT DISTINCT tenant,app,device_id,entity_generation,?,?
+                FROM observations WHERE tenant=? AND app=?""",(time.time(),time.time(),tenant,app))
             db.commit()
         finally: db.close()
 
@@ -85,8 +96,10 @@ class SQLiteGraphStore:
             return
         db=self.connect()
         try:
-            db.executemany("""INSERT OR IGNORE INTO dirty_devices VALUES (?,?,?,?)""",
-                           ((tenant,app,device,generation) for device,generation in devices))
+            now=time.time()
+            db.executemany("""INSERT OR IGNORE INTO dirty_devices
+                (tenant,app,device_id,entity_generation,dirty_since,scheduled_at) VALUES (?,?,?,?,?,?)""",
+                           ((tenant,app,device,generation,now,now) for device,generation in sorted(devices)))
             db.commit()
         finally: db.close()
 
@@ -94,8 +107,25 @@ class SQLiteGraphStore:
         db=self.connect()
         try:
             return db.execute("""SELECT tenant,app,device_id,entity_generation
-                FROM dirty_devices ORDER BY tenant,app,device_id,entity_generation LIMIT ?""",
+                FROM dirty_devices ORDER BY scheduled_at,rowid LIMIT ?""",
                 (limit,)).fetchall()
+        finally: db.close()
+
+    def defer_dirty(self,tenant,app,devices):
+        db=self.connect()
+        try:
+            db.executemany("""UPDATE dirty_devices SET scheduled_at=?
+                WHERE tenant=? AND app=? AND device_id=? AND entity_generation=?""",
+                ((time.time(),tenant,app,d,g) for d,g in devices))
+            db.commit()
+        finally: db.close()
+
+    def dirty_stats(self,*,now=None):
+        db=self.connect()
+        try:
+            count,oldest=db.execute('SELECT COUNT(*),MIN(dirty_since) FROM dirty_devices').fetchone()
+            anchor=time.time() if now is None else now
+            return {'pending':count,'oldest_pending_age_seconds':max(0,anchor-oldest) if count else 0}
         finally: db.close()
 
     def clear_dirty(self,tenant,app,device,generation):
