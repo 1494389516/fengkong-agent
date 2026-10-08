@@ -70,6 +70,16 @@ class SQLiteGraphStore:
                 WHERE tenant=? AND app=? AND uid=?""",(tenant,app,uid)).fetchall()
         finally: db.close()
 
+    def mark_scope_dirty(self,tenant,app):
+        """Conservative dependency closure, persisted without loading all rows."""
+        db=self.connect()
+        try:
+            db.execute("""INSERT OR IGNORE INTO dirty_devices
+                SELECT DISTINCT tenant,app,device_id,entity_generation
+                FROM observations WHERE tenant=? AND app=?""",(tenant,app))
+            db.commit()
+        finally: db.close()
+
     def mark_dirty(self,tenant,app,devices):
         if not devices:
             return

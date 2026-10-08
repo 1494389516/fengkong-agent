@@ -45,6 +45,15 @@ class SQLiteOnlineFeatureStore:
             return result
         finally:db.close()
 
+    def invalidate_scope(self,tenant,app):
+        db=self.connect()
+        try:
+            db.execute("""UPDATE entity_features SET computed_at=0
+                WHERE tenant=? AND app=? AND entity_type='device'
+                AND feature_set IN ('graph_risk_v1','graph_risk_shadow_v1')""",(tenant,app))
+            db.commit()
+        finally: db.close()
+
     def invalidate_devices(self,tenant,app,devices):
         if not devices:
             return
