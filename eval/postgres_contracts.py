@@ -150,6 +150,15 @@ class PostgresContracts(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'fencing'):
                 online_feature_store().put(self.tenant,'a','device','d','g','graph_risk_v1',{'algorithm':'community_v1'})
             with self.assertRaisesRegex(RuntimeError,'fencing'):graph_store().clear_dirty(self.tenant,'a','d','g')
+            with self.assertRaisesRegex(RuntimeError,'fencing'):
+                graph_store().append(dict(observation,evidence_id='zombie'))
+            with self.assertRaisesRegex(RuntimeError,'fencing'):
+                online_feature_store().invalidate_devices(self.tenant,'a',[('d','g')])
+            with self.assertRaisesRegex(RuntimeError,'fencing'):
+                graph_store().mark_dirty(self.tenant,'a',[('d','g')])
+        self.assertIsNotNone(graph_risk.lookup(self.tenant,'a','d','g'))
+        with closing(connect('graph')) as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM observations WHERE evidence_id='zombie'").fetchone())
 
     def test_transactional_sqlite_import_bytes_and_replay(self):
         import psycopg

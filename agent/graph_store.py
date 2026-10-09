@@ -6,6 +6,7 @@ from .storage import postgres, begin_write, local_schema, table_names, order_col
 import sqlite3
 import time
 from .tools.datasource import data_dir
+from .storage import guard_projection
 
 
 class SQLiteGraphStore:
@@ -48,6 +49,8 @@ class SQLiteGraphStore:
     def append(self,observation):
         db=self.connect()
         try:
+            begin_write(db)
+            guard_projection(db)
             db.execute('INSERT INTO observations VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING',
               (observation["evidence_id"],observation["tenant_id"],observation["app_id"],
                observation.get("uid"),observation["device_id"],observation["entity_generation"],
@@ -86,6 +89,8 @@ class SQLiteGraphStore:
         """Conservative dependency closure, persisted without loading all rows."""
         db=self.connect()
         try:
+            begin_write(db)
+            guard_projection(db)
             db.execute('INSERT INTO dirty_devices\n                (tenant,app,device_id,entity_generation,dirty_since,scheduled_at)\n                SELECT DISTINCT tenant,app,device_id,entity_generation,?,?\n                FROM observations WHERE tenant=? AND app=? ON CONFLICT DO NOTHING',(time.time(),time.time(),tenant,app))
             db.commit()
         finally: db.close()
@@ -95,6 +100,8 @@ class SQLiteGraphStore:
             return
         db=self.connect()
         try:
+            begin_write(db)
+            guard_projection(db)
             now=time.time()
             db.executemany('INSERT INTO dirty_devices\n                (tenant,app,device_id,entity_generation,dirty_since,scheduled_at) VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING',
                            ((tenant,app,device,generation,now,now) for device,generation in sorted(devices)))
@@ -112,6 +119,8 @@ class SQLiteGraphStore:
     def defer_dirty(self,tenant,app,devices):
         db=self.connect()
         try:
+            begin_write(db)
+            guard_projection(db)
             db.executemany("""UPDATE dirty_devices SET scheduled_at=?
                 WHERE tenant=? AND app=? AND device_id=? AND entity_generation=?""",
                 ((time.time(),tenant,app,d,g) for d,g in devices))
@@ -129,7 +138,6 @@ class SQLiteGraphStore:
     def clear_dirty(self,tenant,app,device,generation):
         db=self.connect()
         try:
-            from .storage import guard_projection
             begin_write(db)
             guard_projection(db)
             db.execute("""DELETE FROM dirty_devices WHERE tenant=? AND app=?

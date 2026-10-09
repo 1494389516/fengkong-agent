@@ -117,6 +117,8 @@ class SQLiteOnlineFeatureStore:
     def invalidate_scope(self,tenant,app):
         db=self.connect()
         try:
+            begin_write(db)
+            guard_projection(db)
             db.execute("""UPDATE entity_features SET refresh_pending=1
                 WHERE tenant=? AND app=? AND entity_type='device'
                 AND feature_set IN ('graph_risk_v1','graph_risk_shadow_v1')""",(tenant,app))
@@ -128,6 +130,8 @@ class SQLiteOnlineFeatureStore:
             return
         db=self.connect()
         try:
+            begin_write(db)
+            guard_projection(db)
             db.executemany("""UPDATE entity_features SET refresh_pending=1
                 WHERE tenant=? AND app=? AND entity_type='device'
                   AND entity_id=? AND generation=? AND feature_set IN (?,?)""",
