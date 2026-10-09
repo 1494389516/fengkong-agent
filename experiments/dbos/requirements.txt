@@ -1,2 +1,0 @@
-# Isolated experiment; intentionally absent from runtime requirements.
-dbos==2.31.1

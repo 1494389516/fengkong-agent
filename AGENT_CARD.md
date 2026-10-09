@@ -1,8 +1,7 @@
 # AGENT_CARD — 风控分析 Agent 系统档案
 
 > 本文件是系统的对外档案:它是什么、能做什么、受哪些纪律约束、当前评估状态。
-> 「## 当前评估指标」一节的数字由报告生成器自动刷新:
-> `python3 eval/report.py` 或 `python3 eval/run_eval.py --report out/eval_report.md`。
+> 测试代码和报告生成器已于 2026-10-09 移除。以下历史评估记录不代表当前分支的测试覆盖。
 
 ## 1. 定位
 
@@ -55,7 +54,7 @@
 - 手工样本:6 账号故事线(正常对照 / 刷券 bot / 套现团伙 / 老号被盗),eval 的确定性基线
 - 生成器 `data/gen_sample.py`:约 250 账号、五类欺诈模式,同种子可复现
 - 数据集切换:`FK_DATASET=gen` / `FK_DATA_DIR=/path`
-- 标注纪律:`data/labeling_sop.md` + `eval/label_quality.py` 质量门禁
+- 标注纪律:`data/labeling_sop.md` + 运行时 `label_quality_proxy` 质量摘要
   (冲突清单只交人复核,绝不自动改标签)
 
 ## 4. 纪律(军规,按优先级)
@@ -70,7 +69,7 @@
 6. **注入防线**:用户内容 `⟦⟧` 标记 + 安全纪律,越权话术在评估判负
 7. **成本预算**:schema / system / 单工具结果 / 每案例 token 四级硬预算
 
-## 4.1 模型评估(champion,自动刷新)
+## 4.1 模型评估(champion,历史模板)
 
 | 指标 | 值 |
 |---|---|
@@ -78,7 +77,7 @@
 | auc / ks | {{MODEL_AUC}} / {{MODEL_KS}} |
 | 评估样本数 | {{MODEL_SAMPLE}} |
 
-## 5. 当前评估指标(自动刷新)
+## 5. 历史评估指标(2026-08-20)
 
 | 指标 | 值 |
 |---|---|
@@ -90,8 +89,7 @@
 | system prompt | 5636 chars(预算 5700) |
 | 最近刷新(UTC) | 2026-08-20T10:10:27Z |
 
-> 完整评估报告:`python3 eval/run_eval.py --offline --report out/eval_report.md`
-> 案例库账本:`eval/cases_changelog.md`(24 个黄金案例,含红队与唯一引擎纪律)。
+> 原报告生成器和案例库可从 Git 历史恢复。
 
 ## 6. 已知边界(诚实声明)
 

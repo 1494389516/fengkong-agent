@@ -24,10 +24,10 @@
 4. **回填**:labels.json 追加/修正,修改必须更新文件头 `_comment` 的
    变更说明(日期 + 理由)。
 
-## 3. 质量门禁(每轮 CI 强制)
+## 3. 质量复核
 
-- `python3 eval/label_quality.py`:
-  - 枚举违规(非 fraud/normal)→ **硬失败**,阻断评估;
+- 复核标签枚举与规则冲突（原离线检查脚本已移除）：
+  - 枚举违规(非 fraud/normal)应阻断评估;
   - 规则-标签冲突清单 → 输出警告,**只交人复核,绝不自动改**:
     - `label_normal_but_flagged`:规则说该拦、标签说正常 —— 要么是
       误伤实锤(应走申诉核实,修正标签),要么是标签漏标;
@@ -39,12 +39,11 @@
 - 申诉核实成立(`appeal_resolve` 批准"误伤成立")→ 系统**自动修正**
   该账号标签并沉淀 `postmortems.jsonl` —— 这是标签回填的 normal 方向,
   代码路径已存在,人工只做审批;
-- `postmortems.jsonl` 是"误伤守卫"用例的草稿来源
-  (`eval/postmortem_to_cases.py`),标签质量最终反哺案例库。
+- `postmortems.jsonl` 保留误伤复盘记录,供分析师复核并改进标签质量。
 
 ## 5. 变更记录规则
 
 - labels.json 的任何修改必须:① 带 `note` 说明证据;② 更新 `_comment`
-  变更段;③ 跑一遍 label_quality.py 确认无新冲突;
+  变更段;③ 复核标签枚举和规则冲突;
 - 禁止批量"补全"标签(把未标注悄悄改成 normal)—— 那会把"不知道"
   伪装成"知道",coverage 数字好看了,评估却开始撒谎。

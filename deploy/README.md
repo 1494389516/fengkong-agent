@@ -124,7 +124,7 @@ Provision `projector-auth.json` (`cases.project`), `investigator-auth.json`
 `reviewer-auth.json` (`cases.read`, `cases.review`) as separate identities.
 All bind the same tenant/app evidence domain. Do not give the investigator
 reviewer/release privileges. State directories must be owned by the deployment
-UID, not world-writable (the CI fixture alone uses disposable writable folders).
+UID, not world-writable.
 
 For an installation with legacy cases in `online.sqlite3`, stop old investigation
 workers and run `python -m agent.migrate_investigations` with projector credentials
