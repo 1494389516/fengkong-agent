@@ -77,7 +77,7 @@ def read_health(*,max_age_seconds=10.0,max_backlog_age_seconds=60.0,now=None):
     def degraded(reason):
         return {"level":"degraded","reason":reason,"path":str(p)}
     try:
-        anchor=_number(time.time() if now is None else now)
+        anchor=None if now is None else _number(now)
         _number(max_age_seconds);_number(max_backlog_age_seconds)
     except (ValueError,TypeError,OverflowError):
         return degraded('health_config_invalid')
@@ -94,6 +94,13 @@ def read_health(*,max_age_seconds=10.0,max_backlog_age_seconds=60.0,now=None):
         return degraded('heartbeat_missing')
     except (OSError,ValueError,TypeError,KeyError,OverflowError,RecursionError):
         return degraded('heartbeat_invalid')
+    # Sample after I/O: an atomic replacement can be newer than probe start,
+    # and time spent blocked reading must count toward heartbeat staleness.
+    if now is None:
+        try:
+            anchor=_number(time.time())
+        except (ValueError,TypeError,OverflowError):
+            return degraded('health_config_invalid')
     if updated>anchor:
         return degraded('heartbeat_future')
     age=anchor-updated
