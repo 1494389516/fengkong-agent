@@ -97,8 +97,11 @@ class RunLedger:
         with self.transaction():self._charge_resource(receipt,resource,amount)
 
     def resource_usage(self):
-        return dict(self.db.execute('SELECT resource,SUM(amount) FROM resource_receipts WHERE task_id=? GROUP BY resource',
-                                    (self.task_id,)))
+        # PostgreSQL SUM(bigint) returns numeric/Decimal. These are exact integer
+        # counters; normalize without a float conversion before JSON persistence.
+        return {resource:int(amount) for resource,amount in self.db.execute(
+            'SELECT resource,SUM(amount) FROM resource_receipts WHERE task_id=? GROUP BY resource',
+            (self.task_id,))}
 
     def cost_usage(self):
         pricing=self.budget_contract.get('pricing')
@@ -162,7 +165,7 @@ class RunLedger:
     def usage(self):
         row=self.db.execute('SELECT COALESCE(SUM(reserved),0),COALESCE(SUM(actual_used),0),COALESCE(SUM(estimated_used),0) '
                             'FROM budget_receipts WHERE task_id=?',(self.task_id,)).fetchone()
-        return dict(zip(('reserved','actual_used','estimated_used'),row))
+        return dict(zip(('reserved','actual_used','estimated_used'),map(int,row)))
 
     def begin(self, node, kind, inputs):
         fingerprint=digest(inputs)

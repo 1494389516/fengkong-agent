@@ -1,10 +1,10 @@
-from .storage import order_column
 """Bounded, structured memory for repeated risk investigations.
 
 Memory is reconstructed from prior durable tasks in the same tenant/app/entity
 scope. Raw LLM summaries and claim prose are intentionally excluded so previous
 generated text cannot become instructions in a later investigation.
 """
+from .storage import order_column
 import json
 import math
 

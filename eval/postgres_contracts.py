@@ -264,5 +264,28 @@ class PostgresContracts(unittest.TestCase):
         self.assertEqual(index_metadata()['index_digest'],'fixture')
         self.assertEqual(read_index()[1][0]['chunk_id'],'chunk')
 
+    def test_failed_shadow_publication_preserves_revision_and_expiry(self):
+        from agent.online_feature_store import online_feature_store
+        store=online_feature_store();key=(self.tenant,'a','device','D','g')
+        store.put(*key,'graph_risk_v1',{'algorithm':'community_v1'},computed_at=1000)
+        old=store.get(*key,'graph_risk_v1',now=1001)
+        with self.assertRaises(ValueError):
+            store.put_many(*key,{'graph_risk_v1':{'value':'new'},'graph_risk_shadow_v1':{'value':float('nan')}},computed_at=1001)
+        self.assertEqual(store.get(*key,'graph_risk_v1',now=1001),old)
+        store.invalidate_devices(self.tenant,'a',[('D','g')])
+        self.assertEqual(store.get(*key,'graph_risk_v1',now=1300,max_age=300,allow_previous=True)['feature_revision'],old['feature_revision'])
+        self.assertIsNone(store.get(*key,'graph_risk_v1',now=1300.01,max_age=300,allow_previous=True))
+
+    def test_expired_queue_owner_cannot_renew_or_finish(self):
+        from agent.event_bus import event_bus
+        for bus in (event_bus(),event_bus('independent')):
+            event=bus.publish('expiry',uuid.uuid4().hex,{})
+            old=bus.claim('expiry',limit=1,lease_seconds=1,now=time.time()-100)[0]
+            self.assertFalse(bus.renew(old.event_id,old.lease_token))
+            self.assertFalse(bus.acknowledge(old.event_id,old.lease_token))
+            current=bus.claim('expiry',limit=1)[0]
+            self.assertNotEqual(current.lease_token,old.lease_token)
+            self.assertTrue(bus.acknowledge(current.event_id,current.lease_token))
+
 
 if __name__=='__main__':unittest.main()
