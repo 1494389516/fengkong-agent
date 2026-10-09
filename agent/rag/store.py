@@ -152,23 +152,26 @@ def index_path():
 def index_metadata():
     """Read only the generation at task creation, without loading corpus text."""
     path = index_path()
-    if not path.exists():
+    from ..storage import postgres
+    if not postgres() and not path.exists():
         return {}
-    with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
+    with closing(_index_connect(readonly=True)) as db:
         return dict(db.execute('SELECT key,value FROM metadata'))
 
 
 def read_index():
     path = index_path()
-    if not path.exists():
+    from ..storage import postgres
+    if not postgres() and not path.exists():
         return {}, []
-    with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
+    with closing(_index_connect(readonly=True)) as db:
         # One read transaction keeps metadata and chunks from the same generation.
-        db.execute('BEGIN')
+        db.execute('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' if postgres(db) else 'BEGIN')
         meta = dict(db.execute('SELECT key,value FROM metadata'))
         from agent.resource_budget import consume
         rows=[]
-        cursor=db.execute('SELECT CASE WHEN length(CAST(body AS BLOB))<=1048576 THEN body ELSE NULL END '
+        size='octet_length(body)' if postgres(db) else 'length(CAST(body AS BLOB))'
+        cursor=db.execute('SELECT CASE WHEN '+size+'<=1048576 THEN body ELSE NULL END '
                           'FROM chunks ORDER BY chunk_id LIMIT ?', (MAX_CHUNKS + 1,))
         while batch:=cursor.fetchmany(32):
             if any(r[0] is None for r in batch):raise ValueError('knowledge row exceeds byte limit')
@@ -213,15 +216,31 @@ def ingest(directory, embedder=None):
             atomic_write_json(archive,{'metadata':meta,'chunks':chunks})
         else:
             archived_index(generation)
-        with closing(sqlite3.connect(path)) as db, db:
-            db.execute('CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)')
-            db.execute('CREATE TABLE IF NOT EXISTS chunks(chunk_id TEXT PRIMARY KEY,body TEXT NOT NULL)')
-            db.execute('DELETE FROM chunks')
-            db.execute('DELETE FROM metadata')
-            db.executemany('INSERT INTO chunks VALUES(?,?)', [(r['chunk_id'], canonical(r)) for r in chunks])
-            db.executemany('INSERT INTO metadata VALUES(?,?)', list(meta.items()))
+        from ..storage import postgres, begin_write
+        with closing(_index_connect()) as db:
+            try:
+                if not postgres(db):
+                    db.execute('CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)')
+                    db.execute('CREATE TABLE IF NOT EXISTS chunks(chunk_id TEXT PRIMARY KEY,body TEXT NOT NULL)')
+                begin_write(db)
+                db.execute('DELETE FROM chunks')
+                db.execute('DELETE FROM metadata')
+                db.executemany('INSERT INTO chunks VALUES(?,?)', [(r['chunk_id'], canonical(r)) for r in chunks])
+                db.executemany('INSERT INTO metadata VALUES(?,?)', list(meta.items()))
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
     return {'chunks': len(chunks), 'index_digest': generation, 'embedded_new': len(fresh),
             'mode': 'hybrid' if embedder else 'bm25'}
+
+
+def _index_connect(*, readonly=False):
+    from ..storage import postgres, connect
+    if postgres():
+        return connect('knowledge',readonly=readonly)
+    path=index_path()
+    return sqlite3.connect(path.as_uri()+'?mode=ro',uri=True) if readonly else sqlite3.connect(path)
 
 
 def archived_index(expected_digest):

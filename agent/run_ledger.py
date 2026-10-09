@@ -3,6 +3,7 @@
 Only committed JSON results replay. An unfinished external request is ambiguous:
 no provider-level exactly-once guarantee is claimed or silently retried.
 """
+from .storage import postgres, begin_write, local_schema, table_names, order_column, json_text
 from contextlib import contextmanager
 import json
 import sqlite3
@@ -17,7 +18,7 @@ class AmbiguousExternalCall(RuntimeError): pass
 class RunLedger:
     def __init__(self, db, task_id, token):
         self.db, self.task_id, self.token = db, task_id, token
-        db.executescript('''
+        local_schema(db,'''
           CREATE TABLE IF NOT EXISTS run_steps(
             task_id TEXT, node_id TEXT, kind TEXT, input_digest TEXT,
             status TEXT, output TEXT, worker_token TEXT,
@@ -37,7 +38,7 @@ class RunLedger:
             status TEXT, worker_token TEXT, PRIMARY KEY(task_id,receipt_id));
         ''')
         with self.transaction():
-            db.execute('INSERT OR IGNORE INTO run_contracts VALUES(?,?,?)',
+            db.execute('INSERT INTO run_contracts VALUES(?,?,?) ON CONFLICT DO NOTHING',
                        (task_id, uuid.uuid4().hex, time.time()))
         row=db.execute('SELECT body FROM budget_contracts WHERE task_id=?',(task_id,)).fetchone()
         self.budget_contract=json.loads(row[0]) if row else {}
@@ -45,7 +46,7 @@ class RunLedger:
 
     @contextmanager
     def transaction(self):
-        self.db.execute('BEGIN IMMEDIATE')
+        begin_write(self.db)
         try:
             self.assert_live()
             yield
@@ -74,7 +75,7 @@ class RunLedger:
             if row and json.loads(row[0])!=budget:raise ValueError('budget contract changed; create a new run')
             if not row and self.db.execute('SELECT 1 FROM run_steps WHERE task_id=? LIMIT 1',(self.task_id,)).fetchone():
                 raise AmbiguousExternalCall('legacy run lacks resource receipts; create a new run')
-            self.db.execute('INSERT OR IGNORE INTO budget_contracts VALUES(?,?)',(self.task_id,encoded))
+            self.db.execute('INSERT INTO budget_contracts VALUES(?,?) ON CONFLICT DO NOTHING',(self.task_id,encoded))
         self.budget_contract=json.loads(encoded)
 
     def _charge_resource(self, receipt, resource, amount):
@@ -129,7 +130,7 @@ class RunLedger:
             contract=self.db.execute('SELECT component,maximum,ceiling FROM reservation_contracts WHERE task_id=? AND receipt_id=?',
                                      (self.task_id,receipt)).fetchone()
             if contract and contract!=(component,maximum,limit):raise ValueError('reservation contract changed')
-            self.db.execute('INSERT OR IGNORE INTO reservation_contracts VALUES(?,?,?,?,?)',
+            self.db.execute('INSERT INTO reservation_contracts VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING',
                             (self.task_id,receipt,component,maximum,limit))
             row=self.db.execute('SELECT status FROM budget_receipts WHERE task_id=? AND receipt_id=?',
                                 (self.task_id,receipt)).fetchone()
@@ -203,7 +204,7 @@ class RunLedger:
             if receipt: self._settle(receipt,actual)
 
     def commit_result(self, result):
-        self.db.execute('BEGIN IMMEDIATE')
+        begin_write(self.db)
         try:
             self.assert_live()
             self.db.execute("UPDATE investigation_tasks SET status='success',result=?,lease_until=0 WHERE task_id=? AND lease_token=?",

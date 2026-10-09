@@ -1,4 +1,5 @@
 """Authenticated case review, revision-bound and separate from production action."""
+from .storage import postgres, begin_write, local_schema, table_names, order_column, json_text
 import json
 import math
 import time
@@ -37,7 +38,7 @@ def review(context,request):
         db=_db()
         try:
             _review_schema(db)
-            db.execute('BEGIN IMMEDIATE')
+            begin_write(db)
             fingerprint=digest(request)
             old=db.execute('SELECT request_digest,body FROM case_reviews WHERE principal=? AND request_id=?',
                            (context.principal,request['request_id'])).fetchone()
@@ -85,7 +86,7 @@ def new_run(context,case_id,revision):
     with data_context(context):
         db=_db()
         try:
-            db.execute('BEGIN IMMEDIATE')
+            begin_write(db)
             row=db.execute('SELECT r.body,c.body FROM case_revisions r JOIN cases c ON c.case_id=r.case_id '
                 'WHERE r.case_id=? AND r.revision=? AND c.tenant=? AND c.app=?',
                 (case_id,revision,context.tenant,context.app)).fetchone()
@@ -110,6 +111,8 @@ def _investigators(db,case_id):
 
 
 def _review_schema(db):
+    if postgres(db):
+        return
     db.executescript("""
       CREATE TABLE IF NOT EXISTS case_reviews(
         review_id TEXT PRIMARY KEY, task_id TEXT, principal TEXT, request_id TEXT,
@@ -133,7 +136,7 @@ def _review_state(db, snapshot, as_of=None):
     Arbitration binds the exact review set. A subsequent review invalidates that
     resolution without changing or deleting any historical review.
     """
-    tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    tables=table_names(db)
     records=[]
     if 'case_reviews' in tables:
         for (raw,) in db.execute('SELECT r.body FROM case_reviews r JOIN investigation_tasks t '
@@ -176,7 +179,7 @@ def arbitrate(context,request):
         db=_db()
         try:
             _review_schema(db)
-            db.execute('BEGIN IMMEDIATE')
+            begin_write(db)
             old=db.execute('SELECT request_digest,body FROM case_arbitrations WHERE principal=? AND request_id=?',
                            (context.principal,request['request_id'])).fetchone()
             if old:

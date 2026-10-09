@@ -100,6 +100,7 @@ def search_risk_knowledge(query, platform='', detector_ids=None, sdk_version='',
       '任务中只能查询绑定事件。SDK签名证明来源，不证明真人。',
       {'type': 'object', 'properties': {'event_id': {'type': 'string'}}, 'required': ['event_id']})
 def get_event_evidence(event_id):
+    from ..storage import online_available, online_reader, table_names
     if not isinstance(event_id, str) or not event_id or len(event_id) > 256:
         raise ValueError('invalid event_id')
     from agent.tenancy import current_context
@@ -123,9 +124,9 @@ def get_event_evidence(event_id):
     else:
         if ctx is None:
             raise PermissionError('authenticated tenant/app context required')
-        if not path.exists():
+        if not online_available():
             return {'status': 'not_found', 'event_id': event_id}
-        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
+        with closing(online_reader()) as db:
             row = db.execute('SELECT record FROM decisions WHERE tenant=? AND app=? AND event_id=?',
                              (ctx.tenant, ctx.app, event_id)).fetchone()
         if not row:
@@ -134,9 +135,9 @@ def get_event_evidence(event_id):
     event = record['event']
     observations, missing = [], []
     refs = event.get('evidence_refs', [])
-    if refs and ctx and path.exists():
-        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as db:
-            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='evidence'").fetchone()
+    if refs and ctx and online_available():
+        with closing(online_reader()) as db:
+            exists = 'evidence' in table_names(db)
             for ref in refs[:10]:
                 row = db.execute('SELECT observation,received_at FROM evidence WHERE evidence_id=? AND tenant=? AND app=?',
                                  (ref, ctx.tenant, ctx.app)).fetchone() if exists else None

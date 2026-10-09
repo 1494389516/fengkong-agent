@@ -1,4 +1,5 @@
 """Durable decision-triggered investigations, with immutable evidence snapshots."""
+from .storage import postgres, begin_write, local_schema, table_names, order_column, json_text
 import hashlib
 import json
 import time
@@ -7,6 +8,9 @@ from .tenancy import data_context
 
 
 def _db(*, readonly=False, _migration=False):
+    if postgres():
+        from .storage import connect
+        return connect("agent", readonly=readonly)
     import sqlite3
     from .tools.datasource import agent_state_dir
     path = agent_state_dir() / 'investigations.sqlite3'
@@ -70,24 +74,33 @@ def consume_decision_outbox(limit=100):
         raise ValueError('projection limit must be 1..1000')
     import sqlite3
     from .tools.datasource import data_dir
+    from .storage import online_available, online_reader, schema
     source = data_dir() / 'online.sqlite3'
-    if not source.exists():
+    if not online_available():
         return 0
     db=_db()
     try:
-        db.execute('BEGIN IMMEDIATE')
-        position = db.execute('SELECT position FROM projection_cursor WHERE id=1').fetchone()[0]
-        source_db = sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)
-        try:
-            previous=db.execute("SELECT value FROM agent_store_meta WHERE key='cursor_decision_id'").fetchone()
-            if position:
-                source_row=source_db.execute('SELECT decision_id FROM outbox WHERE rowid=?',(position,)).fetchone()
-                if not source_row or (previous and source_row[0]!=previous[0]):
-                    raise RuntimeError('outbox was replaced or truncated; explicit cursor migration required')
-            rows = source_db.execute('SELECT rowid,decision_id,body FROM outbox WHERE rowid>? ORDER BY rowid LIMIT ?',
-                                     (position, limit)).fetchall()
-        finally:
-            source_db.close()
+        begin_write(db)
+        if postgres(db):
+            # IDs may commit out of allocation order. Anti-join receipts, never
+            # advance a maximum-ID watermark. Receipt + revision commit together.
+            rows = db.execute('SELECT o.insertion_order,o.decision_id,o.body FROM ' +
+                schema('online', db.prefix) + '.outbox o WHERE NOT EXISTS '
+                '(SELECT 1 FROM investigation_seen s WHERE s.decision_id=o.decision_id) '
+                'ORDER BY o.insertion_order LIMIT ?', (limit,)).fetchall()
+        else:
+            position = db.execute('SELECT position FROM projection_cursor WHERE id=1').fetchone()[0]
+            source_db = online_reader()
+            try:
+                previous=db.execute("SELECT value FROM agent_store_meta WHERE key='cursor_decision_id'").fetchone()
+                if position:
+                    source_row=source_db.execute('SELECT decision_id FROM outbox WHERE rowid=?',(position,)).fetchone()
+                    if not source_row or (previous and source_row[0]!=previous[0]):
+                        raise RuntimeError('outbox was replaced or truncated; explicit cursor migration required')
+                rows = source_db.execute('SELECT rowid,decision_id,body FROM outbox WHERE rowid>? ORDER BY rowid LIMIT ?',
+                                         (position, limit)).fetchall()
+            finally:
+                source_db.close()
         for position, decision_id, body in rows:
             if db.execute('SELECT 1 FROM investigation_seen WHERE decision_id=?', (decision_id,)).fetchone():
                 continue
@@ -106,10 +119,10 @@ def consume_decision_outbox(limit=100):
                     'entity_ref':entity, 'decision_ids':[], 'evidence_refs':[], 'current_revision':0}
                 # Legacy cases retain their original snapshot as revision one.
                 if old and 'current_revision' not in case:
-                    previous = db.execute('SELECT snapshot FROM investigation_tasks WHERE case_id=? ORDER BY rowid LIMIT 1', (old[0],)).fetchone()
+                    previous = db.execute('SELECT snapshot FROM investigation_tasks WHERE case_id=? ORDER BY '+order_column(db)+' LIMIT 1', (old[0],)).fetchone()
                     if previous:
                         legacy = json.loads(previous[0])
-                        db.execute('INSERT OR IGNORE INTO case_revisions VALUES(?,?,?,?)',
+                        db.execute('INSERT INTO case_revisions VALUES(?,?,?,?) ON CONFLICT DO NOTHING',
                                    (old[0],1,legacy['snapshot_id'],previous[0]))
                     case['current_revision'] = 1
                 revision = case['current_revision'] + 1
@@ -130,13 +143,13 @@ def consume_decision_outbox(limit=100):
                 if old:
                     db.execute('UPDATE cases SET body=? WHERE case_id=?',(json.dumps(case),case['case_id']))
                 else:
-                    db.execute('INSERT INTO cases VALUES(?,?,?,?,?,?)',(case['case_id'],*key,json.dumps(case)))
+                    db.execute('INSERT INTO cases(case_id,tenant,app,entity,bucket,body) VALUES(?,?,?,?,?,?)',(case['case_id'],*key,json.dumps(case)))
                 db.execute('INSERT INTO case_revisions VALUES(?,?,?,?)',
                            (case['case_id'],revision,snapshot['snapshot_id'],json.dumps(snapshot)))
                 db.execute('INSERT INTO investigation_tasks(task_id,case_id,snapshot,status) VALUES(?,?,?,?)',
                            (case['task_id'],case['case_id'],json.dumps(snapshot),'queued'))
             db.execute('INSERT INTO investigation_seen VALUES(?)',(decision_id,))
-        if rows:
+        if rows and not postgres(db):
             db.execute('UPDATE projection_cursor SET position=? WHERE id=1', (rows[-1][0],))
             db.execute("INSERT OR REPLACE INTO agent_store_meta VALUES('cursor_decision_id',?)",(rows[-1][1],))
         db.commit();return len(rows)
@@ -151,7 +164,7 @@ def list_cases(context):
     with data_context(context):
         db=_db(readonly=True)
         try:
-            return [json.loads(r[0]) for r in db.execute('SELECT body FROM cases WHERE tenant=? AND app=? ORDER BY rowid LIMIT 1000',
+            return [json.loads(r[0]) for r in db.execute('SELECT body FROM cases WHERE tenant=? AND app=? ORDER BY '+order_column(db)+' LIMIT 1000',
                                                         (context.tenant,context.app))]
         finally:
             db.close()
@@ -170,7 +183,7 @@ def run_task(task_id, context, *, agent_factory=None):
         ledger = None
         heartbeat = None
         try:
-            db.execute('BEGIN IMMEDIATE')
+            begin_write(db)
             row=db.execute('SELECT t.snapshot,t.status,t.result,t.lease_until FROM investigation_tasks t '
               'JOIN cases c ON c.case_id=t.case_id WHERE t.task_id=? AND c.tenant=? AND c.app=?',
               (task_id,context.tenant,context.app)).fetchone()
@@ -194,7 +207,7 @@ def run_task(task_id, context, *, agent_factory=None):
             db.execute('UPDATE investigation_tasks SET status=?,lease_until=?,lease_token=? WHERE task_id=?',
                        ('running',min(time.time()+30,deadline),token,task_id));db.commit()
             from .lease import LeaseHeartbeat
-            path=db.execute('PRAGMA database_list').fetchone()[2]
+            path=db.reconnect if postgres(db) else db.execute('PRAGMA database_list').fetchone()[2]
             heartbeat=LeaseHeartbeat(path,task_id,token,deadline)
             heartbeat.start()
             from .run_ledger import RunLedger
@@ -348,6 +361,17 @@ def run_task(task_id, context, *, agent_factory=None):
 
 
 def projection_stats():
+    if postgres():
+        from .storage import schema
+        db = _db(readonly=True)
+        try:
+            count, oldest = db.execute('SELECT COUNT(*),MIN((o.body::jsonb->>\'evaluated_at\')::double precision) '
+                'FROM ' + schema('online', db.prefix) + '.outbox o WHERE NOT EXISTS '
+                '(SELECT 1 FROM investigation_seen s WHERE s.decision_id=o.decision_id)').fetchone()
+            return {'pending': count, 'oldest_pending_age_seconds': max(0,time.time()-oldest) if oldest else 0,
+                    'source_status': 'available'}
+        finally:
+            db.close()
     import sqlite3
     from .tools.datasource import data_dir
     source=data_dir()/'online.sqlite3'

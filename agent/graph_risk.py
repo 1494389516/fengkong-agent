@@ -12,6 +12,7 @@ from .graph_algorithms import graph_algorithm, MAX_ROWS, MAX_NODES
 from .graph_store import graph_store
 from .online_feature_store import online_feature_store
 from .tools.datasource import data_dir, file_lock
+from .storage import projection_lock
 
 FEATURE_SET="graph_risk_v1"
 SHADOW_FEATURE_SET="graph_risk_shadow_v1"
@@ -65,7 +66,7 @@ def ingest_observation(observation):
     device=(observation["device_id"],observation["entity_generation"])
     # Serialize graph writes and projections across local workers. Invalidate first:
     # a crash can leave a feature pending, but cannot expose an obsolete one as fresh.
-    with file_lock(data_dir()/".graph_projection"):
+    with projection_lock():
         store=graph_store()
         affected=_affected_devices(store,observation)
         # Queue work before invalidation; retries preserve the original queue age.
@@ -91,7 +92,7 @@ def ingest_observation(observation):
 
 
 def recompute_device(tenant,app,device_id,generation,*,as_of=None):
-    with file_lock(data_dir()/".graph_projection"):
+    with projection_lock():
         return _recompute_device(tenant,app,device_id,generation,as_of=as_of)
 
 
@@ -108,8 +109,7 @@ def _recompute_device(tenant,app,device_id,generation,*,as_of=None,_snapshot=Non
     result=dict(_computed) if _computed is not None else algorithm.compute(rows,device_id,generation,truncated=truncated,as_of=anchor)
     result.update(device_id=device_id,entity_generation=generation,as_of=anchor)
     store=online_feature_store()
-    store.put(tenant,app,"device",device_id,generation,FEATURE_SET,
-              result,computed_at=time.time())
+    values={FEATURE_SET:result}
 
     # Challenger is shadow-only: it cannot affect Decision. Persist its output and
     # divergence so offline evaluation can decide whether a release proposal is justified.
@@ -121,8 +121,10 @@ def _recompute_device(tenant,app,device_id,generation,*,as_of=None,_snapshot=Non
                       shadow_of=primary_name,
                       score_delta=round(float(shadow.get("community_risk_density",0.0))-
                                         float(result.get("community_risk_density",0.0)),6))
-        store.put(tenant,app,"device",device_id,generation,SHADOW_FEATURE_SET,
-                  shadow,computed_at=time.time())
+        values[SHADOW_FEATURE_SET]=shadow
+    # Primary and shadow become visible together, only after both computations
+    # succeed. Failure retains the previous complete publication and its age.
+    store.put_many(tenant,app,"device",device_id,generation,values,computed_at=time.time())
     return result
 
 
@@ -130,7 +132,7 @@ def refresh_dirty_devices(*,limit=100):
     if type(limit) is not int or not 1<=limit<=1000:
         raise ValueError("limit must be 1..1000")
     refreshed=0;failed=[]
-    with file_lock(data_dir()/".graph_projection"):
+    with projection_lock():
         store=graph_store()
         groups={}
         for tenant,app,device,generation in store.dirty_devices(limit):
@@ -163,8 +165,14 @@ def refresh_dirty_devices(*,limit=100):
 def lookup(tenant,app,device_id,generation,*,connection=None,max_age=MAX_FEATURE_AGE_SECONDS):
     # connection is accepted for compatibility but deliberately ignored: graph
     # features live outside the online decision SQLite authority.
+    policy=os.environ.get('FK_GRAPH_REFRESH_POLICY','strict')
+    if policy not in ('strict','bounded_previous'):
+        raise ValueError('invalid graph refresh policy')
     result=online_feature_store().get(
-        tenant,app,"device",device_id,generation,FEATURE_SET,max_age=max_age)
+        tenant,app,"device",device_id,generation,FEATURE_SET,max_age=max_age,
+        allow_previous=policy=='bounded_previous')
+    if result and result.get('algorithm') != os.environ.get('FK_GRAPH_ALGORITHM','community_v1'):
+        return None
     # A bounded snapshot is partial evidence; do not present it as current.
     return None if result is not None and result.get("truncated") else result
 
