@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from .tools.datasource import data_dir
+from .storage import postgres, online_available, online_reader, json_text
 
 
 def digest(value):
@@ -17,20 +18,23 @@ def build(snapshot):
     entity = snapshot['entity_ref']
     rows = []; nodes = set(); seen = set(); byte_count = 0; partial = False
     source = root / 'online.sqlite3'
-    if source.exists():
-        db = sqlite3.connect(source.as_uri() + '?mode=ro', uri=True)
+    if online_available():
+        db = online_reader()
         ticks = [0]
         def bounded_scan():
             ticks[0] += 1
             return ticks[0] > 2000
-        db.set_progress_handler(bounded_scan, 1000)
+        if postgres(db):
+            db.execute("SET statement_timeout = '2s'")
+        else:
+            db.set_progress_handler(bounded_scan, 1000)
         try:
             # Expand one shared-device neighborhood, never the tenant's full graph.
             queries = [('uid', entity)]
             devices = set()
             for field, value in queries:
                 cursor = db.execute("SELECT body FROM events WHERE tenant=? AND app=? AND "
-                    "json_extract(body, '$." + field + "')=? AND occurred_at<? AND recorded_at<=? "
+                    + json_text(db, 'body', field) + "=? AND occurred_at<? AND recorded_at<=? "
                     "AND occurred_at>=? ORDER BY occurred_at,event_id LIMIT 1001",
                     (snapshot['tenant_id'], snapshot['app_id'], value, anchor, anchor, anchor-30*86400))
                 for (raw,) in cursor:
@@ -44,8 +48,9 @@ def build(snapshot):
                     if field == 'uid' and event.get('device_id') and event['device_id'] not in devices:
                         devices.add(event['device_id']);queries.append(('device_id',event['device_id']))
                 if partial: break
-        except sqlite3.OperationalError as exc:
-            if 'interrupted' not in str(exc): raise
+        except Exception as exc:
+            if not ((isinstance(exc,sqlite3.OperationalError) and 'interrupted' in str(exc))
+                    or (postgres(db) and getattr(exc,'sqlstate',None)=='57014')): raise
             partial=True
         finally:
             db.close()

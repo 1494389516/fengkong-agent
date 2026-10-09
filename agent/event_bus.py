@@ -1,9 +1,9 @@
-"""Durable local event-bus boundary with claim/lease/dead-letter semantics.
+"""SQL event bus with claims, fenced leases and independent consumer receipts.
 
-LocalEventBus remains a single-host adapter backed by SQLite. Consumers must claim
-work before processing; acknowledgements are fenced by lease token. Production can
-replace this adapter with Kafka/Pulsar without changing Collector or consumers.
+PostgreSQL claims use row locks; the SQLite compatibility adapter uses its writer
+transaction. Collector publication participates in the evidence transaction.
 """
+from .storage import postgres, begin_write, local_schema, table_names, order_column, json_text
 from dataclasses import dataclass
 import json
 import math
@@ -44,6 +44,8 @@ class ClaimedEvent(Event):
 
 class LocalEventBus:
     def _ensure(self, db):
+        if postgres(db):
+            return
         db.execute("""CREATE TABLE IF NOT EXISTS integration_events (
             event_id TEXT PRIMARY KEY,
             topic TEXT NOT NULL,
@@ -117,7 +119,7 @@ class LocalEventBus:
         try:
             self._ensure(db)
             db.commit()  # schema migration must finish before the claim transaction
-            db.execute("BEGIN IMMEDIATE")
+            begin_write(db, serialized=False)
             # Exhausted, currently-unleased poison messages become dead letters.
             db.execute("""UPDATE integration_events
                 SET published=-1,last_error=COALESCE(last_error,'max_attempts_exhausted')
@@ -128,7 +130,7 @@ class LocalEventBus:
                 FROM integration_events
                 WHERE topic=? AND published=0 AND attempts<?
                   AND (lease_until IS NULL OR lease_until<=?)
-                ORDER BY created_at,event_id LIMIT ?""",
+                ORDER BY created_at,event_id LIMIT ?""" + (" FOR UPDATE SKIP LOCKED" if postgres(db) else ""),
                 (topic,max_attempts,anchor,limit)).fetchall()
             claimed=[]
             for row in rows:
@@ -164,7 +166,7 @@ class LocalEventBus:
         db = connect()
         try:
             self._ensure(db)
-            changed = db.execute('UPDATE ' + table + ' SET lease_until=MAX(lease_until,?) '
+            changed = db.execute('UPDATE ' + table + ' SET lease_until=' + ('GREATEST' if postgres(db) else 'MAX') + '(lease_until,?) '
                 'WHERE event_id=? AND lease_token=? AND lease_until>? AND published=0' + group_filter,
                 params).rowcount
             db.commit()
@@ -292,6 +294,8 @@ class ConsumerGroupBus(LocalEventBus):
         self.group=group
 
     def _ensure(self,db):
+        if postgres(db):
+            return
         super()._ensure(db)
         db.execute('''CREATE TABLE IF NOT EXISTS integration_receipts(
           consumer_group TEXT,event_id TEXT,published INTEGER DEFAULT 0,
@@ -300,8 +304,7 @@ class ConsumerGroupBus(LocalEventBus):
 
     def _receipts(self,db,topic):
         self._ensure(db)
-        db.execute('INSERT OR IGNORE INTO integration_receipts(consumer_group,event_id) '
-                   'SELECT ?,event_id FROM integration_events WHERE topic=?',(self.group,topic))
+        db.execute('INSERT INTO integration_receipts(consumer_group,event_id) SELECT ?,event_id FROM integration_events WHERE topic=? ON CONFLICT DO NOTHING',(self.group,topic))
 
     def claim(self,topic,*,limit=100,lease_seconds=30,max_attempts=5,now=None):
         self._validate_limit(limit)
@@ -310,7 +313,7 @@ class ConsumerGroupBus(LocalEventBus):
         anchor,deadline=_lease_window(lease_seconds,now)
         db=connect()
         try:
-            self._ensure(db);db.commit();db.execute('BEGIN IMMEDIATE')
+            self._ensure(db);db.commit();begin_write(db, serialized=False)
             self._receipts(db,topic)
             db.execute("UPDATE integration_receipts SET published=-1,last_error=COALESCE(last_error,'max_attempts_exhausted') "
                 'WHERE consumer_group=? AND published=0 AND attempts>=? AND (lease_until IS NULL OR lease_until<=?) '
@@ -319,7 +322,7 @@ class ConsumerGroupBus(LocalEventBus):
             rows=db.execute('SELECT e.event_id,e.topic,e.event_key,e.payload,e.created_at,r.attempts '
                 'FROM integration_events e JOIN integration_receipts r ON r.event_id=e.event_id '
                 'WHERE r.consumer_group=? AND e.topic=? AND r.published=0 AND r.attempts<? '
-                'AND (r.lease_until IS NULL OR r.lease_until<=?) ORDER BY e.created_at,e.event_id LIMIT ?',
+                'AND (r.lease_until IS NULL OR r.lease_until<=?) ORDER BY e.created_at,e.event_id LIMIT ?' + (' FOR UPDATE OF r SKIP LOCKED' if postgres(db) else ''),
                 (self.group,topic,max_attempts,anchor,limit)).fetchall()
             result=[]
             for row in rows:
@@ -343,7 +346,7 @@ class ConsumerGroupBus(LocalEventBus):
         db=connect()
         try:
             self._ensure(db)
-            changed=db.execute('UPDATE integration_receipts SET published=CASE WHEN ? IS NULL THEN 1 '
+            changed=db.execute('UPDATE integration_receipts SET published=CASE WHEN CAST(? AS TEXT) IS NULL THEN 1 '
                 'WHEN attempts>=? THEN -1 ELSE 0 END,lease_token=NULL,lease_until=NULL,last_error=? '
                 'WHERE consumer_group=? AND event_id=? AND lease_token=? AND lease_until>? AND published=0',
                 (error,max_attempts,error,self.group,event_id,token,time.time())).rowcount

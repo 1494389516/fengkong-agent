@@ -3,6 +3,7 @@
 MAC verification authenticates a provisioned installation, never a human or a
 fraud label. App Attest is a separate optional server policy and verdict.
 """
+from .storage import postgres, begin_write, local_schema, table_names, order_column, json_text
 import base64
 import hashlib
 import hmac
@@ -21,7 +22,7 @@ from .tenancy import data_context
 def _database():
     from .tools.online_store import connect
     db=connect()
-    db.executescript('''
+    local_schema(db,'''
         CREATE TABLE IF NOT EXISTS report_receipts (
           tenant TEXT, app TEXT, report_id TEXT, digest TEXT NOT NULL,
           evidence_id TEXT NOT NULL, nonce TEXT NOT NULL, principal TEXT NOT NULL,
@@ -121,7 +122,7 @@ def ingest(upload, context, *, wire_bytes=None, remote_ip=None, now=None):
     with data_context(context):
         db=_database()
         try:
-            db.execute('BEGIN IMMEDIATE')
+            begin_write(db)
             old=db.execute('SELECT digest,receipt FROM report_receipts WHERE tenant=? AND app=? AND report_id=?',
                 (context.tenant,context.app,value['report_id'])).fetchone()
             if old:
@@ -160,7 +161,7 @@ def ingest(upload, context, *, wire_bytes=None, remote_ip=None, now=None):
                 count=verify_assertion(base64.b64decode(value['re_attestation_assertion'],validate=True),pem,apple_app_id,
                     hashlib.sha256(challenge[1]).digest(),count)
                 db.execute('UPDATE attestation_challenges SET consumed=1 WHERE challenge_id=? AND consumed=0',(challenge[0],))
-                db.execute('INSERT OR REPLACE INTO attestation_counters VALUES(?,?,?,?)',
+                db.execute('INSERT INTO attestation_counters VALUES(?,?,?,?) ON CONFLICT(tenant,app,key_id) DO UPDATE SET counter=excluded.counter',
                            (context.tenant,context.app,att_id,count))
                 verdict='verified_assertion'
             if required and verdict!='verified_assertion': raise ContractError('required hardware verification missing')
@@ -220,7 +221,7 @@ def enrich_business_event(event, context, connection=None):
         db=connection if connection is not None else _database()
         try:
             if refs and connection is not None:
-                tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                tables=table_names(db)
                 if not {"report_receipts", "evidence"}.issubset(tables):
                     raise PermissionError("report reference is outside this domain")
             for report_id in refs:
@@ -251,7 +252,7 @@ def enrich_business_event(event, context, connection=None):
                              latest['entity_generation'], connection=db)
         if graph is not None:
             result['server_graph'] = graph
-            result['server_graph_status'] = 'current'
+            result['server_graph_status'] = graph.get('feature_refresh_status','current')
         else:
             result['server_graph_status'] = 'pending_or_stale'
         result['evidence_refs']=[o['evidence_id'] for o in observations]
@@ -269,7 +270,7 @@ def issue_challenge(context, purpose='assertion', *, now=None):
     with data_context(context):
         db=_database()
         try:
-            db.execute('BEGIN IMMEDIATE')
+            begin_write(db)
             # Never replace a live challenge: the first upload may still be in flight.
             if db.execute('SELECT 1 FROM attestation_challenges WHERE tenant=? AND app=? AND principal=? AND purpose=? AND consumed=0 AND expires_at>?',
                 (context.tenant,context.app,context.principal,purpose,now)).fetchone():
@@ -292,7 +293,7 @@ def register_attestation(value, context, *, now=None):
     with data_context(context):
         db=_database()
         try:
-            db.execute('BEGIN IMMEDIATE')
+            begin_write(db)
             row=db.execute('SELECT challenge FROM attestation_challenges WHERE challenge_id=? AND tenant=? AND app=? AND principal=? AND purpose=? AND consumed=0 AND expires_at>?',
                 (value.get('challenge_id'),context.tenant,context.app,context.principal,'enrollment',now)).fetchone()
             if not row: raise ContractError('enrollment challenge missing expired or consumed')

@@ -57,6 +57,12 @@ def event_snapshot_identity():
     snapshot = _event_snapshot.get()
     if snapshot is not None:
         return snapshot[0]
+    from ..storage import postgres, namespace
+    if postgres():
+        # Filesystem mtimes cannot invalidate a remote database. Until a durable
+        # event revision is part of the API, bypass the process-local cache.
+        import uuid
+        return ('postgres', namespace(), uuid.uuid4().hex)
     path = data_dir() / "online.sqlite3"
     if not path.exists():
         return None
@@ -275,6 +281,7 @@ def append_jsonl(path: Path, rec: Any) -> None:
 
 
 def load_events(*, limit=None, as_of_ts=None, window_seconds=None) -> List[Dict]:
+    from ..storage import online_available, online_reader
     if _account_reader.get() is not None:
         from ..compute_budget import ComputeBudgetExceeded
         raise ComputeBudgetExceeded('unplanned_online_history_read')
@@ -285,10 +292,10 @@ def load_events(*, limit=None, as_of_ts=None, window_seconds=None) -> List[Dict]
         rows = snapshot[1]
         from ..resource_budget import read_rows
         read_rows(rows)
-    elif (data_dir()/"online.sqlite3").exists():
+    elif online_available():
         import sqlite3
         from agent.tenancy import current_context
-        db=sqlite3.connect("file:"+str(data_dir()/"online.sqlite3")+"?mode=ro",uri=True)
+        db=online_reader()
         try:
             where=[];params=[]
             ctx=current_context()
@@ -299,7 +306,7 @@ def load_events(*, limit=None, as_of_ts=None, window_seconds=None) -> List[Dict]
                 if window_seconds is not None:
                     where.append("occurred_at>=?");params.append(as_of_ts-window_seconds)
             from ..compute_budget import sql_body_expression
-            query="SELECT " + sql_body_expression() + " FROM events"+(" WHERE "+" AND ".join(where) if where else "")+" ORDER BY occurred_at,event_id"
+            query="SELECT " + sql_body_expression(db) + " FROM events"+(" WHERE "+" AND ".join(where) if where else "")+" ORDER BY occurred_at,event_id"
             if limit is not None:
                 query+=" LIMIT ?";params.append(limit)
             from ..compute_budget import bounded_history, sql_budget

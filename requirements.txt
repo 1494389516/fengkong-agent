@@ -7,3 +7,4 @@ networkx>=3.0
 cryptography>=43,<47
 
 jsonschema>=4.22
+psycopg[binary]>=3.2,<4

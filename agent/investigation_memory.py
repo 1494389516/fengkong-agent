@@ -4,6 +4,7 @@ Memory is reconstructed from prior durable tasks in the same tenant/app/entity
 scope. Raw LLM summaries and claim prose are intentionally excluded so previous
 generated text cannot become instructions in a later investigation.
 """
+from .storage import order_column
 import json
 import math
 
@@ -23,7 +24,7 @@ def load_investigation_memory(db, snapshot, limit=3):
         "SELECT c.case_id,t.snapshot,t.result FROM cases c "
         "JOIN investigation_tasks t ON t.case_id=c.case_id "
         "WHERE c.tenant=? AND c.app=? AND c.entity=? AND c.case_id<>? "
-        "AND t.status='success' ORDER BY c.bucket DESC, c.rowid DESC LIMIT ?",
+        "AND t.status='success' ORDER BY c.bucket DESC, " + order_column(db,"c") + " DESC LIMIT ?",
         (snapshot["tenant_id"], snapshot["app_id"], snapshot["entity_ref"],
          snapshot["case_id"], limit * 4),
     ).fetchall()

@@ -1,6 +1,13 @@
 # Isolated release and runtime deployment
 
-This compose example runs five independently permissioned processes. It does not provision production secrets or claim live KMS validation. Host bind mounts are the security boundary; directory ownership must be provisioned by an operator.
+# PostgreSQL production backend
+
+The production Compose stack now requires separately provisioned PostgreSQL
+service credentials and an offline schema migration. Follow
+[POSTGRES.md](POSTGRES.md) before starting this stack or migrating existing data.
+The mounted artifact/approval boundaries described below still apply.
+
+This Compose stack separates ingress, decision, graph, investigation, review and release processes. It does not provision production secrets or claim live KMS validation. PostgreSQL roles and host bind mounts enforce storage boundaries; an operator must provision credentials and directory ownership.
 
 | Process | Writable | Read only | Never mounted |
 |---|---|---|---|

@@ -34,3 +34,7 @@ data/strategy_registry.json
 # Verified runtime caches are deployment state
 data/*.lkg
 data/runtime_lkg_*.json
+
+# Deployment secrets and mutable service state
+deploy/secrets/
+deploy/state/

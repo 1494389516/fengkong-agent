@@ -14,13 +14,13 @@ class LeaseHeartbeat:
         while not self.stop_event.wait(10):
             now=time.time()
             if now>=self.deadline:return
-            db=sqlite3.connect(self.path,timeout=5)
+            db=self.path() if callable(self.path) else sqlite3.connect(self.path,timeout=5)
             try:
                 changed=db.execute("UPDATE investigation_tasks SET lease_until=? WHERE task_id=? AND lease_token=? AND status='running' AND lease_until>?",
                     (min(now+30,self.deadline),self.task_id,self.token,now)).rowcount
                 db.commit()
                 if changed!=1:return
-            except sqlite3.Error:
+            except Exception:
                 # Failure never grants a new lease; the existing one expires.
                 return
             finally:db.close()

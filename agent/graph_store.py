@@ -1,16 +1,19 @@
-"""Graph persistence boundary.
+"""Graph persistence, separated from online decisions by schema or SQLite file.
 
-The default backend is a dedicated SQLite database, deliberately separate from
-the online decision/event authority. A production graph database can replace this
-adapter without changing graph algorithms or Decision enrichment.
+The legacy class name remains compatible; the configured backend owns connections.
 """
+from .storage import postgres, begin_write, local_schema, table_names, order_column, json_text
 import sqlite3
 import time
 from .tools.datasource import data_dir
+from .storage import guard_projection
 
 
 class SQLiteGraphStore:
     def connect(self):
+        if postgres():
+            from .storage import connect
+            return connect("graph")
         path=data_dir()/"graph.sqlite3"
         path.parent.mkdir(parents=True,exist_ok=True)
         db=sqlite3.connect(path,timeout=10)
@@ -46,7 +49,9 @@ class SQLiteGraphStore:
     def append(self,observation):
         db=self.connect()
         try:
-            db.execute("""INSERT OR IGNORE INTO observations VALUES (?,?,?,?,?,?,?,?,?)""",
+            begin_write(db)
+            guard_projection(db)
+            db.execute('INSERT INTO observations VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING',
               (observation["evidence_id"],observation["tenant_id"],observation["app_id"],
                observation.get("uid"),observation["device_id"],observation["entity_generation"],
                observation.get("ip"),observation["observed_at"],observation["recorded_at"]))
@@ -84,10 +89,9 @@ class SQLiteGraphStore:
         """Conservative dependency closure, persisted without loading all rows."""
         db=self.connect()
         try:
-            db.execute("""INSERT OR IGNORE INTO dirty_devices
-                (tenant,app,device_id,entity_generation,dirty_since,scheduled_at)
-                SELECT DISTINCT tenant,app,device_id,entity_generation,?,?
-                FROM observations WHERE tenant=? AND app=?""",(time.time(),time.time(),tenant,app))
+            begin_write(db)
+            guard_projection(db)
+            db.execute('INSERT INTO dirty_devices\n                (tenant,app,device_id,entity_generation,dirty_since,scheduled_at)\n                SELECT DISTINCT tenant,app,device_id,entity_generation,?,?\n                FROM observations WHERE tenant=? AND app=? ON CONFLICT DO NOTHING',(time.time(),time.time(),tenant,app))
             db.commit()
         finally: db.close()
 
@@ -96,9 +100,10 @@ class SQLiteGraphStore:
             return
         db=self.connect()
         try:
+            begin_write(db)
+            guard_projection(db)
             now=time.time()
-            db.executemany("""INSERT OR IGNORE INTO dirty_devices
-                (tenant,app,device_id,entity_generation,dirty_since,scheduled_at) VALUES (?,?,?,?,?,?)""",
+            db.executemany('INSERT INTO dirty_devices\n                (tenant,app,device_id,entity_generation,dirty_since,scheduled_at) VALUES (?,?,?,?,?,?) ON CONFLICT DO NOTHING',
                            ((tenant,app,device,generation,now,now) for device,generation in sorted(devices)))
             db.commit()
         finally: db.close()
@@ -107,13 +112,15 @@ class SQLiteGraphStore:
         db=self.connect()
         try:
             return db.execute("""SELECT tenant,app,device_id,entity_generation
-                FROM dirty_devices ORDER BY scheduled_at,rowid LIMIT ?""",
+                FROM dirty_devices ORDER BY scheduled_at,"""+order_column(db)+" LIMIT ?",
                 (limit,)).fetchall()
         finally: db.close()
 
     def defer_dirty(self,tenant,app,devices):
         db=self.connect()
         try:
+            begin_write(db)
+            guard_projection(db)
             db.executemany("""UPDATE dirty_devices SET scheduled_at=?
                 WHERE tenant=? AND app=? AND device_id=? AND entity_generation=?""",
                 ((time.time(),tenant,app,d,g) for d,g in devices))
@@ -131,9 +138,14 @@ class SQLiteGraphStore:
     def clear_dirty(self,tenant,app,device,generation):
         db=self.connect()
         try:
+            begin_write(db)
+            guard_projection(db)
             db.execute("""DELETE FROM dirty_devices WHERE tenant=? AND app=?
                 AND device_id=? AND entity_generation=?""",(tenant,app,device,generation))
             db.commit()
+        except BaseException:
+            db.rollback()
+            raise
         finally: db.close()
 
 

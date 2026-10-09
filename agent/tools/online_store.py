@@ -1,9 +1,9 @@
-"""Single-host transactional decision/event/outbox store.
+"""Transactional decision/event/outbox authority; JSONL is a derived export.
 
-SQLite is the authority; JSONL exports are recoverable projections. A writer
-transaction fixes the visible event prefix and commits the decision with it.
-This deliberately serializes local writers; it is not a distributed backend.
+PostgreSQL and the local SQLite adapter preserve the same atomic business
+boundary. Read/check/write decision transactions serialize within a namespace.
 """
+from ..storage import postgres, begin_write, local_schema, table_names, order_column, json_text
 import hashlib
 import json
 import sqlite3
@@ -16,6 +16,9 @@ from .idemp_store import IdempotencyConflict
 
 
 def connect(*, _migration=False):
+    if postgres():
+        from ..storage import connect as storage_connect
+        return storage_connect("online")
     legacy = data_dir() / "decide_idemp.json"
     if legacy.exists() and not _migration:
         from .idemp_store import _load
@@ -62,7 +65,7 @@ def decide(event, operator, compute, *, scope, source_kind, received_at, prepare
     key = (tenant, app, event["event_id"])
     db = connect()
     try:
-        db.execute("BEGIN IMMEDIATE")
+        begin_write(db)
         row = db.execute("SELECT fingerprint, record FROM decisions WHERE tenant=? AND app=? AND event_id=?", key).fetchone()
         if row:
             if row[0] != fingerprint:
@@ -92,15 +95,15 @@ def decide(event, operator, compute, *, scope, source_kind, received_at, prepare
                         # a broader request rather than expose an incomplete snapshot.
                         if uid != evaluation.get('uid') or as_of != evaluation['ts']:
                             raise ComputeBudgetExceeded('unplanned_online_history_read')
-                        clauses = ["tenant=?", "app=?", "json_extract(body, '$.uid')=?",
+                        clauses = ["tenant=?", "app=?", json_text(db, "body", "uid")+"=?",
                                    "occurred_at<?", "recorded_at<=?"]
                         params = [tenant, app, uid, as_of, min(as_of, received_at)]
                         if window:
                             clauses.append("occurred_at>=?")
                             params.append(as_of - window)
                         rows = bounded_history((r[0] for r in db.execute(
-                            "SELECT " + sql_body_expression() +
-                            " FROM events INDEXED BY events_account_order WHERE " +
+                            "SELECT " + sql_body_expression(db) +
+                            (" FROM events WHERE " if postgres(db) else " FROM events INDEXED BY events_account_order WHERE ") +
                             " AND ".join(clauses) + " ORDER BY occurred_at,event_id", params)), encoded=True)
                         evidence.append({'uid': uid, 'as_of': as_of, 'window': window, 'rows': rows})
                         return rows
@@ -175,7 +178,7 @@ def migrate_legacy(tenant, app, mapping_path):
             raise ValueError("mapping must account for every legacy record")
         db = connect(_migration=True)
         try:
-            db.execute("BEGIN IMMEDIATE")
+            begin_write(db)
             for key, old in records.items():
                 item = mapping[key]; event=item["event"]; source=item["source_kind"]
                 if old.get("status") != "done" or not isinstance(old.get("public"),dict):

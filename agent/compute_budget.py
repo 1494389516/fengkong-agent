@@ -104,6 +104,24 @@ def sql_budget(db):
     if budget is None:
         yield
         return
+    from .storage import postgres
+    if postgres(db):
+        import psycopg
+        # A timed-out statement aborts its transaction. A savepoint permits the
+        # caller to durably record the explicit review/fallback decision.
+        with db.raw.transaction():
+            previous = db.raw.execute('SHOW statement_timeout').fetchone()[0]
+            db.raw.execute("SELECT set_config('statement_timeout', %s, true)",
+                           (str(max(1, int((budget.deadline-time.monotonic())*1000))),))
+            try:
+                with db.raw.transaction():
+                    yield
+                    budget.check()
+            except psycopg.errors.QueryCanceled as exc:
+                raise ComputeBudgetExceeded('history_sql_budget') from exc
+            finally:
+                db.raw.execute("SELECT set_config('statement_timeout', %s, true)", (previous,))
+        return
     steps = 0
     def progress():
         nonlocal steps
@@ -149,9 +167,11 @@ def simulation_key():
     return digest(_simulation.get() or DEFAULT_CONTRACT)
 
 
-def sql_body_expression():
+def sql_body_expression(db=None):
     budget = current_budget()
     if budget is None:
         return 'body'
     # Avoid transferring an oversized SQLite value into Python before checking it.
-    return 'CASE WHEN length(CAST(body AS BLOB)) <= %d THEN body ELSE NULL END' % budget.contract['max_event_bytes']
+    from .storage import postgres
+    size = 'octet_length(body)' if postgres(db) else 'length(CAST(body AS BLOB))'
+    return 'CASE WHEN '+size+' <= %d THEN body ELSE NULL END' % budget.contract['max_event_bytes']
