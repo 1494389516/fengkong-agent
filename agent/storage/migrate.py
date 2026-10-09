@@ -89,6 +89,10 @@ def import_sqlite(db, prefix, *, writers_stopped):
     from psycopg import sql
     if not writers_stopped:
         raise ValueError('stop all source writers and pass --writers-stopped before import')
+    from ..tools.datasource import data_dir
+    legacy=data_dir()/'decide_idemp.json'
+    if legacy.exists() and json.loads(legacy.read_text()):
+        raise ValueError('migrate legacy JSON idempotency records to SQLite before PostgreSQL import')
     sources={};manifest={};fingerprint=hashlib.sha256()
     try:
         for kind,path in _sources().items():

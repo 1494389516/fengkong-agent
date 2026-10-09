@@ -64,8 +64,8 @@ def ingest_observation(observation):
         raise ValueError("finite graph timestamps required")
     tenant,app=observation["tenant_id"],observation["app_id"]
     device=(observation["device_id"],observation["entity_generation"])
-    # Serialize graph writes and projections across local workers. Invalidate first:
-    # a crash can leave a feature pending, but cannot expose an obsolete one as fresh.
+    # Serialize graph writes/projections and mark the old revision as refreshing.
+    # Reads either degrade (strict) or explicitly expose bounded previous state.
     with projection_lock():
         store=graph_store()
         affected=_affected_devices(store,observation)
@@ -164,7 +164,7 @@ def refresh_dirty_devices(*,limit=100):
 
 def lookup(tenant,app,device_id,generation,*,connection=None,max_age=MAX_FEATURE_AGE_SECONDS):
     # connection is accepted for compatibility but deliberately ignored: graph
-    # features live outside the online decision SQLite authority.
+    # features live outside the online decision authority.
     policy=os.environ.get('FK_GRAPH_REFRESH_POLICY','strict')
     if policy not in ('strict','bounded_previous'):
         raise ValueError('invalid graph refresh policy')

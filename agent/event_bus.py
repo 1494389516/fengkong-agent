@@ -1,8 +1,7 @@
-"""Durable local event-bus boundary with claim/lease/dead-letter semantics.
+"""SQL event bus with claims, fenced leases and independent consumer receipts.
 
-LocalEventBus remains a single-host adapter backed by SQLite. Consumers must claim
-work before processing; acknowledgements are fenced by lease token. Production can
-replace this adapter with Kafka/Pulsar without changing Collector or consumers.
+PostgreSQL claims use row locks; the SQLite compatibility adapter uses its writer
+transaction. Collector publication participates in the evidence transaction.
 """
 from .storage import postgres, begin_write, local_schema, table_names, order_column, json_text
 from dataclasses import dataclass

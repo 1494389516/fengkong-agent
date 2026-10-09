@@ -190,5 +190,79 @@ class PostgresContracts(unittest.TestCase):
             admin.execute(sql.SQL('DROP OWNED BY {}').format(sql.Identifier(role)))
             admin.execute(sql.SQL('DROP ROLE {}').format(sql.Identifier(role)));admin.close()
 
+    def test_signed_collector_evidence_and_bus_rollback_together(self):
+        import base64
+        from dataclasses import replace
+        from agent.collector import ingest
+        from agent.contracts.report_contract import legacy_mac, signature_input
+        from agent.storage import connect
+        now=time.time();payload=b'{"sg":[]}'
+        (self.root/'keys.json').write_text(json.dumps({'key':base64.b64encode(b'k'*32).decode()}))
+        (self.root/'identity').write_bytes(b'i'*32)
+        attrs=dict(subject='installation',generation='g',account_id='u',key_ids=['key'],
+                   session_sha256=hashlib.sha256(b'session').hexdigest())
+        ctx=replace(self.ctx,source_kind='sdk',permissions=('reports.write','cases.read'),attributes=attrs)
+        def upload(ident):
+            nonce='n'+ident;ts=int(now*1000)
+            prefix=f'{len(nonce)}:{nonce}|{ts}|{len(ident)}:{ident}|'.encode()
+            value=dict(kind='sdk_report',contract_version=1,app_id='a',sdk_version='6.5.0',
+                report_id=ident,ts=ts,nonce=nonce,session_token='session',sig_ver='v3',key_id='key',
+                device_id='installation',scene='login',field_mapping_version='',
+                payload_json=base64.b64encode(payload).decode(),
+                payload_sha256=base64.b64encode(hashlib.sha256(prefix+payload).digest()).decode())
+            value['signature']=legacy_mac(b'k'*32,signature_input(value));return value
+        with patch.dict(os.environ,{'FK_COLLECTOR_KEYS':str(self.root/'keys.json'),'FK_IDENTITY_KEY_FILE':str(self.root/'identity')}):
+            with patch('agent.event_bus.LocalEventBus.publish',side_effect=RuntimeError('bus failure')):
+                with self.assertRaises(RuntimeError):ingest(upload('failed'),ctx,now=now)
+            value=upload('accepted');receipt=ingest(value,ctx,now=now)
+            self.assertTrue(ingest(value,ctx,now=now)['idempotent_replay'])
+        with closing(connect('online')) as db:
+            for table in ('evidence','report_receipts','integration_events'):
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT raw_payload FROM evidence WHERE evidence_id=?',(receipt['evidence_id'],)).fetchone()[0],payload)
+
+    def test_full_investigation_and_independent_review(self):
+        from dataclasses import replace
+        from agent.tools.online_store import connect
+        from agent.investigations import consume_decision_outbox, run_task, _db
+        from agent.case_review import review
+        from agent.evidence_snapshot import digest
+        with closing(connect()) as db:
+            db.execute('INSERT INTO outbox(decision_id,body) VALUES(?,?)',('case',json.dumps(self.record('case','review'))));db.commit()
+        consume_decision_outbox()
+        with closing(_db()) as db:task=db.execute('SELECT task_id FROM investigation_tasks').fetchone()[0]
+        class FixtureAgent:
+            def ask(self,prompt,scope=None):
+                return json.dumps(dict(verdict='evidence_gap',claims=[],missing_evidence=['fixture only'],recommended_next_step='human review'))
+        ctx=replace(self.ctx,attributes={'tools':['get_event_evidence']})
+        result=run_task(task,ctx,agent_factory=FixtureAgent)
+        self.assertEqual(result['status'],'success')
+        self.assertEqual(run_task(task,ctx,agent_factory=FixtureAgent),result)
+        request=dict(task_id=task,result_digest=digest(result),verdict='insufficient',note='synthetic fixture',matures_at=time.time(),request_id='one')
+        with self.assertRaises(PermissionError):review(ctx,request)
+        reviewer=replace(ctx,principal='independent-reviewer')
+        self.assertEqual(review(reviewer,request),review(reviewer,request))
+
+    def test_sql_timeout_keeps_outer_transaction_usable(self):
+        from agent.storage import connect, begin_write
+        from agent.compute_budget import feature_budget,sql_budget,ComputeBudgetExceeded
+        from agent.compute_admission import DEFAULT_CONTRACT
+        with closing(connect('online')) as db:
+            begin_write(db)
+            with self.assertRaises(ComputeBudgetExceeded):
+                with feature_budget(dict(DEFAULT_CONTRACT,deadline_ms=1)),sql_budget(db):
+                    db.execute('SELECT pg_sleep(0.05)')
+            db.execute('INSERT INTO outbox(decision_id,body) VALUES(?,?)',('fallback',json.dumps(self.record('fallback'))));db.commit()
+        with closing(connect('online')) as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM outbox').fetchone()[0],1)
+
+    def test_readonly_knowledge_index(self):
+        from agent.storage import connect
+        from agent.rag.store import index_metadata, read_index
+        with closing(connect('knowledge')) as db:
+            db.execute('INSERT INTO metadata VALUES(?,?)',('index_digest','fixture'))
+            db.execute('INSERT INTO chunks VALUES(?,?)',('chunk',json.dumps({'chunk_id':'chunk','text':'fixture'})));db.commit()
+        self.assertEqual(index_metadata()['index_digest'],'fixture')
+        self.assertEqual(read_index()[1][0]['chunk_id'],'chunk')
+
 
 if __name__=='__main__':unittest.main()

@@ -9,16 +9,56 @@ x-common: &common
   security_opt: [no-new-privileges:true]
   tmpfs: [/tmp]
 services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fengkong
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/admin-password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./secrets/postgres-admin-password:/run/secrets/admin-password:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres -d fengkong"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  storage-migrate:
+    <<: *common
+    profiles: [maintenance]
+    command: [python, -m, agent.storage.migrate, --grant, collector=fk_collector, --grant, runtime=fk_runtime, --grant, projector=fk_projector, --grant, agent=fk_agent, --grant, reviewer=fk_reviewer, --grant, graph=fk_graph]
+    environment:
+      FK_ENV: production
+      FK_STORAGE_BACKEND: postgres
+      FK_DATABASE_URL_FILE: /run/secrets/database-url
+      FK_AUTH_CONFIG: /config/collector-auth.json
+      FK_DATA_DIR: /tenant
+      FK_AGENT_STATE_ROOT: /agent-state
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./secrets/admin-database-url:/run/secrets/database-url:ro
+      - ./config/collector-auth.json:/config/collector-auth.json:ro
+      - ./state/tenant:/tenant:ro
+      - ./state/agent-state:/agent-state:ro
   collector:
     <<: *common
     command: [python, serve.py, --host, "0.0.0.0", --port, "8081"]
     ports: ["127.0.0.1:8081:8081"]
     environment:
+      FK_STORAGE_BACKEND: postgres
+      FK_DATABASE_URL_FILE: /run/secrets/database-url
       FK_ENV: production
       FK_AUTH_CONFIG: /config/collector-auth.json
       FK_COLLECTOR_KEYS: /keys/collector-keys.json
       FK_IDENTITY_KEY_FILE: /keys/identity.key
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
+      - ./secrets/collector-database-url:/run/secrets/database-url:ro
       - ./state/tenant:/tenant
       - ./state/collector-out:/app/out
       - ./config/collector-auth.json:/config/collector-auth.json:ro
@@ -29,11 +69,18 @@ services:
     <<: *common
     command: [python, -m, agent.graph_worker, --interval, "1", --limit, "100"]
     environment:
+      FK_STORAGE_BACKEND: postgres
+      FK_GRAPH_REFRESH_POLICY: ${FK_GRAPH_REFRESH_POLICY:-strict}
+      FK_DATABASE_URL_FILE: /run/secrets/database-url
       FK_ENV: production
       FK_AUTH_CONFIG: /config/collector-auth.json
       FK_DATA_DIR: /tenant
       FK_GRAPH_ALGORITHM: community_v1
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
+      - ./secrets/graph-database-url:/run/secrets/database-url:ro
       - ./state/tenant:/tenant
       - ./config/collector-auth.json:/config/collector-auth.json:ro
 
@@ -42,13 +89,20 @@ services:
     command: [python, serve.py, --host, "0.0.0.0", --port, "8080"]
     ports: ["127.0.0.1:8080:8080"]
     environment:
+      FK_STORAGE_BACKEND: postgres
+      FK_GRAPH_REFRESH_POLICY: ${FK_GRAPH_REFRESH_POLICY:-strict}
+      FK_DATABASE_URL_FILE: /run/secrets/database-url
       FK_ENV: production
       FK_AUTH_CONFIG: /config/runtime-auth.json
       FK_AGENT_STATE_ROOT: /agent-state
       FK_RUNTIME_BUNDLE_DIR: /release
       FK_RUNTIME_PUBLIC_KEY: /config/publisher.pub
       FK_RUNTIME_CACHE_DIR: /app/out/runtime-cache
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
+      - ./secrets/runtime-database-url:/run/secrets/database-url:ro
       - ./state/tenant:/tenant
       - ./state/runtime-out:/app/out
       - ./state/agent-state:/agent-state:ro
@@ -59,12 +113,18 @@ services:
     <<: *common
     command: [python, -m, agent.case_worker, --interval, "1", --limit, "100"]
     environment:
+      FK_STORAGE_BACKEND: postgres
+      FK_DATABASE_URL_FILE: /run/secrets/database-url
       FK_ENV: production
       FK_AUTH_CONFIG: /config/projector-auth.json
       FK_PROJECTOR_TOKEN: ${FK_PROJECTOR_TOKEN:-}
       FK_AGENT_STATE_ROOT: /agent-state
       FK_AGENT_AUDIT_ROOT: /agent-audit
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
+      - ./secrets/projector-database-url:/run/secrets/database-url:ro
       - ./state/tenant:/tenant:ro
       - ./state/agent-state:/agent-state
       - ./state/agent-audit:/agent-audit
@@ -76,6 +136,8 @@ services:
     stdin_open: true
     tty: true
     environment:
+      FK_STORAGE_BACKEND: postgres
+      FK_DATABASE_URL_FILE: /run/secrets/database-url
       FK_ENV: production
       FK_AUTH_CONFIG: /config/agent-auth.json
       FK_AGENT_STATE_ROOT: /agent-state
@@ -84,7 +146,11 @@ services:
       FK_RUNTIME_BUNDLE_DIR: /release
       FK_RUNTIME_PUBLIC_KEY: /config/publisher.pub
       FK_RUNTIME_CACHE_DIR: /app/out/runtime-cache
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
+      - ./secrets/agent-database-url:/run/secrets/database-url:ro
       - ./state/tenant:/tenant:ro
       - ./state/agent-out:/app/out
       - ./state/agent-state:/agent-state
@@ -98,11 +164,17 @@ services:
     command: [python, -m, agent.review_service, --host, "0.0.0.0", --port, "8090"]
     ports: ["127.0.0.1:8090:8090"]
     environment:
+      FK_STORAGE_BACKEND: postgres
+      FK_DATABASE_URL_FILE: /run/secrets/database-url
       FK_ENV: production
       FK_AUTH_CONFIG: /config/reviewer-auth.json
       FK_AGENT_STATE_ROOT: /agent-state
       FK_AGENT_AUDIT_ROOT: /agent-audit
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
+      - ./secrets/reviewer-database-url:/run/secrets/database-url:ro
       - ./state/tenant:/tenant:ro
       - ./state/agent-state:/agent-state
       - ./state/agent-audit:/agent-audit
@@ -126,3 +198,6 @@ services:
       - ./state/journal:/journal:ro
       - ./state/bundles:/release
       - ./secrets/publisher.pem:/keys/publisher.pem:ro
+
+volumes:
+  postgres-data:

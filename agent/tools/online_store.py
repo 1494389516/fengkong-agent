@@ -1,8 +1,7 @@
-"""Single-host transactional decision/event/outbox store.
+"""Transactional decision/event/outbox authority; JSONL is a derived export.
 
-SQLite is the authority; JSONL exports are recoverable projections. A writer
-transaction fixes the visible event prefix and commits the decision with it.
-This deliberately serializes local writers; it is not a distributed backend.
+PostgreSQL and the local SQLite adapter preserve the same atomic business
+boundary. Read/check/write decision transactions serialize within a namespace.
 """
 from ..storage import postgres, begin_write, local_schema, table_names, order_column, json_text
 import hashlib

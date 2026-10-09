@@ -1,8 +1,6 @@
-"""Graph persistence boundary.
+"""Graph persistence, separated from online decisions by schema or SQLite file.
 
-The default backend is a dedicated SQLite database, deliberately separate from
-the online decision/event authority. A production graph database can replace this
-adapter without changing graph algorithms or Decision enrichment.
+The legacy class name remains compatible; the configured backend owns connections.
 """
 from .storage import postgres, begin_write, local_schema, table_names, order_column, json_text
 import sqlite3

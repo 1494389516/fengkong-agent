@@ -1,4 +1,4 @@
-"""SQLite run/step ledger. Every worker write checks the live fencing token.
+"""Transactional run/step ledger. Every worker write checks the live fencing token.
 
 Only committed JSON results replay. An unfinished external request is ambiguous:
 no provider-level exactly-once guarantee is claimed or silently retried.

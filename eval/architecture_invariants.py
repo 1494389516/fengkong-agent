@@ -19,9 +19,10 @@ require("agent/event_bus.py",
         "integration_events",
         "connection=None")
 require("agent/tools/online_store.py",
-        "BEGIN IMMEDIATE",
+        "begin_write(db)",
         "INSERT INTO outbox",
         "tenant, app, event_id")
+require("agent/storage/__init__.py", "BEGIN IMMEDIATE", "pg_advisory_xact_lock", "write transaction already active")
 require("agent/runtime_bundle.py",
         "runtime bundle tenant/app scope mismatch",
         "SignedBundleReader")
