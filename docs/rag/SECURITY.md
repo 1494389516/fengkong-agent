@@ -12,11 +12,11 @@ from "the file was admitted for retrieval".
 1. Review the knowledge change and provenance.
 2. Recompute the changed file's Git blob SHA.
 3. Update the admission manifest in the same reviewed change.
-4. Run `python -m eval.rag_poisoning_regressions` and the RAG scorecard.
-5. Rebuild the dataset-local index.
+4. Rebuild the dataset-local index; admission validation must succeed.
 
-The benchmark covers injected files and tampering with an already-admitted file.
-It does **not** claim protection if an attacker can also approve/update the
+The historical benchmark covered injected files and tampering with an already-admitted
+file; its harness was removed on 2026-10-09. The admission boundary does **not**
+claim protection if an attacker can also approve/update the
 manifest or compromise the repository review process. That remains a control-plane
 and supply-chain boundary.
 

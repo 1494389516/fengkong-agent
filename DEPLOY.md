@@ -18,8 +18,6 @@
 | `data/model_scores.json` + R007 | 模型服务(配 `FK_ENGINE_MODEL_URL` 即切到远程打分;本地文件只是骨架模拟。champion 模型分过 model_score_*_threshold 才拦截,阈值在 policy 版本表,生效走审批) |
 | `feature_parity_check` + `FK_FEATURE_ONLINE_MODULE` | 在线特征服务客户端(签名与 featurelib.account_features 一致);接真实数仓后注入在线实现,建模/回测前跑 parity,检出 training-serving skew |
 | `actions` pending + CLI 审批 | 审批系统 / 飞书卡片(SSO 身份入审计库) |
-| `eval/` 离线断言 | CI 门禁(每次改动必跑) |
-| `eval` agent 层案例 | 上线回归集(改 prompt / 加工具必跑) |
 | `data/gen_sample.py` | 压测与攻防演练数据 |
 
 ## 四步走
@@ -31,7 +29,7 @@
 - `scan_all` / `rule_backtest` 等全量计算改为"触发离线任务 + 查询结果"的
   异步形态(Spark / 调度平台),不再是同步工具调用。
 - 第一周即可做:从数仓脱敏导出一天真实事件,按现有 schema 灌入 `data/`,
-  全套工具与 eval 直接跑 —— 立刻暴露真实数据的口径问题。
+  使用数据体检、回测和对账工具检查真实数据的口径。
 
 ### 第二步:判定面(对账从演练变实战)
 - `consistency_check` 接真实决策日志,上线第一周起每日跑;不一致率降到
@@ -64,16 +62,15 @@
 - **影子期(2~4 周)**:agent 只对已人工处理完的案件出结论,与人工结论
   对账(reconcile 思路套在 agent 自身);达标线示例:结论一致率 >= 90%,
   严重分歧(agent pass / 人 reject)逐案复盘。
-- **辅助期**:值班分析师实际使用,人保留全部决策;agent 层 eval 四维断言
-  (结论 / 轨迹效率 / token 预算 / 缓存命中)作为回归门禁。
+- **辅助期**:值班分析师实际使用,人保留全部决策;记录结论、轨迹效率、
+  token 预算和缓存命中等指标,由部署方建立验收基线。
 - **半自动期(远期)**:低风险动作(灰名单提案、日报)自动执行,
   reject 类永远留人工闸门。
-- **成本**:`eval/measure_costs.py` 预算进 CI;线上会话有 ⑥ 上下文硬预算
-  兜底;再接账单告警即闭环。
+- **成本**:线上会话保留上下文硬预算,部署方接入账单告警。
 
 ## 第一周清单
 
-1. 脱敏导出一天真实事件灌入 `data/`,跑 `python3 eval/run_eval.py`;
-2. 配 `DEEPSEEK_API_KEY`(或私有化端点)跑 agent 层 8 案例,拿四维基线;
+1. 脱敏导出一天真实事件灌入 `data/`,执行数据体检、回测和决策对账;
+2. 配 `DEEPSEEK_API_KEY`(或私有化端点),由分析师使用已复核案件建立验收基线;
 3. CLI 包成飞书机器人只读版,进风控值班群试用;
 4. 确认默认脱敏的结构化字段和 `privacy._PATTERNS` 覆盖公司 ID 规范。

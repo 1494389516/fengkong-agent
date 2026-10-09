@@ -101,5 +101,5 @@ deliberate reverse migration; pointing back at stale SQLite files loses new work
 
 For an offline knowledge publisher, additionally grant
 `--grant knowledge=fk_knowledge` and use that credential only for index ingestion.
-DBOS is evaluated separately under `experiments/dbos`; it is not a runtime
+The historical DBOS evaluation is documented under `experiments/dbos`; it is not a runtime
 dependency or a replacement for business budgets, evidence or approval policy.

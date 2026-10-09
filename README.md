@@ -19,7 +19,7 @@
 - 模型、策略、特征和标签版本管理；
 - 决策血缘、生产日志对账和事故跟踪；
 - 写操作两阶段审批和全程审计；
-- 离线回归测试、Agent 黄金案例和成本预算。
+- Agent 上下文管理和成本预算。
 
 ## 快速开始
 
@@ -47,23 +47,11 @@ python3 main.py
 exit                    退出
 ```
 
-运行离线评估：
-
-```bash
-python3 eval/run_eval.py
-```
-
 生成较大规模的合成数据并运行：
 
 ```bash
 python3 data/gen_sample.py
 FK_DATASET=gen python3 main.py
-```
-
-执行接数检查、回测、对账和门禁：
-
-```bash
-python3 eval/day1.py
 ```
 
 启动决策服务：
@@ -202,7 +190,6 @@ agent/
     feedback.py       申诉与反馈处理
     capability.py     工具权限控制
 data/                 样本数据和数据生成器
-eval/                 离线评估与黄金案例
 serve.py              在线决策服务
 DEPLOY.md              部署与生产接入说明
 ```
@@ -221,35 +208,19 @@ DEPLOY.md              部署与生产接入说明
 
 规则阈值通过策略版本解析，不直接写死在业务流程中。名单和阈值变更需要先生成提案，再由人工审批。
 
-## 数据与评估
+## 数据与预算
 
 `data/` 中的手工样本包含正常账号、刷券脚本、套现团伙和盗号等案例。`data/gen_sample.py` 可生成约 250 个账号的可复现数据集，用于回测和压力测试。
 
-离线评估不调用 LLM，覆盖规则、特征、漂移监控、审批流程、版本管理、对账、安全边界和成本预算。需要 API Key 时，还可以运行 Agent 黄金案例，检查分析结论、取证路径、工具调用效率和 token 消耗。
+测试脚本、黄金案例、恢复探针及对应测试 CI 已于 2026-10-09 移除，CI 仅保留 Python 语法编译检查。历史文档中的测试命令与结果对应当时提交，不代表当前分支仍提供这些入口；原文件可从 Git 历史恢复。运行时的鉴权、预算、审批和模型发布校验继续生效。
 
-Agent 的 token 预算按 `reset()` 划分案例：默认每案例累计 60,000 token，单次模型输出最多 2,048 token；消息历史另有 24,000 token 的估算上限。每次请求前会按输入估算值预留额度，返回后按模型报告的实际用量计费；模型未报告用量时，按估算输入加预留输出扣费。输入估算不能保证与供应商分词完全一致，因此单次响应实际超额时会记录违规并拒绝该响应，但已经发生的 API 消耗无法撤销。黄金案例采用 `eval/cases.json` 中各自的 `max_total_tokens` 作为运行时上限；运行日志按案例 ID 聚合多轮对话和摘要请求。
-
-<!-- AUTO-SYNC:FK-DOC-SNAPSHOT-START -->
-## 系统快照(自动生成,勿手改;`python3 eval/run_eval.py --report` 刷新)
-
-| 项 | 值 |
-|---|---|
-| git commit | `dfc2dde` |
-| 工具数 | 86 |
-| 工具 schema | 39384 chars |
-| system prompt | 5636 chars |
-| 数据指纹 | `028ccc9fef784b6b` |
-| 离线断言数 | 490 |
-| agent 黄金案例 | 24 |
-| 最近刷新(UTC) | 2026-08-20T10:10:27Z |
-
-<!-- AUTO-SYNC:FK-DOC-SNAPSHOT-END -->
+Agent 的 token 预算按 `reset()` 划分案例：默认每案例累计 60,000 token，单次模型输出最多 2,048 token；消息历史另有 24,000 token 的估算上限。每次请求前会按输入估算值预留额度，返回后按模型报告的实际用量计费；模型未报告用量时，按估算输入加预留输出扣费。输入估算不能保证与供应商分词完全一致，因此单次响应实际超额时会记录违规并拒绝该响应，但已经发生的 API 消耗无法撤销。运行日志记录案例 ID，可关联多轮对话和摘要请求。
 
 ## 环境变量
 
 | 变量 | 作用 |
 |---|---|
-| `DEEPSEEK_API_KEY` | 调用 DeepSeek；离线评估不需要 |
+| `DEEPSEEK_API_KEY` | 调用 DeepSeek |
 | `FK_DATASET=gen` | 使用生成数据集 |
 | `FK_DATA_DIR=/path` | 指定数据目录，优先级高于 `FK_DATASET` |
 | `FK_PRIVACY=0` | 显式关闭敏感标识符脱敏（默认开启） |
@@ -297,8 +268,7 @@ Collector 接受 SDK evidence 后，会在与 evidence/receipt 相同的 SQLite 
 adapter；Agent/图计算等异步消费者应消费该边界，而不是进入 SDK 请求路径。
 生产横向扩展时替换为 Kafka/Pulsar adapter，HTTP/Collector 与 Agent 接口无需改变。
 
-`python eval/architecture_invariants.py` 是不可删除的最小架构门禁，保护 Collector
-鉴权、事务事件、在线幂等、signed runtime bundle 与 Control Plane 职责隔离。
+Collector 鉴权、事务事件、在线幂等、signed runtime bundle 与 Control Plane 职责隔离由运行时代码实现。
 
 ## Graph / Feature 算法层
 
@@ -331,12 +301,7 @@ Agent 工具调用在既有 capability/scope 门禁之外，再经过 prompt 外
 但尾部截断/整链替换仍需要把 head hash 外锚到 WORM/SIEM。
 
 长调查任务使用 JSON-only durable checkpoint；恢复时同时校验当前 immutable snapshot，
-不反序列化 pickle/可执行对象。最小门禁：
-
-```bash
-python -m eval.governance_invariants
-python -m eval.risk_agent_bench
-```
+不反序列化 pickle/可执行对象。
 
 ## 当前限制
 
