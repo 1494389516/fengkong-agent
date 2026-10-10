@@ -1,5 +1,6 @@
 """Structural grounding checks, not semantic entailment or verdict validation."""
 import json
+import math
 import re
 
 
@@ -19,6 +20,43 @@ ROLES = frozenset(('finding', 'counterevidence', 'limitation'))
 CONFIDENCE = frozenset(('low', 'medium', 'high'))
 
 
+ASSERTION_INSTRUCTIONS = (
+    "For directly observed scalar facts, add an assertion object to the claim with exactly "
+    "subject_ref, evidence_ref, field, predicate, value, unit, time_window. "
+    "subject_ref is the authorized entity token; evidence_ref must be one of that claim's event_evidence. "
+    "Use a dotted field path from the cited event or SDK signal, predicate equals or not_equals, "
+    "and the observed scalar's exact JSON type. unit is seconds for ts/recorded_at/received_at, "
+    "otherwise an empty string. time_window is [start,end], start <= event ts < end <= snapshot as_of. "
+    "Do not invent a window, observation or assertion when the supplied evidence cannot support it; "
+    "omit assertion and state the limitation. An assertion verifies only its typed fact, not the prose or verdict. "
+)
+
+
+def valid_assertion(value):
+    fields = {'subject_ref', 'evidence_ref', 'field', 'predicate', 'value', 'unit', 'time_window'}
+    if not isinstance(value, dict) or set(value) != fields:
+        return False
+    for key in ('subject_ref', 'evidence_ref', 'field', 'predicate', 'unit'):
+        item = value[key]
+        if not isinstance(item, str) or len(item) > 300 or (key != 'unit' and not item.strip()):
+            return False
+    if len(value['field']) > 200 or value['predicate'] not in ('equals', 'not_equals'):
+        return False
+    scalar = value['value']
+    if type(scalar) not in (str, bool, int, float):
+        return False
+    if isinstance(scalar, float) and not math.isfinite(scalar):
+        return False
+    window = value['time_window']
+    return (isinstance(window, list) and len(window) == 2
+            and all(type(x) in (int, float) and (type(x) is int or math.isfinite(x)) for x in window)
+            and window[0] < window[1])
+
+
+def _reject_constant(value):
+    raise ValueError('non-finite JSON constant: ' + value)
+
+
 def parse_investigation_report(value):
     if not isinstance(value, str) or not value.strip() or len(value) > 50000:
         return None, ['report must be a bounded JSON object']
@@ -27,14 +65,14 @@ def parse_investigation_report(value):
         lines = text.splitlines()
         text = '\n'.join(lines[1:-1]).strip()
     try:
-        report = json.loads(text)
-    except (TypeError, ValueError):
+        report = json.loads(text, parse_constant=_reject_constant)
+    except (TypeError, ValueError, RecursionError):
         return None, ['report is not valid JSON']
     errors = []
     required = {'verdict', 'claims', 'missing_evidence', 'recommended_next_step'}
     if not isinstance(report, dict) or set(report) != required:
         return None, ['report fields must be exactly ' + ','.join(sorted(required))]
-    if report.get('verdict') not in VERDICTS:
+    if not isinstance(report.get('verdict'), str) or report['verdict'] not in VERDICTS:
         errors.append('invalid verdict')
     if (not isinstance(report.get('claims'), list) or len(report['claims']) > 20):
         errors.append('claims must be a list of at most 20 items')
@@ -55,10 +93,12 @@ def parse_investigation_report(value):
         if (not isinstance(claim['statement'], str) or not claim['statement'].strip()
                 or len(claim['statement']) > 2000):
             errors.append('claim %d has invalid statement' % index)
-        if claim['role'] not in ROLES:
+        if not isinstance(claim['role'], str) or claim['role'] not in ROLES:
             errors.append('claim %d has invalid role' % index)
-        if claim['confidence'] not in CONFIDENCE:
+        if not isinstance(claim['confidence'], str) or claim['confidence'] not in CONFIDENCE:
             errors.append('claim %d has invalid confidence' % index)
+        if 'assertion' in claim and not valid_assertion(claim['assertion']):
+            errors.append('claim %d has invalid assertion' % index)
         for name in ('event_evidence', 'knowledge_citations'):
             values = claim[name]
             if (not isinstance(values, list) or len(values) > 20

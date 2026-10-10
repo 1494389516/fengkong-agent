@@ -24,17 +24,25 @@ def load_investigation_memory(db, snapshot, limit=3):
         "SELECT c.case_id,t.snapshot,t.result FROM cases c "
         "JOIN investigation_tasks t ON t.case_id=c.case_id "
         "WHERE c.tenant=? AND c.app=? AND c.entity=? AND c.case_id<>? "
-        "AND t.status='success' ORDER BY c.bucket DESC, " + order_column(db,"c") + " DESC LIMIT ?",
+        "AND t.status='success' ORDER BY c.bucket DESC, " + order_column(db,"c") + " DESC, " + order_column(db,"t") + " DESC LIMIT ?",
         (snapshot["tenant_id"], snapshot["app_id"], snapshot["entity_ref"],
          snapshot["case_id"], limit * 4),
     ).fetchall()
 
+    from .case_review import _review_state, eligible_label
+
     memory = []
+    seen_revisions = set()
     for case_id, old_snapshot_raw, result_raw in rows:
         try:
             old_snapshot = json.loads(old_snapshot_raw)
             result = json.loads(result_raw)
         except Exception:
+            continue
+        if not isinstance(old_snapshot, dict) or not isinstance(result, dict):
+            continue
+        revision_key = (case_id, old_snapshot.get('revision', 1))
+        if revision_key in seen_revisions:
             continue
         old_as_of = _finite_number(old_snapshot.get("as_of"))
         if old_as_of is None or old_as_of >= snapshot["as_of"]:
@@ -60,6 +68,19 @@ def load_investigation_memory(db, snapshot, limit=3):
             "unsupported_claim_count": len(claim_audit.get("unsupported_claim_indexes", []))
                 if isinstance(claim_audit.get("unsupported_claim_indexes", []), list) else 0,
         }
+        # Review text never enters memory. Resolve only the revision's review set
+        # visible at the new snapshot cutoff; immature/disputed labels stay unknown.
+        review_state = _review_state(db, dict(old_snapshot, case_id=case_id), as_of=snapshot['as_of'])
+        label = review_state['effective_label']
+        entry['review_status'] = ('disputed' if review_state['disputed'] else
+                                  'pending' if label else 'unreviewed')
+        if label is not None and label.get('verdict') == 'insufficient':
+            entry['review_status'] = 'insufficient'
+        if label is not None and eligible_label(label, snapshot['as_of']):
+            entry.update(human_verdict=label['verdict'], human_confirmed=True,
+                         label_source=label['label_source'], review_status='confirmed',
+                         reviewed_at=label['reviewed_at'], matures_at=label['matures_at'])
+        seen_revisions.add(revision_key)
         score = _finite_number(decision.get("risk_score"))
         if score is not None:
             entry["risk_score"] = score
