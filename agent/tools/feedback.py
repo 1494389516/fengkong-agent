@@ -27,7 +27,7 @@ VALID_DECISIONS = ("accept", "reject")  # accept=误伤成立解除处置, rejec
 
 def _recent_postmortems(limit: int = 3) -> List[Dict]:
     """最近的复盘记录(轻量读侧):处理新申诉前先看同类规则有没有误伤前科。
-    转成 eval 误伤守卫用例用 eval/postmortem_to_cases.py。"""
+    复盘记录供分析师复核误伤原因与标签质量。"""
     p = postmortems_path()
     if not p.exists():
         return []

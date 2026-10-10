@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""label_conflicts 代理:复用 label_quality 的冲突口径,供 feedback_pipeline
-与 readiness 聚合(避免直接依赖 eval/ 目录)。"""
+"""label_conflicts:汇总规则判定与已有标签的冲突,
+供 feedback_pipeline 与 readiness 聚合。"""
 from typing import List
 
 

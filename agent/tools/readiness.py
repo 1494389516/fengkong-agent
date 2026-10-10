@@ -166,7 +166,7 @@ def _readiness() -> Dict:
     schema_chars = len(_json.dumps(_schemas(), ensure_ascii=False))
     system_chars = len((ROOT / "agent" / "prompts" / "system.md")
                        .read_text(encoding="utf-8"))
-    # 与 eval/measure_costs.SCHEMA_BUDGET 对齐;agent 不反向依赖 eval
+    # 运行时结构预算:工具 schema 与 system prompt 的字符数上限。
     schema_budget, system_budget = 40500, 5700
     budget_ok = schema_chars <= schema_budget and system_chars <= system_budget
     add("budget_status", "ok" if budget_ok else "fail",

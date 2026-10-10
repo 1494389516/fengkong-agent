@@ -103,8 +103,8 @@ class Agent:
         self._privacy = privacy_enabled()
         self._tok = Tokenizer() if self._privacy else None
         # 运行日志(可选):FK_AGENT_RUN_LOG=1 时每次 ask 落一行
-        # out/agent_runs.jsonl,供 eval/agent_metrics.py 聚合 agent 本体的
-        # 运行指标(成本/缓存命中率/工具轮数/兜底触发)——监控体系的空白面。
+        # out/agent_runs.jsonl,记录 agent 本体的运行指标
+        # (成本/缓存命中率/工具轮数/兜底触发),供外部监控聚合。
         # 日志在本地落盘,失败不影响对话;问题原文会含 uid 等标识符,与
         # audit.jsonl 同级机密,接生产按同等权限管控。
         self._run_log_enabled = os.environ.get("FK_AGENT_RUN_LOG") == "1"
