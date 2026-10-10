@@ -1,18 +1,18 @@
 """Deterministic event assertions. Natural-language claims remain unverified."""
 import math
 from .evidence_snapshot import digest
+from .rag.reporting import valid_assertion
 
 
 def verify_assertion(assertion, snapshot):
-    required={'subject_ref','evidence_ref','field','predicate','value','unit','time_window'}
-    if not isinstance(assertion,dict) or set(assertion)!=required:
+    if not valid_assertion(assertion):
         return {'status':'unverified','reason':'typed_assertion_required'}
     event=snapshot['decision']['event']
     if assertion['subject_ref']!=snapshot['entity_ref']:
         return {'status':'contradicted','reason':'subject_mismatch'}
     window=assertion['time_window']
     if (not isinstance(window,list) or len(window)!=2 or
-        any(type(x) not in (int,float) or not math.isfinite(x) for x in window) or
+        any(type(x) not in (int,float) or (type(x) is float and not math.isfinite(x)) for x in window) or
         not window[0]<=event['ts']<window[1] or window[1]>snapshot['as_of']):
         return {'status':'contradicted','reason':'time_window_mismatch'}
     reference=assertion['evidence_ref']; source=None
@@ -45,8 +45,8 @@ def audit_event_claims(report,snapshot):
     for index,claim in enumerate((report or {}).get('claims',[])):
         if claim.get('event_evidence'):
             result=verify_assertion(claim.get('assertion'),snapshot)
-            assertion=claim.get('assertion') or {}
-            if assertion.get('evidence_ref') not in claim['event_evidence']:
+            assertion=claim.get('assertion')
+            if valid_assertion(assertion) and assertion['evidence_ref'] not in claim['event_evidence']:
                 result={'status':'unverified','reason':'assertion_reference_not_cited'}
         else:
             result={'status':'not_applicable','reason':'no_event_assertion'}

@@ -7,19 +7,15 @@ ROLE_TOOLS={
     'business_facts':frozenset({'feature_stats','rule_eval'}),
     'counterevidence':frozenset({'search_risk_knowledge'}),
 }
-VERSION='investigation-plan-v1'
+VERSION='investigation-plan-v2'
 
 
 def template(snapshot, granted):
     event=snapshot['decision']['event']
     nodes=[dict(id='evidence',role='device_evidence',tool='get_event_evidence',
                 args={'event_id':snapshot['decision'].get('business_event_id') or event['event_id']},depends=[])]
-    if 'graph_relations' in granted:
-        nodes.append(dict(id='graph',role='graph_behavior',tool='graph_relations',
-                          args={'uid':snapshot['entity_ref']},depends=['evidence']))
-    if 'feature_stats' in granted:
-        nodes.append(dict(id='business',role='business_facts',tool='feature_stats',
-                          args={'uid':snapshot['entity_ref']},depends=['evidence']))
+    # Only the prerequisite evidence is eager. Graph/business reads are selected
+    # by the investigator when needed, under the same scope and resource budget.
     # Counterevidence queries need a concrete phenomenon, so they remain a bounded
     # generator branch enforced by the existing retrieval contract (max 3).
     return {'version':VERSION,'nodes':nodes,'counterevidence':'bounded_retrieval_branch'}
@@ -54,7 +50,7 @@ def execute(plan,snapshot,granted,ledger,state):
     outputs={}
     for node in validate(plan,snapshot,granted):
         key='plan:'+node['id']
-        cached=ledger.begin(key,'read_tool',node)
+        cached=ledger.begin(key,'read_tool',dict(node,plan_version=plan['version']))
         if cached is None:
             output=dispatch(node['tool'],node['args'])
             cached={'output':output,'state':{k:v for k,v in state.items() if k!='snapshot'},

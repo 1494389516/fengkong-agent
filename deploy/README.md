@@ -279,3 +279,17 @@ argument or its evidence. Dispatch checks the final constrained arguments again.
 The ordinary Agent/HTTP investigation path does not auto-mint these grants.
 Charts use an Agent-state lock and atomic, hashed-name PNG writes, without
 acquiring a write lock on the authoritative evidence volume.
+
+### Investigation plan v2 rollout
+
+The server preloads only bound event evidence, projects it through the existing
+privacy contract, and supplies it to the investigator. Graph and business reads
+are selected on demand. Completed tasks still replay their stored result.
+A partially executed v1 plan cannot resume as v2: its ledger input/version check
+rejects the change. Explicitly create a new inference run using
+`python -m agent.investigation_worker --new-run-case CASE_ID --revision REVISION`,
+then execute its returned task ID. This is a new inference, not replay.
+
+Historical memory distinguishes model suggestions from human review/arbitration.
+Only mature, uncontested labels visible at the snapshot cutoff are confirmed;
+review notes are not sent to the model. No historical label authorizes an action.
